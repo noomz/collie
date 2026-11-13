@@ -4147,7 +4147,7 @@ export class SendProtocol {
         collapse: state.match?.profile.collapse.pattern ?? null,
         at: this.now(),
         steer: receipt.outcome === "steered",
-        door: state.via !== SCREEN,
+        door: state.via === SCREEN ? undefined : state.via,
       });
     }
     this.count(state, receipt, end.extra.surface);

@@ -12,7 +12,7 @@ function prompt(uuid: string, text: string, at: number): TranscriptEntry {
 }
 
 function door(requestId: string, text: string, at = AT): ReceiptQueued {
-  return { requestId, text, at, state: "queued", door: true };
+  return { requestId, text, at, state: "queued", door: "pi" };
 }
 
 function screen(requestId: string, text: string, at = AT): ReceiptQueued {
@@ -28,7 +28,7 @@ describe("the journal's proof of a door's send", () => {
   test("a next prompt that holds the text without equalling it is merged or changed, and the card stays", () => {
     const got = receiptQueue([door("req-door-0002", "fix the tests")], [prompt("u1", "fix the tests and the lint", AT + 500)], false, []);
     expect(got.proofs).toEqual([{ requestId: "req-door-0002", how: "merged" }]);
-    expect(got.cards).toEqual([{ requestId: "req-door-0002", state: "merged", text: "fix the tests" }]);
+    expect(got.cards).toEqual([{ requestId: "req-door-0002", state: "merged", text: "fix the tests", via: "pi" }]);
   });
 
   test("two door sends folded into one turn are both merged: the containing prompt is not claimed", () => {
@@ -67,12 +67,12 @@ describe("the journal's proof of a door's send", () => {
   test("one prompt lands one send: two equal door sends and one prompt leave one card", () => {
     const got = receiptQueue([door("req-door-0008", "yes", AT), door("req-door-0009", "yes", AT + 100)], [prompt("u1", "yes", AT + 300)], false, []);
     expect(got.proofs).toEqual([{ requestId: "req-door-0008", how: "landed" }]);
-    expect(got.cards).toEqual([{ requestId: "req-door-0009", state: "queued", text: "yes" }]);
+    expect(got.cards).toEqual([{ requestId: "req-door-0009", state: "queued", text: "yes", via: "pi" }]);
   });
 
   test("a send already marked merged stays a merged card and is not proved again", () => {
     const got = receiptQueue([{ ...door("req-door-0010", "fix the tests"), merged: true }], [], false, []);
-    expect(got).toEqual({ cards: [{ requestId: "req-door-0010", state: "merged", text: "fix the tests" }], proofs: [] });
+    expect(got).toEqual({ cards: [{ requestId: "req-door-0010", state: "merged", text: "fix the tests", via: "pi" }], proofs: [] });
   });
 
   test("a merged card is drawn even where the harness records its queue", () => {
@@ -99,7 +99,7 @@ describe("a door's send the agent gave back (SPEC V26)", () => {
   test("left the queue, journal read after that, no prompt: returned, and the card says so", () => {
     const got = receiptQueue([left("req-door-0020", "fix the tests")], [prompt("u0", "older", AT - 60_000)], false, [], LEFT + 1);
     expect(got.proofs).toEqual([{ requestId: "req-door-0020", how: "returned" }]);
-    expect(got.cards).toEqual([{ requestId: "req-door-0020", state: "returned", text: "fix the tests" }]);
+    expect(got.cards).toEqual([{ requestId: "req-door-0020", state: "returned", text: "fix the tests", via: "pi" }]);
   });
 
   test("the agent's word alone, or a journal read before it, returns nothing", () => {

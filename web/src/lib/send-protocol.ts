@@ -36,6 +36,7 @@ import {
   STALE_SCREEN,
 } from "./surface/send";
 import type { ProfileStatus } from "./surface/profile";
+import { stopLeaves } from "./door-queue";
 import { ASK_CHANNELS, askOf, type Ask, type AskOption, type Surface, type SurfaceComposer, type SurfaceModal, type SurfaceReason, type SurfaceTurn } from "./surface/surface";
 
 /** What the composer needs of an answer. The receipt's marks and gaps are for the log. */
@@ -450,7 +451,7 @@ export function receiptLabelKey(outcome: SendOutcome): "composer.protocol.discar
 }
 
 /** The sentences of the session page's list that are not a composer note. */
-export type ReceiptKey = "sendReceipts.queued" | "sendReceipts.returned" | "sendReceipts.merged" | "sendReceipts.doorTaken" | "sendReceipts.doorQueued" | "sendReceipts.doorRefused";
+export type ReceiptKey = "sendReceipts.queued" | "sendReceipts.returned" | "sendReceipts.leftInbox" | "sendReceipts.merged" | "sendReceipts.doorTaken" | "sendReceipts.doorQueued" | "sendReceipts.doorRefused";
 
 /**
  * The sentence under a row's label, or null when it has none. A reason reads as the composer's sentence
@@ -462,8 +463,9 @@ export function receiptSentence(
   say: (key: NoteKey | ReceiptKey, vars?: Record<string, string>) => string,
 ): string | null {
   if (row.outcome === "discarded") return say("composer.protocol.discarded");
-  // Stop gave the queued text back to the box (ADR 0122): the row is still `sent`, but not waiting.
-  if (row.late === "returned") return say("sendReceipts.returned");
+  // Stop gave the queued text back to the box (ADR 0122): the row is still `sent`, but not waiting. A door
+  // that keeps a queued message through Stop gave nothing back: the send left its inbox unrun (SPEC V37).
+  if (row.late === "returned") return say(stopLeaves(row.via) === "box" ? "sendReceipts.returned" : "sendReceipts.leftInbox");
   // The journal shows a door's send only inside a longer or changed prompt (ADR 0141 point 4).
   if (row.late === "merged") return say("sendReceipts.merged");
   // A door's send is `queued` until the journal shows it, taken or not: the door's own word says which.

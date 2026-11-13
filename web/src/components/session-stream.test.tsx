@@ -787,6 +787,46 @@ describe("SessionStream — queued sends from the receipts", () => {
     expect(onReturned).toHaveBeenCalledWith("req-merge-0001", "dismiss");
   });
 
+  it("the Stop line follows the door: pi keeps take-back, opencode says it runs anyway, hermes gets none (SPEC V37)", () => {
+    const lines = (via: string) => {
+      const { container, unmount } = renderReceipts({ queuedSends: [{ ...QUEUED, via }] }, vi.fn(async () => true));
+      const card = container.querySelector("[data-slot='stream-queued-receipts']")!;
+      const got = [...card.querySelectorAll("p")].map((p) => p.textContent);
+      unmount();
+      return got;
+    };
+    expect(lines("pi")).toEqual(["Waiting to send", "Waits for the turn to end.", "To take it back, stop the turn.", "still waiting"]);
+    expect(lines("opencode")).toEqual([
+      "Waiting to send",
+      "Waits for the turn to end.",
+      "Stopping the turn does not take it back. It runs after the agent's next turn.",
+      "still waiting",
+    ]);
+    expect(lines("hermes")).toEqual(["Waiting to send", "Waits for the turn to end.", "still waiting"]);
+  });
+
+  it("an opencode returned card says it left the inbox unrun, offers no Send, and its Discard asks to dismiss (SPEC V37)", async () => {
+    const onReturned = vi.fn(async () => true);
+    const { container } = renderReceipts({ queuedSends: [{ ...BACK, via: "opencode" }] }, onReturned);
+    expect(container.querySelector("[data-slot='stream-returned']")).toBeNull();
+    const card = container.querySelector("[data-slot='stream-left-inbox']")!;
+    expect([...card.querySelectorAll("p")].map((p) => p.textContent)).toEqual([
+      "Left the inbox",
+      "This message left the agent's inbox without running, and it is not in the agent's box. Check the agent.",
+      "second message",
+    ]);
+    expect(card.querySelectorAll("button")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Send this message from the agent's box" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Discard this card. Nothing is sent to the agent." }));
+    expect(onReturned).toHaveBeenCalledWith("req-back-00001", "dismiss");
+  });
+
+  it("a pi returned card is still back in the box, with Send and Discard (SPEC V37)", () => {
+    const { container } = renderReceipts({ queuedSends: [{ ...BACK, via: "pi" }] }, vi.fn(async () => true));
+    expect(container.querySelector("[data-slot='stream-returned']")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Send this message from the agent's box" })).toBeInTheDocument();
+  });
+
   it("a returned run is one card with its joined text and one pair of buttons", () => {
     const run = { requestId: "req-run-000001", state: "returned", text: "alpha one\nbeta two" } as const;
     const { container } = renderReceipts({ queuedSends: [run] }, vi.fn(async () => true));

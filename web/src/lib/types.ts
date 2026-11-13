@@ -1896,13 +1896,15 @@ export interface ChatWindowBody {
  * One queued card as Collie's receipts know it (ADR 0122): its request id, whether it waits in the
  * harness (`queued`), Stop gave it back to the input box (`returned`, a run of texts given back
  * together is one card), Collie cannot tell where it went (`unconfirmed`), or the journal shows a door's
- * send only inside a longer or changed prompt (`merged`, ADR 0141), and its text, masked when the bridge
- * masks. Mirrors `QueuedSendWire` in bridge/journal/receipt-queue.ts.
+ * send only inside a longer or changed prompt (`merged`, ADR 0141), its text, masked when the bridge
+ * masks, and the id of the door it went through (absent for the screen, SPEC V37). Mirrors
+ * `QueuedSendWire` in bridge/journal/receipt-queue.ts.
  */
 export interface QueuedSendRow {
   requestId: string;
   state: "queued" | "returned" | "unconfirmed" | "merged";
   text: string;
+  via?: string;
 }
 
 /** The operator's newest prompt, capped by the bridge. Mirrors `ChatPrompt` in bridge/journal/live.ts. */

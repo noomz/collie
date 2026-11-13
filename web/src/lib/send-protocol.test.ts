@@ -383,6 +383,14 @@ describe("the session page's rows (send drill 3)", () => {
     expect(rows.receipts[1] && receiptSentence(rows.receipts[1], say)).toBe("sendReceipts.queued");
   });
 
+  it("a returned send through a door that keeps its queue says it left the inbox, not that it is back in the box (SPEC V37)", () => {
+    const row: SendReceiptRow = { ...base, outcome: "sent", queued: true, late: "returned" };
+    expect(receiptSentence({ ...row, via: "pi" }, say)).toBe("sendReceipts.returned");
+    expect(receiptSentence({ ...row, via: "screen" }, say)).toBe("sendReceipts.returned");
+    expect(receiptSentence({ ...row, via: "opencode" }, say)).toBe("sendReceipts.leftInbox");
+    expect(receiptSentence({ ...row, via: "hermes" }, say)).toBe("sendReceipts.leftInbox");
+  });
+
   it("a door's row says how it went; a merged one says so; a door that refused says the screen took it (ADR 0141, T17)", () => {
     const door: SendReceiptRow = { ...base, harness: "pi", outcome: "sent", queued: true, via: "pi" };
     expect(receiptSentence({ ...door, door: "taken" }, say)).toBe("sendReceipts.doorTaken");

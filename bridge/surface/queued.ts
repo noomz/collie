@@ -101,8 +101,11 @@ interface Entry {
   group?: string;
   /** A steer, not a queued send: never drawn until it is returned, and dropped silently when it landed. */
   readonly steer: boolean;
-  /** Sent through the agent's door, no key typed (ADR 0141): the journal proves it, and nothing reads it back from the box. */
-  readonly door: boolean;
+  /**
+   * The id of the agent's door it went through, no key typed (ADR 0141), or absent for the screen: the
+   * journal proves a door's send, and nothing reads it back from the box.
+   */
+  readonly door?: string;
   /** A door's send the journal showed merged or changed (ADR 0141 point 4): a card until Discard or its bound. */
   merged: boolean;
   /** When the door said this send left the agent's queue (SPEC V26), bridge clock. */
@@ -117,8 +120,8 @@ export interface ReceiptQueued {
   readonly text: string;
   readonly at: number;
   readonly state: QueuedSendState;
-  /** Sent through the agent's door (ADR 0141): the journal's proof of it is written back to the receipt. */
-  readonly door?: true;
+  /** The id of the agent's door it went through (ADR 0141): the journal's proof of it is written back to the receipt. */
+  readonly door?: string;
   /** A door's send already proved merged or changed. */
   readonly merged?: true;
   /** When the door said the send left the agent's queue: the journal, read after it, says whether it ran. */
@@ -143,8 +146,8 @@ export interface QueuedSendInput {
   readonly at: number;
   /** The send settled `steered`, not `sent` + `queued` (see the header). */
   readonly steer?: boolean;
-  /** The send went through the agent's door (ADR 0141), not the screen. */
-  readonly door?: boolean;
+  /** The id of the agent's door the send went through (ADR 0141); absent for the screen. */
+  readonly door?: string;
 }
 
 /** One read of a pane, as {@link QueuedSends.boxRead} takes it. */
@@ -205,7 +208,7 @@ export class QueuedSends {
       busyAt: input.at,
       idleEmpty: 0,
       steer: input.steer === true,
-      door: input.door === true,
+      door: input.door,
       merged: false,
     });
     this.age();
@@ -235,7 +238,7 @@ export class QueuedSends {
       if (entry.steer && entry.state !== "returned") continue;
       const run = this.runOf(entry, mine);
       let card: ReceiptQueued = { requestId: entry.id, text: run.map((e) => e.text).join("\n"), at: entry.at, state: entry.state };
-      if (entry.door) card = { ...card, door: true };
+      if (entry.door !== undefined) card = { ...card, door: entry.door };
       if (entry.merged) card = { ...card, merged: true };
       if (entry.leftAt !== undefined) card = { ...card, leftAt: entry.leftAt };
       cards.push(card);
@@ -253,10 +256,15 @@ export class QueuedSends {
     return this.runOf(entry, this.entries).map((e) => e.text).join("\n");
   }
 
-  /** Discard on an unconfirmed or merged card: the card goes and nothing is pressed. False when there is no such card. */
+  /**
+   * Discard on an unconfirmed or merged card, or on a door's returned card: the card goes and nothing is
+   * pressed. A door's returned card was never read off the box, so its Discard presses nothing either:
+   * at a door whose agent does not hand the item back to its box (SPEC V37) it is the card's one button.
+   * False when there is no such card.
+   */
   dismissUnconfirmed(session: string, paneId: string, id: string): boolean {
     const entry = this.entries.find((e) => e.id === id && e.session === session && e.paneId === paneId);
-    if (entry === undefined || (entry.state !== "unconfirmed" && !entry.merged)) return false;
+    if (entry === undefined || (entry.state !== "unconfirmed" && !entry.merged && !(entry.door !== undefined && entry.state === "returned"))) return false;
     this.drop(id);
     return true;
   }
@@ -267,7 +275,7 @@ export class QueuedSends {
    * (SPEC V26). False when there is no such door send, or a `returned` for one that is not queued.
    */
   proved(session: string, paneId: string, id: string, how: DoorProof["how"]): boolean {
-    const entry = this.entries.find((e) => e.id === id && e.session === session && e.paneId === paneId && e.door);
+    const entry = this.entries.find((e) => e.id === id && e.session === session && e.paneId === paneId && e.door !== undefined);
     if (entry === undefined) return false;
     if (how === "landed") this.drop(id);
     else if (how === "merged") entry.merged = true;
@@ -288,7 +296,7 @@ export class QueuedSends {
     this.seed(session);
     const waiting = new Map<string, string>();
     for (const entry of this.entries) {
-      if (entry.session !== session || !entry.door || entry.state !== "queued" || entry.merged || entry.leftAt !== undefined) continue;
+      if (entry.session !== session || entry.door === undefined || entry.state !== "queued" || entry.merged || entry.leftAt !== undefined) continue;
       waiting.set(entry.paneId, entry.agent);
     }
     return [...waiting].map(([paneId, agent]) => ({ paneId, agent }));
@@ -298,7 +306,7 @@ export class QueuedSends {
   doorLeft(session: string, paneId: string, ids: readonly string[], at: number): void {
     const left = new Set(ids);
     for (const entry of this.entries) {
-      if (entry.session !== session || entry.paneId !== paneId || !entry.door || entry.state !== "queued" || entry.leftAt !== undefined) continue;
+      if (entry.session !== session || entry.paneId !== paneId || entry.door === undefined || entry.state !== "queued" || entry.leftAt !== undefined) continue;
       if (left.has(entry.id)) entry.leftAt = at;
     }
   }
@@ -344,7 +352,7 @@ export class QueuedSends {
       return [];
     }
     // A door's send typed no key: a box that shows its text is a draft at the desk, never the send come back.
-    const held = this.heldRun(reading.box, open.filter((entry) => !entry.door));
+    const held = this.heldRun(reading.box, open.filter((entry) => entry.door === undefined));
     const leader = held.length > 1 ? held[0]!.id : undefined;
     for (const entry of held) {
       entry.seenAt = readAt;
@@ -359,7 +367,7 @@ export class QueuedSends {
       }
     }
     // A door's returned card was never read off the box, so the box cannot end it either (SPEC V26).
-    const gone = open.filter((entry) => !entry.door && entry.state === "returned" && !held.includes(entry) && (entry.seenAt ?? 0) < readAt);
+    const gone = open.filter((entry) => entry.door === undefined && entry.state === "returned" && !held.includes(entry) && (entry.seenAt ?? 0) < readAt);
     if (gone.length > 0) this.entries = this.entries.filter((entry) => !gone.includes(entry));
     this.letSteersGo(open, held, reading);
     this.age();
@@ -461,9 +469,10 @@ export class QueuedSends {
       const receipt = record.receipt;
       if (record.session !== session || record.phase !== "settled" || receipt === undefined || record.line === undefined) continue;
       // A door's send that may have arrived is a card too (ADR 0141 point 2), and so is one proved merged.
-      const door = receipt.via !== undefined && receipt.via !== SCREEN;
-      const waits = receipt.outcome === "sent" ? receipt.queued === true : door && receipt.outcome === "unknown";
-      if (!waits || (receipt.late !== undefined && !(door && receipt.late === "merged"))) continue;
+      const door = receipt.via !== undefined && receipt.via !== SCREEN ? receipt.via : undefined;
+      const isDoor = door !== undefined;
+      const waits = receipt.outcome === "sent" ? receipt.queued === true : isDoor && receipt.outcome === "unknown";
+      if (!waits || (receipt.late !== undefined && !(isDoor && receipt.late === "merged"))) continue;
       const at = record.submitSentAt ?? record.acceptedAt;
       if (now - at > QUEUED_SEND_MS || this.entries.some((entry) => entry.id === record.id)) continue;
       this.entries.push({
@@ -480,7 +489,7 @@ export class QueuedSends {
         idleEmpty: 0,
         steer: false,
         door,
-        merged: door && receipt.late === "merged",
+        merged: isDoor && receipt.late === "merged",
       });
     }
     this.entries.sort((a, b) => a.at - b.at);

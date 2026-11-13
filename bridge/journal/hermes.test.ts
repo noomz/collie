@@ -408,7 +408,7 @@ describe("a door's send queued behind a desk turn (SPEC V13)", () => {
   const MESSAGES =
     "create table messages (id integer primary key autoincrement, session_id text not null, role text not null, content text, tool_call_id text, tool_calls text, tool_name text, timestamp real not null, token_count integer, finish_reason text, reasoning text, reasoning_content text, reasoning_details text, codex_reasoning_items text, codex_message_items text, platform_message_id text, observed integer default 0, active integer not null default 1, compacted integer not null default 0, effect_disposition text, api_content text, display_kind text, display_metadata text, _compressed_summary integer not null default 0, display_identity blob, display_order integer, message_uid text, absorbed_message_uids text, tool_call_uids text, tool_call_uid text)";
   const SENT_AT = Date.parse("2026-11-12T12:44:22Z");
-  const SEND: ReceiptQueued = { requestId: "req_door_hermes_0002", text: "door two", at: SENT_AT, state: "queued", door: true };
+  const SEND: ReceiptQueued = { requestId: "req_door_hermes_0002", text: "door two", at: SENT_AT, state: "queued", door: "hermes" };
 
   /** The proof over every row the session holds, for the one door send, as the live window asks it. */
   async function settleOver(rows: readonly (readonly [role: string, text: string, secondsFromSend: number])[]) {
@@ -436,7 +436,7 @@ describe("a door's send queued behind a desk turn (SPEC V13)", () => {
   ] as const;
 
   test("while the desk turn runs, the card waits: the desk's row is no proof and no merge", async () => {
-    expect(await settleOver(DESK)).toEqual({ cards: [{ requestId: SEND.requestId, state: "queued", text: "door two" }], proofs: [] });
+    expect(await settleOver(DESK)).toEqual({ cards: [{ requestId: SEND.requestId, state: "queued", text: "door two", via: "hermes" }], proofs: [] });
   });
 
   test("its own row, written when its turn starts, lands it once and the card goes", async () => {

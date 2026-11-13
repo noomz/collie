@@ -16,6 +16,7 @@ import { ASKS_SHOWN, asksAt, shownAsks } from "@/lib/ask";
 import { finished, itemsOf, type ChatItem } from "@/lib/chat-items";
 import { useChatLook, type ChatLook } from "@/lib/chat-look";
 import type { ChatStatus } from "@/lib/chat-window";
+import { stopLeaves, type StopLeaves } from "@/lib/door-queue";
 import { dropPending, unmatched, usePending } from "@/lib/durable-pending";
 import { clockTime } from "@/lib/format";
 import { t, type MessageKey } from "@/lib/i18n";
@@ -233,6 +234,12 @@ type QueuedCardAct = ((requestId: string, action: QueuedCardAction) => Promise<b
  *   - Merged (ADR 0141): the agent's log shows a door's send only inside a longer or changed prompt.
  *     The card says so, with the same one Discard as an unconfirmed card.
  *
+ * WHAT STOP DOES differs by the door a card went through (SPEC V37, `lib/door-queue.ts`). The waiting
+ * group's Stop line is true only for a send Stop hands back to the box; a door that keeps it in its
+ * inbox gets the line that says it runs anyway, and a door nobody measured gets none. A returned card
+ * of a door that keeps its queue was not given back to the box: it left the inbox unrun, so it says so
+ * and offers only the Discard that presses nothing.
+ *
  * PENDING, NEVER RETRYING, like the queue card: a tap disables the card's buttons until the card goes
  * away (the next answer drops it) or {@link SEND_NOW_PENDING_MS} pass, or the act itself failed.
  */
@@ -246,7 +253,11 @@ function ReceiptQueueCards({ rows, act }: { rows: readonly QueuedSendRow[]; act:
             <p className={QUEUED_LABEL}>{t("chat.stream.queued")}</p>
           </div>
           <p className="text-xs text-muted-foreground">{t("chat.stream.queuedWaits")}</p>
-          <p className="text-xs text-muted-foreground">{t("chat.stream.queuedTakeBack")}</p>
+          {stopLines(waiting).map((key) => (
+            <p key={key} className="text-xs text-muted-foreground">
+              {t(key)}
+            </p>
+          ))}
           {waiting.map((row) => (
             <p key={row.requestId} className={QUEUED_TEXT}>
               {row.text}
@@ -255,7 +266,9 @@ function ReceiptQueueCards({ rows, act }: { rows: readonly QueuedSendRow[]; act:
         </div>
       )}
       {rows.map((row) =>
-        row.state === "returned" ? (
+        row.state === "returned" && stopLeaves(row.via) !== "box" ? (
+          <ReceiptCard key={row.requestId} row={row} act={act} slot="stream-left-inbox" label="chat.stream.leftInbox" why="chat.stream.leftInboxWhy" buttons={LEFT_INBOX_BUTTONS} />
+        ) : row.state === "returned" ? (
           <ReceiptCard key={row.requestId} row={row} act={act} slot="stream-returned" label="chat.stream.returned" why="chat.stream.returnedWhy" buttons={RETURNED_BUTTONS} />
         ) : row.state === "unconfirmed" ? (
           <ReceiptCard key={row.requestId} row={row} act={act} slot="stream-unconfirmed" label="chat.stream.unconfirmed" why="chat.stream.unconfirmedWhy" buttons={UNCONFIRMED_BUTTONS} />
@@ -265,6 +278,17 @@ function ReceiptQueueCards({ rows, act }: { rows: readonly QueuedSendRow[]; act:
       )}
     </>
   );
+}
+
+/** The waiting group's Stop line for each kind of door among its cards, in a fixed order; none for an unmeasured door. */
+const STOP_LINES: ReadonlyArray<readonly [StopLeaves, MessageKey]> = [
+  ["box", "chat.stream.queuedTakeBack"],
+  ["inbox", "chat.stream.queuedRunsAfter"],
+];
+
+function stopLines(waiting: readonly QueuedSendRow[]): MessageKey[] {
+  const kinds = new Set(waiting.map((row) => stopLeaves(row.via)));
+  return STOP_LINES.flatMap(([kind, key]) => (kinds.has(kind) ? [key] : []));
 }
 
 /** One button of a receipt card: the act, its visible word, its accessible name (which starts with the word), its look. */
@@ -283,6 +307,10 @@ const RETURNED_BUTTONS: readonly CardButton[] = [
 ];
 const UNCONFIRMED_BUTTONS: readonly CardButton[] = [
   { action: "dismiss", word: "chat.stream.unconfirmedDiscard", aria: "chat.stream.unconfirmedDiscardAria", variant: "outline", slot: "stream-unconfirmed-discard" },
+];
+/** A send that left a door's inbox unrun is in no box: its one Discard drops the card and presses nothing. */
+const LEFT_INBOX_BUTTONS: readonly CardButton[] = [
+  { action: "dismiss", word: "chat.stream.unconfirmedDiscard", aria: "chat.stream.unconfirmedDiscardAria", variant: "outline", slot: "stream-left-inbox-discard" },
 ];
 const MERGED_BUTTONS: readonly CardButton[] = [
   { action: "dismiss", word: "chat.stream.mergedDiscard", aria: "chat.stream.mergedDiscardAria", variant: "outline", slot: "stream-merged-discard" },

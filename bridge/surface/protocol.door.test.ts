@@ -294,10 +294,11 @@ describe("the journal proves a door's send (ADR 0141 point 4)", () => {
     const merged = (await first.send("second")).receipt!.requestId;
     first.protocol.proveDoor("main", "%1", [{ requestId: merged, how: "merged" }]);
     const cards = rig(new FakeDoor()).protocol.queuedOf("main", "%1");
-    // Both rigs start on one clock, so the two cards tie on time: the order is not the point.
+    // Both rigs start on one clock, so the two cards tie on time: the order is not the point. The door's
+    // id comes back from the receipt, so the phone still knows which door it was (SPEC V37).
     expect(cards.map((card) => [card.requestId, card.door ?? false, card.merged ?? false]).toSorted()).toEqual([
-      [lost, true, false],
-      [merged, true, true],
+      [lost, "claude", false],
+      [merged, "claude", true],
     ]);
   });
 });
