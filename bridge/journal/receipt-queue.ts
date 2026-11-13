@@ -48,13 +48,16 @@ export type { DoorProof, ReceiptQueued };
 export const PROMPT_SKEW_MS = 2_000;
 
 /**
- * One card of the window's receipt queue on the wire: the request id, where it stands, and its text.
- * `merged`: a door's send the journal shows only inside a longer or changed prompt (ADR 0141 point 4).
+ * One card of the window's receipt queue on the wire: the request id, where it stands, its text, and
+ * the id of the door it went through (absent for the screen). `merged`: a door's send the journal shows
+ * only inside a longer or changed prompt (ADR 0141 point 4). `via` lets the phone say what Stop does to
+ * it, which differs by door (SPEC V37); a phone one release behind ignores it.
  */
 export interface QueuedSendWire {
   requestId: string;
   state: QueuedSendState | "merged";
   text: string;
+  via?: string;
 }
 
 /** A text as this rule compares it: every run of white space one space, the ends cut. */
@@ -100,10 +103,10 @@ export function settle(sends: readonly ReceiptQueued[], entries: readonly Transc
       continue;
     }
     claimed.add(landed);
-    if (send.door === true) proofs.push({ requestId: send.requestId, how: "landed" });
+    if (send.door !== undefined) proofs.push({ requestId: send.requestId, how: "landed" });
   }
   for (const send of open) {
-    if (send.door !== true || send.merged === true) continue;
+    if (send.door === undefined || send.merged === true) continue;
     const text = folded(send.text);
     const at = prompts.findIndex((prompt) => prompt.at >= send.at - PROMPT_SKEW_MS);
     // A prompt another send landed as its own is that send's, never this one's merge.
@@ -118,7 +121,7 @@ export function settle(sends: readonly ReceiptQueued[], entries: readonly Transc
     return prompt === null ? [] : [prompt];
   });
   for (const send of open) {
-    if (send.door !== true || send.state !== "queued" || send.merged === true || merged.has(send.requestId)) continue;
+    if (send.door === undefined || send.state !== "queued" || send.merged === true || merged.has(send.requestId)) continue;
     if (send.leftAt === undefined || readAt < send.leftAt) continue;
     const text = folded(send.text);
     if (ever.some((prompt) => prompt.at >= send.at - PROMPT_SKEW_MS && prompt.text.includes(text))) continue;
@@ -155,7 +158,11 @@ export function receiptQueue(
     return returned.has(send.requestId) ? "returned" : send.state;
   };
   const cards = open
-    .map((send): QueuedSendWire => ({ requestId: send.requestId, state: stateOf(send), text: send.text }))
+    .map((send): QueuedSendWire => {
+      const card: QueuedSendWire = { requestId: send.requestId, state: stateOf(send), text: send.text };
+      if (send.door !== undefined) card.via = send.door;
+      return card;
+    })
     .filter((card) => (!recordsQueue || card.state === "returned" || card.state === "merged") && !listed.has(folded(card.text)));
   return { cards, proofs };
 }

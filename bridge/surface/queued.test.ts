@@ -105,16 +105,16 @@ describe("QueuedSends", () => {
 
   test("a door's send is never taken back from the box: a desk draft with its text is not the send come back", () => {
     const m = memory();
-    m.sends.add({ id: "queued-door-001", session: "main", paneId: "%1", generation: "omp:session", text: "fix the tests", collapse: null, at: m.clock.now, door: true });
+    m.sends.add({ id: "queued-door-001", session: "main", paneId: "%1", generation: "omp:session", text: "fix the tests", collapse: null, at: m.clock.now, door: "pi" });
     m.clock.now += 1_000;
     expect(m.sends.boxRead("main", "%1", { box: "fix the tests", at: m.clock.now, turn: "idle", poll: true })).toEqual([]);
     expect(m.marked).toEqual([]);
-    expect(m.sends.of("main", "%1")).toEqual([{ requestId: "queued-door-001", text: "fix the tests", at: m.clock.now - 1_000, state: "queued", door: true }]);
+    expect(m.sends.of("main", "%1")).toEqual([{ requestId: "queued-door-001", text: "fix the tests", at: m.clock.now - 1_000, state: "queued", door: "pi" }]);
   });
 
   test("the journal's proof: landed ends a door's card, merged marks it, and Discard takes a merged card", () => {
     const m = memory();
-    const door = (id: string): void => m.sends.add({ id, session: "main", paneId: "%1", generation: "omp:session", text: id, collapse: null, at: m.clock.now, door: true });
+    const door = (id: string): void => m.sends.add({ id, session: "main", paneId: "%1", generation: "omp:session", text: id, collapse: null, at: m.clock.now, door: "pi" });
     door("queued-door-002");
     door("queued-door-003");
     m.add("queued-scr-0001", "typed");
@@ -131,7 +131,7 @@ describe("QueuedSends", () => {
   });
   test("a door's send turns returned only on the journal's word after the agent's, and no box read ends it (SPEC V26)", () => {
     const m = memory();
-    const door = (id: string): void => m.sends.add({ id, session: "main", paneId: "%1", generation: "omp:session", text: id, collapse: null, at: m.clock.now, door: true });
+    const door = (id: string): void => m.sends.add({ id, session: "main", paneId: "%1", generation: "omp:session", text: id, collapse: null, at: m.clock.now, door: "pi" });
     door("queued-door-004");
     door("queued-door-005");
     expect(m.sends.doorWaiting("main")).toEqual([{ paneId: "%1", agent: "omp" }]);
@@ -156,5 +156,23 @@ describe("QueuedSends", () => {
     // The bound still ends it, from when it turned returned.
     m.clock.now += QUEUED_SEND_MS + 1;
     expect(m.sends.of("main", "%1").find((card) => card.requestId === "queued-door-004")?.state).toBe("unconfirmed");
+  });
+
+  test("Discard takes a door's returned card and presses nothing; a screen send's returned card keeps its box Discard (SPEC V37)", () => {
+    const m = memory();
+    m.sends.add({ id: "queued-door-006", session: "main", paneId: "%1", generation: "omp:session", text: "run it", collapse: null, at: m.clock.now, door: "opencode" });
+    m.add("queued-ret-0002", "typed one");
+    m.clock.now += 1_000;
+    m.sends.doorLeft("main", "%1", ["queued-door-006"], m.clock.now);
+    expect(m.sends.proved("main", "%1", "queued-door-006", "returned")).toBe(true);
+    m.sends.boxRead("main", "%1", { box: "typed one", at: m.clock.now + 1, turn: "idle", poll: true });
+    expect(m.sends.of("main", "%1").map((card) => [card.requestId, card.state, card.door])).toEqual([
+      ["queued-door-006", "returned", "opencode"],
+      ["queued-ret-0002", "returned", undefined],
+    ]);
+    // The screen's returned card is the box's text: its Discard empties the box, never this drop.
+    expect(m.sends.dismissUnconfirmed("main", "%1", "queued-ret-0002")).toBe(false);
+    expect(m.sends.dismissUnconfirmed("main", "%1", "queued-door-006")).toBe(true);
+    expect(m.sends.of("main", "%1").map((card) => card.requestId)).toEqual(["queued-ret-0002"]);
   });
 });

@@ -1016,13 +1016,13 @@ describe("what is queued, from the receipts", () => {
     const fx = fakeJournal([askAt("p1", "List 120 fruits", AT - 10_000)]);
     const live = windows(fx);
     const proofs: DoorProof[][] = [];
-    const left: ReceiptQueued[] = [{ requestId: "req-left-00001", text: "back to the editor", at: AT, state: "queued", door: true, leftAt: fx.clock() + 50 }];
+    const left: ReceiptQueued[] = [{ requestId: "req-left-00001", text: "back to the editor", at: AT, state: "queued", door: "pi", leftAt: fx.clock() + 50 }];
     const first = await live.window(fx.adapter, ref(), { limit: 10 }, left, (p) => proofs.push(p));
-    expect(first!.queuedSends).toEqual([{ requestId: "req-left-00001", state: "queued", text: "back to the editor" }]);
+    expect(first!.queuedSends).toEqual([{ requestId: "req-left-00001", state: "queued", text: "back to the editor", via: "pi" }]);
     expect(proofs).toEqual([]);
     fx.settle();
     const next = await live.window(fx.adapter, ref(), { limit: 10 }, left, (p) => proofs.push(p));
-    expect(next!.queuedSends).toEqual([{ requestId: "req-left-00001", state: "returned", text: "back to the editor" }]);
+    expect(next!.queuedSends).toEqual([{ requestId: "req-left-00001", state: "returned", text: "back to the editor", via: "pi" }]);
     expect(proofs).toEqual([[{ requestId: "req-left-00001", how: "returned" }]]);
   });
 

@@ -602,8 +602,8 @@ describe("exit codes", () => {
       ...STT_VERBS,
       // `hooks` edits the developer's own ~/.claude/settings.json, and `hooks status` resolves the
       // same real paths before it reads them. cli/hooks.test.ts drives all three against fakes.
-      // `inbox` writes pi's real `~/.pi/agent/extensions/collie-inbox.ts`. cli/inbox.test.ts drives all
-      // three against fakes.
+      // `inbox` writes pi's real `~/.pi/agent/extensions/collie-inbox.ts` and opencode's real plugin
+      // folder. cli/inbox.test.ts drives all three against fakes.
       // `beacon` is world-touching in the other direction: it would write a beacon into this host's
       // real state dir. cli/beacon.test.ts drives it against fakes.
       ...BEACON_VERBS,

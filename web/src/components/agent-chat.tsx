@@ -167,6 +167,7 @@ import type {
 } from "@/lib/blocks";
 import { paneMirrorOverride, setPaneMirrorOverride } from "@/lib/mirror-invert";
 import type { Scope } from "@/lib/scope";
+import { stopLeaves } from "@/lib/door-queue";
 import { Icon } from "@/components/icons/icon";
 
 interface AgentChatProps {
@@ -3421,7 +3422,8 @@ export function AgentChat({
                   agent={agent?.agent}
                   canSteer={agent?.canSteer}
                   // A queued message Stop gave back stands in the box: a draft refusal points at its card (ADR 0122).
-                  returnedDraft={chatFeed.window.queuedSends.some((row) => row.state === "returned")}
+                  // A door that keeps it in its inbox gave nothing back to the box (SPEC V37).
+                  returnedDraft={chatFeed.window.queuedSends.some((row) => row.state === "returned" && stopLeaves(row.via) === "box")}
                   isShell={isShell}
                   cwd={agent?.cwd || undefined}
                   held={agent?.held}

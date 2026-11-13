@@ -295,7 +295,7 @@ function nextQueue(held: readonly string[], next: readonly string[]): readonly s
 function nextSends(held: readonly QueuedSendRow[], next: readonly QueuedSendRow[]): readonly QueuedSendRow[] {
   const same =
     held.length === next.length &&
-    held.every((row, i) => row.requestId === next[i]?.requestId && row.state === next[i]?.state && row.text === next[i]?.text);
+    held.every((row, i) => row.requestId === next[i]?.requestId && row.state === next[i]?.state && row.text === next[i]?.text && row.via === next[i]?.via);
   return same ? held : next;
 }
 

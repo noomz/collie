@@ -864,20 +864,20 @@ export const COMMANDS: readonly Command[] = [
     ],
     run: (args, s) => cmdHooks(hooksDeps(s.io), args),
   },
-  // The pi inbox (ADR 0141): the person's opt-in install of the extension that hands a phone message
-  // to pi's live session. Declared beside `hooks`, which it is modelled on; no other verb installs it.
+  // The agents' inboxes (pi ADR 0141, opencode ADR 0143): the person's opt-in install of the extension or
+  // plugin that hands a phone message to the agent's live session. Declared beside `hooks`, which it is modelled on; no other verb installs it.
   {
     name: "inbox",
-    summary: `pi's own door for a phone message: ${INBOX_SUBCOMMANDS.join(", ")}`,
+    summary: `the agent's own door for a phone message (pi, opencode): ${INBOX_SUBCOMMANDS.join(", ")}`,
     subcommands: [
       {
         name: "install",
-        summary: "write the pi extension into pi's extensions folder: `inbox install pi` (a running pi loads it after `/reload`)",
+        summary: "write the agent's inbox: `inbox install pi` (loads after `/reload`) or `inbox install opencode` (loads after a TUI restart)",
         run: (args, s) => cmdInboxInstall(inboxDeps(s.io), args),
       },
       {
         name: "uninstall",
-        summary: "remove it again, only when it is Collie's: `inbox uninstall pi`",
+        summary: "remove it again, only when it is Collie's: `inbox uninstall pi|opencode`",
         run: (args, s) => cmdInboxUninstall(inboxDeps(s.io), args),
       },
       {

@@ -7,7 +7,7 @@
 // beacon here", which is a case the reader already handles honestly. A directory of garbage yields
 // zero beacons and never an error page.
 //
-// pi's inbox answers (`/hello`, `/send`, ADR 0141) are read here too: the same markers, written by a
+// The agents' inbox answers (pi's and opencode's `/hello`, `/send`, `/queue`, ADR 0141, ADR 0143) are read here too: the same markers, written by a
 // process Collie does not control, so the same boundary.
 //
 // This is a parse boundary in the ADR 0019 sense, which is why `anti-slop/no-runtime-typeof` is off
@@ -30,6 +30,7 @@ import {
   type BeaconStatus,
   type EdgeRecord,
   type InboxHello,
+  type OpencodeHello,
   type InboxQueue,
   type InboxTook,
 } from "./types.ts";
@@ -255,6 +256,31 @@ export function parseInboxHello(text: string): InboxHello | null {
   if (raw === null || raw === undefined) return { agent, sessionFile: null, markers };
   if (typeof raw !== "string" || raw === "" || raw.length > MAX_FIELD_CHARS) return null;
   return { agent, sessionFile: raw, markers };
+}
+
+/**
+ * opencode's `/hello`, or null when it is not one: another wire version, no markers, or a session id or
+ * server that is there and malformed. A missing or null `server`, or a null pid, is a server that did
+ * not answer: `serverPid` null.
+ */
+export function parseOpencodeHello(text: string): OpencodeHello | null {
+  const row = objectOf(text);
+  if (row === null || readInteger(row, "inbox") !== INBOX_VERSION) return null;
+  const agent = readText(row, "agent");
+  const markers = readMarkers(row.markers);
+  if (agent === null || markers.length === 0) return null;
+  const raw = row.sessionID;
+  if (raw !== null && raw !== undefined && (typeof raw !== "string" || raw === "" || raw.length > MAX_FIELD_CHARS)) return null;
+  let serverPid: number | null = null;
+  if (row.server !== null && row.server !== undefined) {
+    const server = readObject(row.server);
+    if (server === null) return null;
+    if (server.pid !== null && server.pid !== undefined) {
+      serverPid = readInteger(server, "pid");
+      if (serverPid === null || serverPid === 0) return null;
+    }
+  }
+  return { agent, sessionID: typeof raw === "string" ? raw : null, serverPid, markers };
 }
 
 const INBOX_STATES: readonly InboxTook["state"][] = ["taken", "queued", "steered"];
