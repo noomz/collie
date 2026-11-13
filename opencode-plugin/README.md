@@ -3,7 +3,8 @@
 An [opencode](https://opencode.ai) TUI plugin that lets Collie hand a phone message to the pane's live
 session through the TUI's own client, instead of typing it into the terminal (ADR 0143).
 
-**This plugin is experimental.** The bridge's opencode door that talks to it is in progress.
+**This plugin is experimental.** The bridge uses it on a Herdr pane, where Herdr names the pane's
+opencode session.
 
 What it does:
 
@@ -35,5 +36,11 @@ message may have reached opencode, so it must not be sent again.
 
 ## Install
 
-opencode loads a plugin folder, `~/.config/opencode/plugins/collie-inbox/`, with this file as its
-`tui.ts` entry. Restart a running opencode TUI to load it.
+```sh
+collie inbox install opencode
+```
+
+It writes this file as `tui.ts` in the plugin folder `<config>/plugins/collie-inbox/`. `<config>` is
+`$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`, the folder
+`opencode debug paths` prints. Restart a running opencode TUI to load it. `collie inbox status opencode`
+says whether it is installed, current or stale, and `collie inbox uninstall opencode` removes it.

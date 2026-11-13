@@ -44,9 +44,11 @@ private Unix socket like pi's inbox. The bridge never speaks HTTP to opencode.**
 1. **The plugin is the person's opt-in** (ADR 0141 point 6). `collie inbox install opencode`
    writes the plugin folder `~/.config/opencode/plugins/collie-inbox/` with its `tui.ts` entry
    and an ownership marker. opencode's v2 loader loads a plugin folder, and it skips a local file
-   listed in `tui.jsonc`. `uninstall` removes only what it wrote, and `status` says whether a
-   running TUI has loaded it. A TUI started before the install keeps the screen path until it is
-   restarted, and the verb says so.
+   listed in `tui.jsonc`. The folder follows opencode's own config folder
+   (`$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`). `uninstall` removes only what it
+   wrote, and `status` says whether it is installed, current or stale, as pi's does: a running
+   TUI does not say which copy it loaded. A TUI started before the install keeps the screen path
+   until it is restarted, and the verb says so.
 2. **Its socket follows ADR 0141 point 7.** It is named and found the way pi's inbox is, in a
    folder of its own (`<state>/collie/inbox/opencode/`), mode 0600 in a 0700 folder, with every
    path part walked before the bridge connects. It answers `/hello` (the session the TUI's router
