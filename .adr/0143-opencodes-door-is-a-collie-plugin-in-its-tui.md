@@ -42,7 +42,7 @@ client still delivers (P4).
 private Unix socket like pi's inbox. The bridge never speaks HTTP to opencode.**
 
 1. **The plugin is the person's opt-in** (ADR 0141 point 6). `collie inbox install opencode`
-   writes the plugin folder `~/.config/opencode/plugins/collie-inbox/` with its `tui.js` entry
+   writes the plugin folder `~/.config/opencode/plugins/collie-inbox/` with its `tui.ts` entry
    and an ownership marker. opencode's v2 loader loads a plugin folder, and it skips a local file
    listed in `tui.jsonc`. `uninstall` removes only what it wrote, and `status` says whether a
    running TUI has loaded it. A TUI started before the install keeps the screen path until it is
