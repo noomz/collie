@@ -235,6 +235,16 @@ export interface InboxHello {
   readonly markers: readonly BeaconMarker[];
 }
 
+/** opencode's inbox `/hello` (`opencode-plugin/collie-inbox.ts`), as `parseOpencodeHello` reads it. */
+export interface OpencodeHello {
+  readonly agent: string;
+  /** The session the TUI shows, exactly as opencode names it, or null on its home screen. */
+  readonly sessionID: string | null;
+  /** The pid of the server the TUI's client reached, or null when it did not answer in time. */
+  readonly serverPid: number | null;
+  readonly markers: readonly BeaconMarker[];
+}
+
 /**
  * What an inbox's `/queue` says: the request ids of sends pi took that have LEFT its queue (it settled a
  * run with nothing pending, so each ran or went back to the editor). A hint: the journal says which.

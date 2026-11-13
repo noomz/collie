@@ -303,7 +303,7 @@ import { HoldStore } from "./surface/holds.ts";
 import { SurfaceLedger } from "./surface/counters.ts";
 import { deliverEdge, EdgeRouter, type EdgeTarget } from "./surface/edges.ts";
 import { counterWordOf, HoldBook, HoldServer, takeHold, type HoldTarget } from "./surface/hold.ts";
-import { holdSocketPath, inboxDir } from "./beacon/paths.ts";
+import { holdSocketPath, inboxDir, opencodeInboxDir } from "./beacon/paths.ts";
 import { VersionCache } from "./surface/binary-version.ts";
 import { findProfile, loadProfiles, type Profile } from "../web/src/lib/surface/profile.ts";
 import { crewFactsWorld, FACTS_CAPS, factsWorldOf, NO_FACTS_CAPS, type FactsWorld } from "./tricks/facts.ts";
@@ -2045,6 +2045,15 @@ const makeSession: SessionFactory = (name, endpoint, isPrimary) => {
                 },
               }),
             },
+            // opencode's binds a pane where its plugin's TUI shows the session the multiplexer names (SPEC V32).
+            opencode:
+              paneMatcher === undefined
+                ? undefined
+                : {
+                    dir: opencodeInboxDir(process.env, homedir()),
+                    matcher: paneMatcher,
+                    sessionOf: (paneId) => engine.current().agents.find((agent) => agent.paneId === paneId)?.agentSession,
+                  },
           }),
         })
       : undefined;
