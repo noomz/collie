@@ -719,7 +719,7 @@ export const it: Dictionary = {
   "chat.stream.returnedDiscard": "Scarta",
   "chat.stream.returnedDiscardAria": "Scarta questo messaggio dalla casella dell'agente",
   "chat.stream.leftInbox": "Uscito dalla casella",
-  "chat.stream.leftInboxWhy": "Questo messaggio è uscito dalla casella dell'agente senza essere eseguito e non è nella casella di input dell'agente. Controlla l'agente.",
+  "chat.stream.leftInboxWhy": "Questo messaggio è uscito dalla casella dell'agente senza essere eseguito. Potrebbe essere stato eliminato, o rimesso nella casella di input dell'agente come bozza. Controlla l'agente.",
   "chat.stream.unconfirmed": "Non confermato",
   "chat.stream.unconfirmedWhy": "Collie non sa dire dove sia finito questo messaggio. Controlla l'agente.",
   "chat.stream.unconfirmedDiscard": "Scarta",

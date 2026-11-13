@@ -812,7 +812,7 @@ describe("SessionStream — queued sends from the receipts", () => {
     const card = container.querySelector("[data-slot='stream-left-inbox']")!;
     expect([...card.querySelectorAll("p")].map((p) => p.textContent)).toEqual([
       "Left the inbox",
-      "This message left the agent's inbox without running, and it is not in the agent's box. Check the agent.",
+      "This message left the agent's inbox without running. It may have been deleted, or put back in the agent's box as a draft. Check the agent.",
       "second message",
     ]);
     expect(card.querySelectorAll("button")).toHaveLength(1);

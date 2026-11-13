@@ -759,7 +759,7 @@ export const zhTW: Dictionary = {
   "chat.stream.returnedDiscard": "捨棄",
   "chat.stream.returnedDiscardAria": "捨棄代理文字方塊中的這則訊息",
   "chat.stream.leftInbox": "已離開收件匣",
-  "chat.stream.leftInboxWhy": "這則訊息未執行就離開了代理的收件匣，也不在代理的文字方塊中。請檢查代理。",
+  "chat.stream.leftInboxWhy": "這則訊息未執行就離開了代理的收件匣。它可能已被刪除，或以草稿放回代理的文字方塊。請檢查代理。",
   "chat.stream.unconfirmed": "未確認",
   "chat.stream.unconfirmedWhy": "Collie 無法確定這則訊息去了哪裡。請檢查代理。",
   "chat.stream.unconfirmedDiscard": "捨棄",

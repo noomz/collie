@@ -715,7 +715,7 @@ export const pt: Dictionary = {
   "chat.stream.returnedDiscard": "Descartar",
   "chat.stream.returnedDiscardAria": "Descartar esta mensagem da caixa do agente",
   "chat.stream.leftInbox": "Saiu da caixa de entrada",
-  "chat.stream.leftInboxWhy": "Esta mensagem saiu da caixa de entrada do agente sem rodar e não está na caixa do agente. Verifique o agente.",
+  "chat.stream.leftInboxWhy": "Esta mensagem saiu da caixa de entrada do agente sem rodar. Ela pode ter sido apagada ou devolvida à caixa do agente como rascunho. Verifique o agente.",
   "chat.stream.unconfirmed": "Não confirmada",
   "chat.stream.unconfirmedWhy": "O Collie não consegue saber para onde esta mensagem foi. Verifique o agente.",
   "chat.stream.unconfirmedDiscard": "Descartar",

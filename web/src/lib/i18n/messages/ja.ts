@@ -771,7 +771,7 @@ export const ja: Dictionary = {
   "chat.stream.returnedDiscard": "破棄",
   "chat.stream.returnedDiscardAria": "破棄、エージェントの入力欄にあるこのメッセージ",
   "chat.stream.leftInbox": "受信箱から消えました",
-  "chat.stream.leftInboxWhy": "このメッセージは実行されずにエージェントの受信箱から消え、エージェントの入力欄にもありません。エージェントを確認してください。",
+  "chat.stream.leftInboxWhy": "このメッセージは実行されずにエージェントの受信箱から消えました。削除されたか、下書きとしてエージェントの入力欄に戻された可能性があります。エージェントを確認してください。",
   "chat.stream.unconfirmed": "未確認",
   "chat.stream.unconfirmedWhy": "このメッセージの行き先を Collie は確認できません。エージェントを確認してください。",
   "chat.stream.unconfirmedDiscard": "破棄",

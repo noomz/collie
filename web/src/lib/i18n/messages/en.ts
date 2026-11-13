@@ -908,7 +908,7 @@ export const en = {
   "chat.stream.returnedDiscard": "Discard",
   "chat.stream.returnedDiscardAria": "Discard this message from the agent's box",
   "chat.stream.leftInbox": "Left the inbox",
-  "chat.stream.leftInboxWhy": "This message left the agent's inbox without running, and it is not in the agent's box. Check the agent.",
+  "chat.stream.leftInboxWhy": "This message left the agent's inbox without running. It may have been deleted, or put back in the agent's box as a draft. Check the agent.",
   "chat.stream.unconfirmed": "Not confirmed",
   "chat.stream.unconfirmedWhy": "Collie cannot tell where this message went. Check the agent.",
   "chat.stream.unconfirmedDiscard": "Discard",

@@ -772,7 +772,7 @@ export const ko: Dictionary = {
   "chat.stream.returnedDiscard": "삭제",
   "chat.stream.returnedDiscardAria": "삭제, 에이전트 상자에 있는 이 메시지",
   "chat.stream.leftInbox": "받은편지함에서 나감",
-  "chat.stream.leftInboxWhy": "이 메시지는 실행되지 않고 에이전트의 받은편지함에서 나갔으며, 에이전트의 상자에도 없습니다. 에이전트를 확인하세요.",
+  "chat.stream.leftInboxWhy": "이 메시지는 실행되지 않고 에이전트의 받은편지함에서 나갔습니다. 삭제되었거나 초안으로 에이전트의 상자에 다시 들어갔을 수 있습니다. 에이전트를 확인하세요.",
   "chat.stream.unconfirmed": "확인되지 않음",
   "chat.stream.unconfirmedWhy": "Collie는 이 메시지가 어디로 갔는지 알 수 없습니다. 에이전트를 확인하세요.",
   "chat.stream.unconfirmedDiscard": "삭제",

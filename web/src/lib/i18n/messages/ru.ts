@@ -723,7 +723,7 @@ export const ru: Dictionary = {
   "chat.stream.returnedDiscard": "Сбросить",
   "chat.stream.returnedDiscardAria": "Сбросить это сообщение из поля агента",
   "chat.stream.leftInbox": "Ушло из входящих",
-  "chat.stream.leftInboxWhy": "Это сообщение ушло из входящих агента, не выполнившись, и его нет в поле агента. Проверьте агента.",
+  "chat.stream.leftInboxWhy": "Это сообщение ушло из входящих агента, не выполнившись. Возможно, его удалили или вернули в поле агента как черновик. Проверьте агента.",
   "chat.stream.unconfirmed": "Не подтверждено",
   "chat.stream.unconfirmedWhy": "Collie не может сказать, куда ушло это сообщение. Проверьте агента.",
   "chat.stream.unconfirmedDiscard": "Сбросить",

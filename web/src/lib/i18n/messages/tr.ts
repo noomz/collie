@@ -715,7 +715,7 @@ export const tr: Dictionary = {
   "chat.stream.returnedDiscard": "Sil",
   "chat.stream.returnedDiscardAria": "Sil, ajanın kutusundaki bu mesajı",
   "chat.stream.leftInbox": "Gelen kutusundan çıktı",
-  "chat.stream.leftInboxWhy": "Bu mesaj çalışmadan ajanın gelen kutusundan çıktı ve ajanın kutusunda da değil. Ajanı kontrol edin.",
+  "chat.stream.leftInboxWhy": "Bu mesaj çalışmadan ajanın gelen kutusundan çıktı. Silinmiş ya da taslak olarak ajanın kutusuna geri konmuş olabilir. Ajanı kontrol edin.",
   "chat.stream.unconfirmed": "Doğrulanmadı",
   "chat.stream.unconfirmedWhy": "Collie bu mesajın nereye gittiğini bilemiyor. Ajanı kontrol edin.",
   "chat.stream.unconfirmedDiscard": "Sil",

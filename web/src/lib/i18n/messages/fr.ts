@@ -717,7 +717,7 @@ export const fr: Dictionary = {
   "chat.stream.returnedDiscard": "Supprimer",
   "chat.stream.returnedDiscardAria": "Supprimer ce message de la zone de l'agent",
   "chat.stream.leftInbox": "Sorti de la boîte",
-  "chat.stream.leftInboxWhy": "Ce message a quitté la boîte de réception de l'agent sans s'exécuter, et il n'est pas dans la zone de l'agent. Vérifiez l'agent.",
+  "chat.stream.leftInboxWhy": "Ce message a quitté la boîte de réception de l'agent sans s'exécuter. Il a peut-être été supprimé, ou remis dans la zone de l'agent comme brouillon. Vérifiez l'agent.",
   "chat.stream.unconfirmed": "Non confirmé",
   "chat.stream.unconfirmedWhy": "Collie ne peut pas dire où ce message est allé. Vérifiez l'agent.",
   "chat.stream.unconfirmedDiscard": "Supprimer",

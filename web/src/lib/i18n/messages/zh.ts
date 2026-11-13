@@ -760,7 +760,7 @@ export const zh: Dictionary = {
   "chat.stream.returnedDiscard": "丢弃",
   "chat.stream.returnedDiscardAria": "丢弃代理输入框中的这条消息",
   "chat.stream.leftInbox": "已离开收件箱",
-  "chat.stream.leftInboxWhy": "这条消息未运行就离开了代理的收件箱，也不在代理的输入框中。请检查代理。",
+  "chat.stream.leftInboxWhy": "这条消息未运行就离开了代理的收件箱。它可能已被删除，或作为草稿放回了代理的输入框。请检查代理。",
   "chat.stream.unconfirmed": "未确认",
   "chat.stream.unconfirmedWhy": "Collie 无法确定这条消息去了哪里。请检查代理。",
   "chat.stream.unconfirmedDiscard": "丢弃",

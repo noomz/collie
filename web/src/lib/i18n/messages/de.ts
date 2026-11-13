@@ -789,7 +789,7 @@ export const de: Dictionary = {
   "chat.stream.returnedDiscard": "Verwerfen",
   "chat.stream.returnedDiscardAria": "Verwerfen, diese Nachricht im Feld des Agenten",
   "chat.stream.leftInbox": "Aus dem Posteingang",
-  "chat.stream.leftInboxWhy": "Diese Nachricht hat den Posteingang des Agenten verlassen, ohne zu laufen, und sie steht nicht im Feld des Agenten. Prüfe den Agenten.",
+  "chat.stream.leftInboxWhy": "Diese Nachricht hat den Posteingang des Agenten verlassen, ohne zu laufen. Sie wurde vielleicht gelöscht oder als Entwurf zurück ins Feld des Agenten gelegt. Prüfe den Agenten.",
   "chat.stream.unconfirmed": "Nicht bestätigt",
   "chat.stream.unconfirmedWhy": "Collie kann nicht sagen, wo diese Nachricht geblieben ist. Sieh beim Agenten nach.",
   "chat.stream.unconfirmedDiscard": "Verwerfen",

@@ -786,7 +786,7 @@ export const es: Dictionary = {
   "chat.stream.returnedDiscard": "Descartar",
   "chat.stream.returnedDiscardAria": "Descartar este mensaje del cuadro del agente",
   "chat.stream.leftInbox": "Salió de la bandeja",
-  "chat.stream.leftInboxWhy": "Este mensaje salió de la bandeja de entrada del agente sin ejecutarse y no está en el cuadro del agente. Revisa el agente.",
+  "chat.stream.leftInboxWhy": "Este mensaje salió de la bandeja de entrada del agente sin ejecutarse. Puede que se haya borrado o que haya vuelto al cuadro del agente como borrador. Revisa el agente.",
   "chat.stream.unconfirmed": "Sin confirmar",
   "chat.stream.unconfirmedWhy": "Collie no puede saber adónde fue este mensaje. Revisa el agente.",
   "chat.stream.unconfirmedDiscard": "Descartar",

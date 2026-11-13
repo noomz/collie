@@ -3,7 +3,8 @@
 // A screen send waits in the harness's own queue, and Stop puts it back in the input box as a draft
 // (ADR 0122). pi's door does the same: Escape hands its follow-up back to the editor. opencode's door
 // does not: the item stays in the server's inbox and runs after the next desk turn, so "stop the turn to
-// take it back" would be false there, and a send that left the inbox without running is not in the box.
+// take it back" would be false there. A send can still leave the inbox without running, through the TUI's
+// queued-prompts list: delete drops it, undo puts it back in the box, and nothing tells the two apart.
 // Any other door's queue is unmeasured, so the phone promises nothing of it.
 //
 // `via` is the receipt card's door id, absent for the screen (and from a bridge one release behind,
