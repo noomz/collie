@@ -61,11 +61,13 @@ describe("the Claude login copy", () => {
     expect(() => seedClaude(join(temp(), "config"), "/p", { configDir: empty, stateFile: join(empty, "none.json") })).toThrow(/no Claude login/);
   });
 
-  test("the state copy keeps the account, drops the project history, trusts the one project and skips the renderer question", () => {
+  test("the state copy keeps the account, drops the project history, trusts the one project, refuses external CLAUDE.md imports and skips the renderer question", () => {
     const state = JSON.parse(runState(readFileSync(source(60).stateFile, "utf8"), "/lab/project"));
     expect(state.oauthAccount.emailAddress).toBe("me@example.com");
     expect(Object.keys(state.projects)).toEqual(["/lab/project"]);
     expect(state.projects["/lab/project"].hasTrustDialogAccepted).toBe(true);
+    expect(state.projects["/lab/project"].hasClaudeMdExternalIncludesApproved).toBe(false);
+    expect(state.projects["/lab/project"].hasClaudeMdExternalIncludesWarningShown).toBe(true);
     expect(state.fullscreenUpsellSeenCount).toBe(3);
     expect(state.theme).toBeUndefined();
   });

@@ -69,7 +69,19 @@ export function runState(text: string, project: string): string {
   // Claude 2.1.301 asks a fresh config "Try the new fullscreen renderer?" until this counter reaches 3.
   // The lab is a fresh config on every run, so the question would be its first screen every time.
   keep.fullscreenUpsellSeenCount = 3;
-  keep.projects = { [project]: { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true, allowedTools: [] } };
+  // The lab project lives under the operator's home, so Claude's walk up finds the operator's own
+  // `~/.claude/CLAUDE.md`. When that file imports one outside the project, Claude asks "Allow external
+  // CLAUDE.md file imports?" and never comes up idle. The run answers No, as a person would for a
+  // project they do not own, so the operator's files stay out of the lab's prompt too.
+  keep.projects = {
+    [project]: {
+      hasTrustDialogAccepted: true,
+      hasCompletedProjectOnboarding: true,
+      hasClaudeMdExternalIncludesApproved: false,
+      hasClaudeMdExternalIncludesWarningShown: true,
+      allowedTools: [],
+    },
+  };
   return JSON.stringify(keep);
 }
 
