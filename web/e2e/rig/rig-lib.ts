@@ -22,11 +22,13 @@
 // has its own default state root (`browser-leg-crew-state`), so the solo leg and the crew leg never
 // share a rig folder, a Herdr home or a port. `COLLIE_RIG_CREW=1` selects it (crew-env.ts sets it).
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
+
+import type { LaunchOptions } from "@playwright/test";
 
 import { asJsonNumber, asJsonObject, asJsonString, parseJson, type JsonObject } from "../../src/lib/json";
 import type { TierPlans } from "./replay/tier";
@@ -73,7 +75,26 @@ export const P = {
   homeCfg: join(RIG, "config", "home-config.toml"), // COLLIE_CONFIG: a file that never exists
   harness: join(STATE_ROOT, "harness"), // one scratch HOME / config dir per harness
   results: join(STATE_ROOT, "results"), // one folder per run: ledger, table, screen captures
+  browserTmp: join(STATE_ROOT, "browser-tmp"), // TMPDIR of the phone's Chromium (phoneLaunchOptions)
 } as const;
+
+/** The phone browser's environment: the caller's, with TMPDIR at `tmp`. Playwright starts Chromium
+ * with `--disable-dev-shm-usage`, so Chromium keeps its shared memory in TMPDIR, `/tmp` by default.
+ * A `/tmp` that is full, or whose per-user quota is used up (a tmpfs mounted `usrquota`), fails every
+ * shared-memory map: loads end `net::ERR_INSUFFICIENT_RESOURCES` and the renderer or the browser
+ * crashes ("Target crashed"), which reads as a failed case. Seen on a Linux host on 2026-11-16. */
+export function phoneEnv(env: NodeJS.ProcessEnv, tmp: string): NonNullable<LaunchOptions["env"]> {
+  const out: NonNullable<LaunchOptions["env"]> = {};
+  for (const [key, value] of Object.entries(env)) if (value !== undefined) out[key] = value;
+  out.TMPDIR = tmp;
+  return out;
+}
+
+/** Launch options for the phone's Chromium in both configs: TMPDIR under the state root, on disk. */
+export function phoneLaunchOptions(): LaunchOptions {
+  mkdirSync(P.browserTmp, { recursive: true });
+  return { env: phoneEnv(process.env, P.browserTmp) };
+}
 
 /** One machine of the rig: the lead (the solo rig is a lead with no member) or the crew's member. */
 export type Machine = "lead" | "member";

@@ -13,6 +13,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 import { PHONE_DEVICE } from "./leg";
+import { phoneLaunchOptions } from "./rig-lib";
 
 if (process.env.CI) {
   throw new Error("The browser leg starts a bridge, a Herdr server and real agents, and spends model turns. It never runs in CI.");
@@ -38,6 +39,7 @@ export default defineConfig({
   outputDir: "test-results",
   use: {
     ...devices[PHONE_DEVICE],
+    launchOptions: phoneLaunchOptions(),
     screenshot: "only-on-failure",
     trace: "off",
     video: "off",
