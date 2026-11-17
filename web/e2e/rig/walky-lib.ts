@@ -451,6 +451,30 @@ export function takeBackFor(back: CliCancel | null, matches: (target: string) =>
   return asJsonString(back?.results.find((row) => matches(asJsonString(asJsonObject(row.receipt)?.target) ?? ""))?.result) ?? null;
 }
 
+/**
+ * `collie agent prompt <pane> <text>` from a plain shell on the lead's host (T30): no pane markers, only the
+ * bridge's state dir, which is how the person's own terminal reaches the walky socket. Its stdout, its stderr and its exit code.
+ */
+export async function cliAgentPrompt(pane: string, text: string): Promise<{ code: number; out: string; err: string }> {
+  const dirs = machineDirs("lead");
+  const env = { PATH: process.env.PATH ?? "", HOME: dirs.bridgeHome, COLLIE_STATE_DIR: dirs.state, COLLIE_TELEMETRY: "0" };
+  return new Promise((done) => {
+    const child = spawn("bun", [join(WORKTREE, "cli", "main.ts"), "agent", "prompt", pane, text], { env, timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      out += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      err += chunk;
+    });
+    child.on("error", () => done({ code: 1, out, err }));
+    child.on("close", (code) => done({ code: code ?? 1, out, err }));
+  });
+}
+
 /** One `collie walky` verb from a pane's own environment, as `cliSend` describes it. */
 async function runCli(senderPane: string, args: readonly string[], machine: Machine): Promise<{ code: number; out: string }> {
   const run = readRun();

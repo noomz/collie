@@ -23,7 +23,7 @@ import { asJsonObject, asJsonString, parseJson, type JsonValue } from "../../src
 import { harnessDirs } from "./harnesses";
 import { NotReached, Rig, capture, captureScreen, phoneOn, runScenario, sendFromComposer, spendTurn, startHarness, tapWords, test, waitIdle, type Session } from "./leg";
 import { muxOf, sleep } from "./rig-lib";
-import { PHONE, REPLY_MS } from "./walky-lib";
+import { PHONE, REPLY_MS, cliAgentPrompt } from "./walky-lib";
 
 const H = "pi" as const;
 const session: Session = { paneId: null, startNote: "not started" };
@@ -32,6 +32,9 @@ const session: Session = { paneId: null, startNote: "not started" };
 const DRAFT = "deskdraftword";
 const TEXT = "Inbox check: reply with only the word INBOX-OK, nothing else.";
 const REPLY = /^\s*INBOX-OK\.?\s*$/m;
+/** The terminal's send (T30): `collie agent prompt` takes the same door, and its answer is the journal's. */
+const CLI_TEXT = "Terminal check: reply with only the word CLI-OK, nothing else.";
+const CLI_REPLY = /^\s*CLI-OK\.?\s*$/m;
 
 /** The text of one pi log line's user message, or null for any other line. */
 function userText(line: string): string | null {
@@ -113,11 +116,24 @@ test.describe("pi's inbox", () => {
         notes.push(
           `${core ? "" : replied ? "pi answered; " : "NO answer on screen; "}the draft ${draftKept ? "is still in pi's box" : "IS NOT IN THE BOX"}; the log holds the text ${String(exact)}x exact, ${String(merged)}x merged, the draft ${String(draftTurns)}x`,
         );
+        // T30: the same pane, from the person's terminal. The CLI waits for the journal, so its word is the proof.
+        let cli = { code: -1, out: "", err: "" };
+        let cliExact = 0;
+        let cliReplied = false;
+        if (!core) {
+          const cliSince = Date.now() - 2000;
+          spendTurn(H, "inbox: the answer to the terminal's text");
+          cli = await cliAgentPrompt(pane, CLI_TEXT);
+          cliReplied = (await rig.screenUntil(pane, CLI_REPLY, REPLY_MS, 120)) !== null;
+          await waitIdle(rig, pane, REPLY_MS);
+          cliExact = userTurnsSince(cliSince).filter((text) => text === CLI_TEXT).length;
+          notes.push(`terminal: exit ${String(cli.code)}, "${cli.out.trim()}${cli.err.trim()}"; ${cliReplied ? "pi answered" : "NO answer on screen"}; the log holds the text ${String(cliExact)}x exact`);
+        }
         trail.captures.push(await capture(page, "door-36"), await captureScreen(rig, pane, "door-36"));
 
         const pass = core
           ? receipt.doorRefused && receipt.via === "screen" && draftKept && exact === 0 && merged === 0 && draftTurns === 0
-          : t.worked && receipt.outcome === "sent" && receipt.via === "pi" && receipt.door === "taken" && !receipt.doorRefused && replied && draftKept && exact === 1 && merged === 0 && draftTurns === 0;
+          : t.worked && receipt.outcome === "sent" && receipt.via === "pi" && receipt.door === "taken" && !receipt.doorRefused && replied && draftKept && exact === 1 && merged === 0 && draftTurns === 0 && cli.code === 0 && /^landed/m.test(cli.out) && cli.out.includes("via pi") && cliReplied && cliExact === 1;
         if (core) notes.push("herdr-core names no pi session file: the inbox refuses and the screen path keeps the draft (#764 Known gaps)");
         return { verdict: pass ? "pass" : "fail", taps: trail.log.length, minTaps: 1, note: notes.join("; "), taps_log: trail.log, captures: trail.captures };
       } finally {
