@@ -149,6 +149,35 @@ group the members under that machine's name, one line per instance.
 `tailscale serve` publishes left `collie status` in 1.25.0. Run `collie serve status` for it, or
 `collie status --verbose`.
 
+## Send to an agent from a terminal
+
+Run `collie agent prompt` to send text to an agent's pane through the running bridge:
+
+```bash
+collie agent prompt %3 run the tests
+echo "run the tests" | collie agent prompt %3
+```
+
+It takes the same route as a send from the phone. The agent's own door goes first (pi, Hermes or
+opencode, once you have installed it). When the pane has no door, or the door refuses before it takes
+the text, the screen path sends it. A send that may have reached the agent is never typed again.
+
+The answer comes from the agent's journal, never from the door's reply:
+
+| It prints | What happened | Exit |
+| --- | --- | --- |
+| `landed` | The journal shows the text as the agent's own turn | 0 |
+| `queued` | The agent holds it for after its running turn | 0 |
+| `merged or changed` | The journal shows a turn that holds the text, but not exactly it | 1 |
+| `refused` | Nothing was sent, and the reason follows in brackets | 4 |
+| `unconfirmed` | The journal did not show the text within 15 seconds | 3 |
+
+> **Note.** `unconfirmed` means the text may still arrive. Check the pane before you send it again.
+
+`collie agent prompt` needs a running bridge on this machine and sends nothing without one. It does not
+wait for the agent's turn to end. Herdr's own `herdr agent prompt` is unchanged and still types into the
+pane.
+
 ## Put `collie` on your PATH
 
 Run `collie link` to publish `~/.local/bin/collie`:

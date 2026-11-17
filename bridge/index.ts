@@ -223,7 +223,8 @@ import { currentWarrant, discardForeignWarrant, refreshWarrant, type WarrantPush
 import { CLEAR_BURST_MS, Push } from "./push.ts";
 import { currentNotesReader } from "./release-notes.ts";
 import { pluginRoot } from "./root.ts";
-import { agentPaneFilesRoot, buildId, filesPrivateFolders, startServer } from "./server.ts";
+import { agentPaneFilesRoot, buildId, filesPrivateFolders, sendRoute, startServer } from "./server.ts";
+import { answerAgentPrompt } from "./agent-prompt.ts";
 import {
   DEFAULT_SESSION_NAME,
   herdTagFor,
@@ -2615,6 +2616,17 @@ const walkyServer = new WalkyServer({
   hill,
   propose: proposeDoor,
   views,
+  // `collie agent prompt` (T30): the person's send from a terminal, through the same Send route the phone uses.
+  agentPrompt: {
+    prompt: (request) =>
+      answerAgentPrompt(
+        {
+          runtimeOf: (paneId) => registry.ordered().find((rt) => rt.send !== undefined && rt.engine.current().agents.some((view) => view.paneId === paneId)) ?? null,
+          send: (rt, body) => sendRoute(rt, body, { audit, device: "cli", redact: cfg.redact, acceptEncoding: null }),
+        },
+        request,
+      ),
+  },
   targets: () => {
     const live = new Set(registry.ordered().map((runtime) => runtime.name));
     return [...edgeTargets].filter(([name]) => live.has(name)).map(([, target]) => target);

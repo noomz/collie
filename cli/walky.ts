@@ -57,7 +57,7 @@ export interface WalkyDeps extends EdgeTargetDeps {
 }
 
 /** Every bridge socket on this machine worth asking, this install's own first. */
-function socketPaths(deps: WalkyDeps): string[] {
+export function socketPaths(deps: WalkyDeps): string[] {
   const own = walkySocketPath(deps.ctx.stateDir);
   const listed = deps.sockets?.() ?? [own, ...edgeStateDirs(deps).map((dir) => walkySocketPath(dir))];
   return [...new Set(listed)].filter((path) => holdSocketSafe(deps, path));

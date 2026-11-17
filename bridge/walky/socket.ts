@@ -12,6 +12,9 @@
 //   cancel  { id }                      → { ok, results }   (M62 spec 03: the sender takes a held message back)
 //   off     {}                          → { ok, off }       (M89: the asker's own pane turns its walky talky off)
 //   on      {}                          → { ok, off }       (M89: and on again)
+//   agent.prompt { pane, text, requestId } → { ok, outcome, requestId, via?, reason?, detail? } | { ok: false, error }
+//                                                            (T30: `collie agent prompt`, a person's send through the Send route;
+//                                                             names its pane, no markers; outcome landed|queued|merged|refused|unconfirmed)
 //   pane    {}                          → { ok, agent }     (crew slice 3: whether the asking pane runs an
 //                                                            agent; `collie trick on` asks it before it refuses)
 // The hill (M96), four operations beside these, answered only by a bridge built with it:
@@ -74,6 +77,7 @@ import type { TrickViewSession } from "../../web/src/lib/agent-view/wire.ts";
 import type { Refusal } from "../../web/src/lib/tricks/schema.ts";
 import { isHillOp, isViewOp, PROPOSE_LINE_MAX, PROPOSE_LINE_PREFIX, readWalkyRequest, WALKY_LINE_MAX, type ViewOp, type WalkyRequest, type WalkyRequestRead } from "./parse.ts";
 import { unknownOp } from "./refusals.ts";
+import type { AgentPromptAnswer, AgentPromptRequest } from "../agent-prompt.ts";
 import type { WalkyDelivery, WalkyService } from "./service.ts";
 import type { TakeBack, WalkyPane } from "./deliver.ts";
 import type { WalkySpace } from "./space.ts";
@@ -115,6 +119,11 @@ export const PROPOSE_LINES_MAX = 2;
 /** What the socket needs of the proposals (crew slice 8, bridge/tricks/propose-door.ts). */
 export interface ProposeSocket {
   local(fields: JsonObject, who: LocalProposer): Promise<ProposeAnswer>;
+}
+
+/** What the socket needs of `collie agent prompt` (bridge/agent-prompt.ts). */
+export interface AgentPromptSocket {
+  prompt(request: AgentPromptRequest): Promise<AgentPromptAnswer>;
 }
 
 /** The pane the markers name: a session and a pane id. The service then reads its instance. */
@@ -163,6 +172,8 @@ export interface WalkyServerDeps {
   readonly views?: ViewSocket;
   /** `collie trick propose` (crew slice 8). Absent: the op is answered as unknown. */
   readonly propose?: ProposeSocket;
+  /** `collie agent prompt` (T30). Absent: the op is answered as unknown. */
+  readonly agentPrompt?: AgentPromptSocket;
 }
 
 /** What one request is answered with. */
@@ -193,6 +204,8 @@ export type WalkyAnswer =
   // A trick proposal (crew slice 8).
   | { readonly ok: true; readonly kind: "proposal" | "version"; readonly id: string; readonly hash: string; readonly decision: string | null; readonly replaced: string | null }
   | { readonly ok: false; readonly error: string; readonly code: ProposeRefusalCode; readonly propose: true }
+  // `collie agent prompt` (T30).
+  | AgentPromptAnswer
   // Agent views.
   | { readonly ok: false; readonly error: string; readonly trickView: true; readonly code?: ViewRefusalCode; readonly refusals?: readonly Refusal[] }
   | { readonly ok: true; readonly trickView: TrickViewSession; readonly help?: readonly string[] };
@@ -214,7 +227,14 @@ export async function answerRequest(
   hill?: HillSocket,
   views?: ViewSocket,
   propose?: ProposeSocket,
+  agentPrompt?: AgentPromptSocket,
 ): Promise<WalkyAnswer> {
+  // `agent.prompt` names its own pane and goes through the Send route, which places it (V38). A bridge
+  // built without it answers as it answers any op it does not know.
+  if (request.op === "agent.prompt") {
+    if (agentPrompt === undefined) return { ok: false, error: unknownOp(request.op) };
+    return await agentPrompt.prompt({ pane: request.pane, text: request.text, requestId: request.requestId });
+  }
   // A bridge built without the hill answers its operations as it answers any op it does not know.
   if (hill === undefined && isHillOp(request.op)) return answerUnread(service, { ok: false, markers: request.markers, reason: unknownOp(request.op) }, targets);
   // And so does a bridge built without agent views.
@@ -652,7 +672,7 @@ export class WalkyServer {
       if (!read.ok) return this.reply(socket, await answerUnread(this.deps.service, read, this.deps.targets()));
       // A long line is a proposal's, or nothing: a second `op` key cannot turn it into another request.
       if (big && read.request.op !== "trick.propose") return this.reply(socket, { ok: false, error: "bad request: a long line is a trick proposal only" });
-      this.reply(socket, await answerRequest(this.deps.service, read.request, this.deps.targets(), this.deps.hill, this.deps.views, this.deps.propose));
+      this.reply(socket, await answerRequest(this.deps.service, read.request, this.deps.targets(), this.deps.hill, this.deps.views, this.deps.propose, this.deps.agentPrompt));
     } catch (err) {
       this.log(`[walky] request failed: ${err instanceof Error ? err.message : String(err)}`);
       this.reply(socket, { ok: false, error: "failed" });

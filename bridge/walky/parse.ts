@@ -157,7 +157,7 @@ export function readReceipt(value: JsonValue | undefined): WalkyReceipt | null {
 
 // ── The local socket's requests ──────────────────────────────────────────────────────────────────
 
-export type WalkyOp = "send" | "inbox" | "who" | "status" | "ack" | "cancel" | "off" | "on" | "pane" | HillOp | "trick.propose" | ViewOp;
+export type WalkyOp = "send" | "inbox" | "who" | "status" | "ack" | "cancel" | "off" | "on" | "pane" | HillOp | "trick.propose" | "agent.prompt" | ViewOp;
 
 /** What a `hill.state` request with a word that is no crew state is refused with. */
 export const HILL_BAD_CREW_STATE = "bad request: the crew state is here, quiet or away";
@@ -194,6 +194,9 @@ export type WalkyRequest =
   // The crew state (1.29.0): a read with no `state`, a person's write with one. A new op, so a bridge
   // before it answers it as unknown and never takes a write it cannot read.
   | { readonly op: "hill.state"; readonly markers: readonly BeaconMarker[]; readonly state: HillCrewState | null }
+  // `collie agent prompt` (T30, V38): a person's send from a terminal, through the Send route. It names its
+  // pane itself and carries no markers: the socket's mode is the credential, as for `hill.clear`.
+  | { readonly op: "agent.prompt"; readonly markers: readonly BeaconMarker[]; readonly pane: string; readonly text: string; readonly requestId: string }
   // A trick handed to the lead (crew slice 8): its fields are read by bridge/tricks/propose-wire.ts.
   | { readonly op: "trick.propose"; readonly markers: readonly BeaconMarker[]; readonly fields: JsonObject }
   // Agent views: every op names the trick (`trick`, a trick id) whose view it writes or reads. The
@@ -290,6 +293,13 @@ export function readWalkyRequest(line: string, max: number = WALKY_LINE_MAX): Wa
     return done({ op, markers, state });
   }
   if (op === "trick.propose") return done({ op, markers, fields: row });
+  if (op === "agent.prompt") {
+    const pane = text(row, "pane");
+    const words = text(row, "text");
+    const requestId = text(row, "requestId");
+    if (pane === null || pane.length === 0 || words === null || requestId === null) return unread(BAD_REQUEST_LINE, markers);
+    return done({ op, markers, pane, text: words, requestId });
+  }
   // Agent views. A bridge built without them answers these as it answers any op it does not know.
   if (isViewOp(op)) {
     // `session` is absent, null, or text; anything else is a request this bridge cannot read.

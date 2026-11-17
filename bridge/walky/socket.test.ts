@@ -13,7 +13,7 @@ import { parseWalkyRequest, RAW_BODY_MAX, readWalkyRequest } from "./parse.ts";
 import { BAD_ACK_IDS, BAD_MESSAGE_ID, BAD_REQUEST_LINE, BARE_BAD_REQUEST, bodyOverRaw, NO_ADDRESS, unknownOp, unreadAddress } from "./refusals.ts";
 import { WalkyService } from "./service.ts";
 import { WalkyOff } from "./off.ts";
-import { answerRequest, answerUnread, CANCEL_NEEDS_A_PANE, HILL_NEEDS_A_PANE, placeMarkers, SWITCH_NEEDS_A_PANE, walkySocketPath, WalkyServer, type PlaceTarget } from "./socket.ts";
+import { answerRequest, answerUnread, type AgentPromptSocket, CANCEL_NEEDS_A_PANE, HILL_NEEDS_A_PANE, placeMarkers, SWITCH_NEEDS_A_PANE, walkySocketPath, WalkyServer, type PlaceTarget } from "./socket.ts";
 import { HILL_BAD_ID } from "../hill/parse.ts";
 import { memoryHillReceipts } from "../hill/receipts.ts";
 import type { HillLeadForward } from "../hill/crew.ts";
@@ -472,5 +472,43 @@ describe("the hill operations (M96)", () => {
     const { walky, hill } = withHill();
     expect(await ask(walky, hill, { op: "who", markers: marker("%9") })).toEqual({ ok: false, error: "not here" });
     expect(await ask(walky, hill, { op: "send", markers: [], id: "wt_aaaaaaaaaaa1", to: "local/%2", body: "hi" })).toEqual({ ok: false, error: "run this inside a pane, or send from the phone" });
+  });
+});
+
+describe("the agent prompt request (T30, V38)", () => {
+  const line = (over: JsonObject = {}) => JSON.stringify({ v: 1, op: "agent.prompt", markers: [], pane: "%1", text: "run the tests", requestId: "cli-aaaaaaaa", ...over });
+  const fresh = () => {
+    const root = mkdtempSync(join(tmpdir(), "walky-socket-"));
+    roots.push(root);
+    return new WalkyService({ log: new WalkyLog(join(root, "walky")), host, memberId: null, enabled: () => true, machine: "desk", keyPem: () => null });
+  };
+
+  test("its fields are read; a line missing the pane, the text or the id is a request this bridge cannot read", () => {
+    expect(parseWalkyRequest(line())).toMatchObject({ op: "agent.prompt", pane: "%1", text: "run the tests", requestId: "cli-aaaaaaaa" });
+    const whole: JsonObject = { v: 1, op: "agent.prompt", markers: [], pane: "%1", text: "run the tests", requestId: "cli-aaaaaaaa" };
+    for (const missing of ["pane", "text", "requestId"]) {
+      const row = Object.fromEntries(Object.entries(whole).filter(([key]) => key !== missing));
+      expect(readWalkyRequest(JSON.stringify(row))).toMatchObject({ ok: false, reason: BAD_REQUEST_LINE });
+    }
+    expect(readWalkyRequest(line({ pane: "" }))).toMatchObject({ ok: false, reason: BAD_REQUEST_LINE });
+  });
+
+  test("a bridge built with it hands the three fields to it and answers what it answers; the markers place nothing", async () => {
+    const asked: unknown[] = [];
+    const answer = { ok: true as const, outcome: "queued" as const, requestId: "cli-aaaaaaaa", via: "pi" };
+    const agentPrompt: AgentPromptSocket = {
+      prompt: (asking) => {
+        asked.push(asking);
+        return Promise.resolve(answer);
+      },
+    };
+    const request = parseWalkyRequest(line())!;
+    expect(await answerRequest(fresh(), request, [target], undefined, undefined, undefined, agentPrompt)).toEqual(answer);
+    expect(asked).toEqual([{ pane: "%1", text: "run the tests", requestId: "cli-aaaaaaaa" }]);
+  });
+
+  test("a bridge built without it answers as it answers any op it does not know", async () => {
+    const request = parseWalkyRequest(line())!;
+    expect(await answerRequest(fresh(), request, [target])).toEqual({ ok: false, error: unknownOp("agent.prompt") });
   });
 });

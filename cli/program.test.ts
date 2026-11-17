@@ -83,7 +83,8 @@ const LINK_VERBS = ["link", "unlink"];
 // writes that published name into the agent's own settings.json (ADR 0021), and `beacon` is the
 // internal emitter the entry it writes calls. `inbox` (ADR 0141) is `hooks`' sibling for pi's own door:
 // it writes one extension file into pi's folder, and sits between `hooks` and `beacon` in the table.
-const BEACON_VERBS = ["hooks", "inbox", "beacon"];
+// `agent` (T30) follows `inbox`: it is the terminal's send into the agent's door that `inbox` installs.
+const BEACON_VERBS = ["hooks", "inbox", "agent", "beacon"];
 
 // The device-pairing verbs. Declared between the diagnostics and the crew, because that is where
 // they sit in the table, and grouped separately for the same reason as the two above.
@@ -473,6 +474,7 @@ describe("the subcommand trees", () => {
       "serve",
       "hooks",
       "inbox",
+      "agent",
       "beacon",
       "devices",
       "push",
@@ -604,6 +606,8 @@ describe("exit codes", () => {
       // same real paths before it reads them. cli/hooks.test.ts drives all three against fakes.
       // `inbox` writes pi's real `~/.pi/agent/extensions/collie-inbox.ts` and opencode's real plugin
       // folder. cli/inbox.test.ts drives all three against fakes.
+      // `agent prompt` dials this host's running bridge and types or hands a message to a real pane;
+      // cli/agent.test.ts drives it against a fake socket.
       // `beacon` is world-touching in the other direction: it would write a beacon into this host's
       // real state dir. cli/beacon.test.ts drives it against fakes.
       ...BEACON_VERBS,

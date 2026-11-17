@@ -26,6 +26,7 @@ import {
   type HooksDeps,
   HOOKS_SUBCOMMANDS,
 } from "./hooks.ts";
+import { cmdAgent, cmdAgentPrompt } from "./agent.ts";
 import { cmdInbox, cmdInboxInstall, cmdInboxStatus, cmdInboxUninstall, INBOX_SUBCOMMANDS, type InboxDeps } from "./inbox.ts";
 import { lifecycleDeps, updateDeps } from "./deps.ts";
 import { cmdDoctor, doctorDeps } from "./doctor.ts";
@@ -887,6 +888,19 @@ export const COMMANDS: readonly Command[] = [
       },
     ],
     run: (args, s) => cmdInbox(inboxDeps(s.io), args),
+  },
+  // `collie agent prompt` (T30): a send from a terminal through the bridge's Send route, the same one the phone uses.
+  {
+    name: "agent",
+    summary: "talk to an agent's pane through the bridge: `agent prompt <pane> <text>` (door first, journal proof)",
+    subcommands: [
+      {
+        name: "prompt",
+        summary: "send text through the agent's own door, else the screen path; prints landed, queued, merged, refused or unconfirmed",
+        run: (args, s) => cmdAgentPrompt(walkyDeps(s.io), args),
+      },
+    ],
+    run: (args, s) => cmdAgent(walkyDeps(s.io), args),
   },
   {
     name: "beacon",
