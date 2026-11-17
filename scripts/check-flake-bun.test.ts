@@ -143,10 +143,10 @@ describe("the Windows check runs the flake's Bun", () => {
     expect(String(setup[0]?.with?.["bun-version"])).toBe(flakeBunVersion());
   });
 
-  test("windows-suites.ps1 gives each suite its own skip budget, 399 in all, each skip named", () => {
+  test("windows-suites.ps1 gives each suite its own skip budget, 402 in all, each skip named", () => {
     const script = readFileSync(join(ROOT, "scripts", "windows-suites.ps1"), "utf8");
     const budget = (suite: string): number => Number(new RegExp(`\\[int\\]\\$MaxSkips${suite} = (\\d+)`).exec(script)?.[1] ?? Number.NaN);
-    expect([budget("Bridge"), budget("Cli"), budget("Scripts")]).toEqual([174, 191, 34]);
+    expect([budget("Bridge"), budget("Cli"), budget("Scripts")]).toEqual([177, 191, 34]);
     // The bridge allowance is the local-cli tests that stay POSIX-only, the one real-engine Whistle
     // case that needs the uncommitted model, the one scan of real links to /etc, the one telemetry file mode, the 5 hold socket tests, the 7
     // walky mode and socket tests, the 6 walky sibling registry tests, the 30 durable example tests, the 10 durable-harness adapter skips and the 36 durable socket tests; the comment
@@ -167,12 +167,13 @@ describe("the Windows check runs the flake's Bun", () => {
     // The opencode door's real-socket test: the one `describe.skipIf` in bridge/door/opencode.test.ts.
     const opencodeSkip = readFileSync(join(ROOT, "bridge", "door", "opencode.test.ts"), "utf8");
     expect(opencodeSkip.match(/describe\.skipIf\(process\.platform === "win32"\)/g)).toHaveLength(1);
-    const opencodeRealSocket = 1;
+    // The test and the describe's afterAll, which Bun counts with a skipped describe.
+    const opencodeRealSocket = 3;
     // The pi door's SYSTEM_INBOX_IO describe: the same kind of skip, one test.
     const piSkip = readFileSync(join(ROOT, "bridge", "door", "pi.test.ts"), "utf8");
     expect(piSkip).toContain('describe.skipIf(process.platform === "win32")("SYSTEM_INBOX_IO"');
     expect(script).toContain("a GET and a POST reach a unix socket, and a missing folder lists nothing");
-    const piRealSocket = 1;
+    const piRealSocket = 2;
     expect(script).toContain("hello binds, the send reaches the pane's session queued under its message id");
     // The agent prompt verb's socket tests: cli/agent.test.ts, 11 `socketTest` cases.
     const agentCli = readFileSync(join(ROOT, "cli", "agent.test.ts"), "utf8");

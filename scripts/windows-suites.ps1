@@ -14,8 +14,8 @@
 #              cannot hide behind a removed one in another. A test must not be skipped just to get
 #              green, so a higher count is a failure. Raise a number only with a reason.
 #              Bridge went from 2 to 0 when M43 spec 04 checked the access list instead of the mode.
-#              Today, 399 in all, each one named, with its reason:
-#              bridge 174. 15 are the agent view pictures (see "Agent view pictures, bridge" below). 5 are the POSIX-only and engine cases below, 1 the /etc link scan, 1 the telemetry file mode, 5 are the hold socket tests, 7 the walky ones, 6 the walky sibling registry ones, 30 are the
+#              Today, 402 in all, each one named, with its reason:
+#              bridge 177. 15 are the agent view pictures (see "Agent view pictures, bridge" below). 5 are the POSIX-only and engine cases below, 1 the /etc link scan, 1 the telemetry file mode, 5 are the hold socket tests, 7 the walky ones, 6 the walky sibling registry ones, 30 are the
 #                durable example apps, 10 are the durable-harness adapter test, 36 are the durable socket tests (see "Durable, bridge" below),
 #                5 are the pane's program reads (see "The pane's program, bridge" below), and 6 are the fake git of a new
 #                worktree (see "The fake git of a new worktree, bridge" below). 42 are the Hill and the tricks (see
@@ -181,12 +181,12 @@
 #                temp state dir, and Windows cannot bind it (the walky socket, as cli/walky.test.ts). Each of those tests is
 #                `socketTest`: 2 for the request line, 5 for the outcomes and exit codes, 4 for the bridges it asks. The usage
 #                tests and "no bridge running" run on Windows.
-#              The opencode door, bridge (1). bridge/door/opencode.test.ts "the bridge's door against the real plugin, over a real
+#              The opencode door, bridge (3). bridge/door/opencode.test.ts "the bridge's door against the real plugin, over a real
 #                socket" is `describe.skipIf` on win32: it dials a real Unix socket in a short `/tmp` base (sun_path), which Windows
-#                has no spelling for. Its one test is "hello binds, the send reaches the pane's session queued under its message id,
+#                has no spelling for. Bun counts the one test and the describe's afterAll with the skip (3 in all). The test is "hello binds, the send reaches the pane's session queued under its message id,
 #                a repeat replays, and the queue word comes back".
-#              The pi door, bridge (1). bridge/door/pi.test.ts "SYSTEM_INBOX_IO" is `describe.skipIf` on win32 for the same
-#                reason: a real Unix socket in a short `/tmp` base. Its one test (the name sits on one line, so the pin test can find it):
+#              The pi door, bridge (2). bridge/door/pi.test.ts "SYSTEM_INBOX_IO" is `describe.skipIf` on win32 for the same
+#                reason: a real Unix socket in a short `/tmp` base. Bun counts its one test and its afterAll (2 in all). The test (the name sits on one line, so the pin test can find it):
 #                - "a GET and a POST reach a unix socket, and a missing folder lists nothing"
 #              scripts 34: 23 are every test of scripts/install.test.ts ("scripts/install.sh > ..."):
 #                install.sh is POSIX sh, and Windows installs with install.ps1, tested beside it.
@@ -199,7 +199,7 @@
 #                executable bit and reads it through `file://`, as the add from the list does (bridge 32 above).
 param(
   [Parameter(Mandatory = $true)][string]$Out,
-  [int]$MaxSkipsBridge = 174,
+  [int]$MaxSkipsBridge = 177,
   [int]$MaxSkipsCli = 191,
   [int]$MaxSkipsScripts = 34
 )
