@@ -6,6 +6,7 @@
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
 
 import { activate, messageIdOf, type InboxItem, type OpencodeApi } from "../../opencode-plugin/collie-inbox.ts";
 import type { BeaconMatcher } from "../beacon/decorate.ts";
@@ -97,7 +98,7 @@ describe("opencode's door binds by the session the TUI shows (V32)", () => {
     const bound = await door.preflight(TARGET, never);
     if (!bound.ok) throw new Error(bound.why);
     expect(await bound.door.submit(SEND, never)).toEqual({ kind: "taken" });
-    expect(fake.sent).toEqual([{ path: `${DIR}/${NAME}`, body: JSON.stringify({ sessionID: SID, text: SEND.text, requestId: SEND.requestId }) }]);
+    expect(fake.sent).toEqual([{ path: join(DIR, NAME), body: JSON.stringify({ sessionID: SID, text: SEND.text, requestId: SEND.requestId }) }]);
   });
 
   test("another session, no session on screen, or a pane that names none refuses once the pane's own inbox is heard", async () => {
