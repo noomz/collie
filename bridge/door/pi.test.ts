@@ -269,10 +269,14 @@ describe("parseInboxHello", () => {
   });
 });
 
-describe("SYSTEM_INBOX_IO", () => {
-  // `/tmp` directly: a unix socket path must fit in 104 bytes on macOS, and `$TMPDIR` does not.
-  const dir = mkdtempSync("/tmp/cpi-");
-  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+// POSIX only: it dials a real Unix socket in a short `/tmp` base. Named in scripts/windows-suites.ps1.
+describe.skipIf(process.platform === "win32")("SYSTEM_INBOX_IO", () => {
+  // `/tmp` directly: a unix socket path must fit in 104 bytes on macOS, and `$TMPDIR` does not. A skipped
+  // describe still runs its body, so Windows, which has no `/tmp`, makes no folder.
+  const dir = process.platform === "win32" ? "" : mkdtempSync("/tmp/cpi-");
+  afterAll(() => {
+    if (dir !== "") rmSync(dir, { recursive: true, force: true });
+  });
 
   test("a GET and a POST reach a unix socket, and a missing folder lists nothing", async () => {
     const path = join(dir, "a.sock");

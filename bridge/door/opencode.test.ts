@@ -203,8 +203,11 @@ describe("the registry", () => {
 describe.skipIf(process.platform === "win32")("the bridge's door against the real plugin, over a real socket", () => {
   // A realpath'd base with no link in it (macOS's `/tmp` is one, and the door walks every part), short
   // enough for sun_path. `/private/tmp` is where macOS's `/tmp` really is; elsewhere `/tmp` has no link.
-  const base = mkdtempSync(process.platform === "darwin" ? "/private/tmp/coc-" : "/tmp/coc-");
-  afterAll(() => rmSync(base, { recursive: true, force: true }));
+  // A skipped describe still runs its body, so Windows, which has no `/tmp`, makes no folder.
+  const base = process.platform === "win32" ? "" : mkdtempSync(process.platform === "darwin" ? "/private/tmp/coc-" : "/tmp/coc-");
+  afterAll(() => {
+    if (base !== "") rmSync(base, { recursive: true, force: true });
+  });
   const env = { HERDR_PANE_ID: PANE, HERDR_SOCKET_PATH: SCOPE, XDG_STATE_HOME: base };
   const HOME = "/home/nobody";
 
