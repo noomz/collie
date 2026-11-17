@@ -198,7 +198,9 @@ describe("the registry", () => {
   });
 });
 
-describe("the bridge's door against the real plugin, over a real socket", () => {
+// POSIX only: the socket sits in a short `/tmp` base (sun_path) that Windows has no spelling for. Named in
+// scripts/windows-suites.ps1, which counts it in the bridge's skip budget.
+describe.skipIf(process.platform === "win32")("the bridge's door against the real plugin, over a real socket", () => {
   // A realpath'd base with no link in it (macOS's `/tmp` is one, and the door walks every part), short
   // enough for sun_path. `/private/tmp` is where macOS's `/tmp` really is; elsewhere `/tmp` has no link.
   const base = mkdtempSync(process.platform === "darwin" ? "/private/tmp/coc-" : "/tmp/coc-");
