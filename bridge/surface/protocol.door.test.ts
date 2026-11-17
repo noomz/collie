@@ -146,7 +146,8 @@ describe("the door goes first (ADR 0141 point 2)", () => {
       const { protocol, send } = rig(new FakeDoor(undefined, () => Promise.resolve({ kind })));
       const answer = await send("hello");
       expect(answer.receipt).toMatchObject({ outcome: "sent", queued: true, via: "claude", door: kind });
-      expect(protocol.recent("%1")[0]).toMatchObject({ via: "claude", door: kind, queued: true });
+      // By id: both rigs share one clock tick and one folder, so the list's order is the filesystem's.
+      expect(protocol.recent("%1").find((row) => row.requestId === answer.receipt?.requestId)).toMatchObject({ via: "claude", door: kind, queued: true });
     }
   });
 

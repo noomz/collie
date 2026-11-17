@@ -199,8 +199,8 @@ describe("the registry", () => {
 
 describe("the bridge's door against the real plugin, over a real socket", () => {
   // A realpath'd base with no link in it (macOS's `/tmp` is one, and the door walks every part), short
-  // enough for sun_path.
-  const base = mkdtempSync("/private/tmp/coc-");
+  // enough for sun_path. `/private/tmp` is where macOS's `/tmp` really is; elsewhere `/tmp` has no link.
+  const base = mkdtempSync(process.platform === "darwin" ? "/private/tmp/coc-" : "/tmp/coc-");
   afterAll(() => rmSync(base, { recursive: true, force: true }));
   const env = { HERDR_PANE_ID: PANE, HERDR_SOCKET_PATH: SCOPE, XDG_STATE_HOME: base };
   const HOME = "/home/nobody";
