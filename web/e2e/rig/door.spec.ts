@@ -8,7 +8,8 @@
 // On Herdr the bridge's pi door binds the pane (Herdr's `agent_session` is pi's session file) and hands
 // the text to pi's own API: the receipt says `sent` through `via: "pi"` with `door: "taken"`, no key
 // reaches the pane, so the desk draft is still in pi's box after pi answers, and pi's session log holds
-// the phone's text as exactly one user turn and the draft as none. One model turn.
+// the phone's text as exactly one user turn and the draft as none. Then the case sends once more from a
+// plain shell with `collie agent prompt` (T30): exit 0, `landed ... via pi`, one more exact user turn. Two model turns.
 //
 // On herdr-core the pane names no pi session file (the core keeps none for pi), so the inbox is heard
 // and the door refuses: the receipt says `doorRefused`, the screen path meets the draft and types
