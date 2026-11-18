@@ -23,10 +23,12 @@ Running a crew? Update the lead first; members follow on their own. Details:
 
 ## [Unreleased]
 
+## [1.29.1] - 2026-11-18
+
 ### Fixed
 
-- **The phone mirror hides sidebars that end above the input.** A contiguous divider can end before a short footer without forcing the conversation to stay wide. Full-width prose and drafts keep the whole screen whenever a cut could lose text.
-- **Trick approval shows line-ending changes regardless of Git settings.** The code comparison disables automatic line-ending normalization so an operator’s `core.autocrlf` setting cannot hide the change.
+- **The phone mirror hides sidebars that end above the input.** A contiguous divider can end before a short footer without forcing the conversation to stay wide. Full-width prose and drafts keep the whole screen whenever a cut could lose text. ([bbf214fb5](https://github.com/noomz/collie/commit/bbf214fb5))
+- **Trick approval shows line-ending changes regardless of Git settings.** The code comparison disables automatic line-ending normalization so an operator’s `core.autocrlf` setting cannot hide the change. ([5f0711c00](https://github.com/noomz/collie/commit/5f0711c00))
 
 ## [1.29.0] - 2026-11-12
 
