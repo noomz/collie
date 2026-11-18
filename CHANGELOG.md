@@ -23,6 +23,10 @@ Running a crew? Update the lead first; members follow on their own. Details:
 
 ## [Unreleased]
 
+### Fixed
+
+- **The phone mirror hides sidebars that end above the input.** A contiguous divider can end before a short footer without forcing the conversation to stay wide. Full-width prose and drafts keep the whole screen whenever a cut could lose text.
+
 ## [1.29.0] - 2026-11-12
 
 ### Added
