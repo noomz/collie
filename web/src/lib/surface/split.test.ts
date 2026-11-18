@@ -7,6 +7,8 @@ import { lineText, splitLines, type StyledLine } from "../blocks";
 import { cropRawColumns } from "../column-range";
 import { buildBlocks } from "../harness";
 import { findInputFrame } from "./frame";
+import { surfaceOfScreen } from "./fold";
+import { extractInputDraft, extractStatusLines } from "../harness/claude";
 import { requireProfile } from "./profile";
 import { displayWidth } from "../text-width";
 import { cutSplit, readRows, splitColumn } from "./split";
@@ -23,6 +25,8 @@ const texts = (rows: StyledLine[]): string[] => rows.map(lineText);
 // pi 1.5 with pi-sidebar-tui: a dim `│` at cell 204 on all 65 rows, the session panel to its right.
 // Scrubbed to the same widths: letters and digits above the box masked, names swapped.
 const SIDEBAR = join(SPLIT, "pi--v15-sidebar-split.txt");
+// Captured Flightdeck sidebar: 42 split rows, then seven footer rows. Transcript characters masked at their original widths.
+const PARTIAL = readFileSync(join(SPLIT, "claude--partial-sidebar.txt"), "utf8");
 
 describe("the split-screen cut", () => {
   it("cuts the 65-row pi sidebar capture at cell 204, and the cut rows show the input box (rows 62 to 64)", () => {
@@ -63,6 +67,58 @@ describe("the split-screen cut", () => {
     expect(splitColumn(rowsOf(["ab │ cd │ ef", "   │    │   ", "x  │ y  │ z"].join("\n")))).toBe(3);
   });
 
+  it("cuts the captured partial-height sidebar without losing the input or status rows", () => {
+    const rows = rowsOf(PARTIAL);
+    const cut = cutSplit(rows);
+    expect(cut.column).toBe(122);
+    expect(texts(cut.rows)).toEqual(texts(rowsOf(cropRawColumns(PARTIAL, { start: 0, end: 122 }))));
+    expect(texts(cut.rows).slice(45)).toEqual(texts(rows).slice(45));
+    const frame = findInputFrame(cut.rows, requireProfile("claude").idle);
+    expect(frame && [frame.top, frame.bottom]).toEqual([42, 44]);
+    expect(cutSplit(cut.rows).column).toBeNull();
+  });
+
+  it.each(["", "keep this draft", "long draft ".repeat(15)])("preserves the Surface and draft for the captured footer: %s", (draft) => {
+    const text = PARTIAL.replace("\n❯\n", `\n❯ ${draft}\n`);
+    const rows = readRows(text);
+    expect(extractInputDraft(rows)).toBe(draft.trim() || null);
+    expect(extractStatusLines(rows)).toEqual(extractStatusLines(rowsOf(text)));
+    expect(surfaceOfScreen({ seq: 1, source: "screen", at: 0, revision: 1, rows, ask: null }, requireProfile("claude").idle).surface)
+      .toEqual({ revision: 1, turn: "idle", modal: "none", composer: draft ? "draft" : "empty" });
+    expect(splitColumn(rowsOf(text))).toBe(draft.length > 122 ? null : 122);
+  });
+
+  it.each(["│", "┃"])("cuts a contiguous %s sidebar above a rule and a short footer", (separator) => {
+    const rows = rowsOf([`ab漢${separator} x`, `abcd${separator} y`, `    ${separator} z`, "──────────", "❯ hi", ""].join("\r\n"));
+    expect(splitColumn(rows)).toBe(4);
+    expect(texts(cutSplit(rows).rows)).toEqual(["ab漢", "abcd", "    ", "────", "❯ hi", ""]);
+  });
+
+  it.each([
+    "prose crosses the cut",
+    "❯ a draft that crosses the cut",
+    "    漢",
+    "   漢",
+    "─────title─────",
+    "────┬─────",
+  ])("preserves a full-width footer: %s", (footer) => {
+    const rows = rowsOf(["left│ x", "more│ y", "end │ z", footer].join("\n"));
+    expect(splitColumn(rows)).toBeNull();
+    expect(cutSplit(rows).rows).toBe(rows);
+  });
+
+  it("does not accept a divider that resumes after a blank row", () => {
+    expect(splitColumn(rowsOf("left│ x\nmore│ y\nend │ z\n\nlast│ p"))).toBeNull();
+  });
+
+  it("does not use the footer to turn a short split or a box into a sidebar", () => {
+    for (const text of [
+      "left│ x\nmore│ y\n──────────\n❯",
+      "│ a │ b │\n│ c │ d │\n│ e │ f │\n──────────\n❯",
+      "    │ b │\n    │ d │\n    │ f │\n──────────\n❯",
+    ]) expect(splitColumn(rowsOf(text))).toBeNull();
+  });
+
   it("does not cut when one row lacks the separator in that column", () => {
     expect(splitColumn(rowsOf(["text │ p", "more │ q", "a row wider than the rest", "end  │ r"].join("\n")))).toBeNull();
   });
@@ -96,6 +152,15 @@ describe("a question read beside a split binds to the kept columns", () => {
       .map((row) => `${row}\u001b[0m${" ".repeat(Math.max(0, width - displayWidth(lineText(rowsOf(row)[0] ?? { segments: [] }))))}${PANEL}${second}`)
       .join("\n");
   }
+
+  it("a partial-height panel leaves the dialog bound only to the kept columns", () => {
+    const text = raw("claude--permission-bash.txt");
+    const width = Math.max(...texts(rowsOf(text)).map(displayWidth)) + 1;
+    const rows = text.split(/\r?\n/);
+    const screen = `${besidePanel(rows.slice(0, -2).join("\n"), width, 1)}\n${rows.slice(-2).join("\n")}`;
+    const block = buildBlocks(rowsOf(screen), { agent: "claude" }).find((entry) => entry.kind === "prompt-select");
+    expect(block?.kind === "prompt-select" ? block.prompt.bindColumns : null).toEqual({ start: 0, end: width });
+  });
 
   it("a prompt lifted from cut rows carries bindColumns 0 to the cut", () => {
     const text = raw("claude--permission-bash.txt");
