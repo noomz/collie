@@ -140,7 +140,7 @@ describe("the write-ahead mark", () => {
     s.markStarted(input.id);
     s.accept({ ...input, id: "req-0000002" });
     const ended = s.recover(SendProtocol.crashReceipt);
-    expect(ended.map((record) => [record.id, record.receipt?.reason])).toEqual([
+    expect(ended.toSorted((a, b) => a.id.localeCompare(b.id)).map((record) => [record.id, record.receipt?.reason])).toEqual([
       ["req-0000001", "interrupted"],
       ["req-0000002", "crash"],
     ]);

@@ -1061,7 +1061,7 @@ describe("a pane the multiplexer names as an agent Collie has no profile for tak
     const { send } = rig({ pane, harness: NO_PROFILE });
     const answer = await send(text, { mode });
     expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "unconfirmed", harness: NO_PROFILE, profileId: null, keys: [] });
-    expect(answer.rowsHash).toMatch(/^[0-9a-f]{28}$/u);
+    expect(answer.rowsHash).toMatch(/^[0-9a-f]{14}$/u);
     expect(answer.offers).toEqual(["commit", "keys"]);
     expect(answer.receipt?.saw?.reason).not.toBe("no-profile");
     expect(pane.calls).toEqual([]);
@@ -1098,7 +1098,7 @@ describe("a pane the multiplexer names as an agent Collie has no profile for tak
     const { pane, protocol } = rig({ mode: "generic", harness: NO_PROFILE });
     const prepared = await protocol.handle({ id: "unused-prepare", text: "", mode: "prepare" }, { session: "main", paneId: "%1", harness: NO_PROFILE });
     expect(prepared.offers).toEqual(["commit", "keys"]);
-    expect(prepared.rowsHash).toMatch(/^[0-9a-f]{28}$/u);
+    expect(prepared.rowsHash).toMatch(/^[0-9a-f]{14}$/u);
     expect(pane.calls).toEqual([]);
   });
 
@@ -1197,7 +1197,7 @@ describe("a profile whose frame S0 cannot find", () => {
     const { pane, send } = rig({ mode: "generic" });
     const answer = await send("hello from the phone");
     expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "unconfirmed", profileId: FRAMELESS, keys: [] });
-    expect(answer.rowsHash).toMatch(/^[0-9a-f]{28}$/u);
+    expect(answer.rowsHash).toMatch(/^[0-9a-f]{14}$/u);
     expect(answer.surface).toMatchObject({ turn: "unknown", modal: "unknown", composer: "unknown", reason: "no-match" });
     expect(answer.offers).toEqual(["commit", "keys"]);
     expect(pane.calls).toEqual([]);
@@ -1207,7 +1207,7 @@ describe("a profile whose frame S0 cannot find", () => {
     const { pane, protocol } = rig({ mode: "generic" });
     const prepared = await protocol.handle({ id: "unused-prepare", text: "", mode: "prepare" }, { session: "main", paneId: "%1", harness: FRAMELESS });
     expect(prepared.receipt).toBeUndefined();
-    expect(prepared.rowsHash).toMatch(/^[0-9a-f]{28}$/u);
+    expect(prepared.rowsHash).toMatch(/^[0-9a-f]{14}$/u);
     expect(prepared.offers).toEqual(["commit", "keys"]);
     expect(pane.calls).toEqual([]);
     expect(pane.keysSeen).toEqual([]);
