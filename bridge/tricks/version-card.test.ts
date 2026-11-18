@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
+import { gitEnv } from "../changes.ts";
 import { memoryHillReceipts } from "../hill/receipts.ts";
 import { HillService } from "../hill/service.ts";
 import { HillStore } from "../hill/store.ts";
@@ -109,10 +110,15 @@ describe("the diff of two copies", () => {
     expect(view !== null && viewHasCode(view)).toBe(true);
   });
 
-  test("a change of line ends alone still has lines to show: git prints them, the CR dropped (2026-11-17)", async () => {
+  gitTest.each(["false", "input", "true"])("a line-ending change remains visible with core.autocrlf=%s", async (autocrlf) => {
     const base = await folder({ "trick.toml": MANIFEST, "legs.sh": "echo 1\n" });
     const next = await folder({ "trick.toml": MANIFEST, "legs.sh": "echo 1\r\n" });
-    const diff = await versionDiff({ base, next });
+    const diff = await versionDiff({ base, next, run: async (argv) => {
+      const proc = Bun.spawn([...argv.slice(0, 1), "-c", `core.autocrlf=${autocrlf}`, ...argv.slice(1)], {
+        cwd: "/", env: gitEnv(process.env), stdin: "ignore", stdout: "pipe", stderr: "ignore",
+      });
+      return { stdout: await new Response(proc.stdout).text(), code: await proc.exited, timedOut: false, truncated: false };
+    } });
     expect(diff.files.map((file) => [file.rel, file.hunk?.slice(1)])).toEqual([["legs.sh", ["-echo 1", "+echo 1"]]]);
   });
 

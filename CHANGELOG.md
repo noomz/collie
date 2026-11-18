@@ -26,6 +26,7 @@ Running a crew? Update the lead first; members follow on their own. Details:
 ### Fixed
 
 - **The phone mirror hides sidebars that end above the input.** A contiguous divider can end before a short footer without forcing the conversation to stay wide. Full-width prose and drafts keep the whole screen whenever a cut could lose text.
+- **Trick approval shows line-ending changes regardless of Git settings.** The code comparison disables automatic line-ending normalization so an operator’s `core.autocrlf` setting cannot hide the change.
 
 ## [1.29.0] - 2026-11-12
 

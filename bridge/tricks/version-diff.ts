@@ -171,7 +171,7 @@ function modeChange(rel: string, old: Sums, now: ReadonlySet<string>): "+x" | "-
 
 /** The argv of one hardened `git diff --no-index` between two paths (`/dev/null` for none). */
 export function diffArgv(git: string, left: string, right: string): string[] {
-  return [git, "--no-pager", ...HARDENING, "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "-U2", "--", left, right];
+  return [git, "--no-pager", ...HARDENING, "-c", "core.autocrlf=false", "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "-U2", "--", left, right];
 }
 
 /** Spawn one argv from `/` with git's environment cleaned, cut at the time and byte caps. */
