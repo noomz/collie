@@ -303,9 +303,8 @@ describe("the socket's life", () => {
     renameSync(aside, r.path);
     await new Promise<void>((resolve) => stale.close(() => resolve()));
     expect(lstatSync(r.path).isSocket()).toBe(true);
-    const before = lstatSync(r.path).ino;
+    await expect(once(createConnection({ path: r.path }), "connect")).rejects.toMatchObject({ code: "ECONNREFUSED" });
     expect(await r.api.start()).toBe(true);
-    expect(lstatSync(r.path).ino).not.toBe(before);
     const client = await Client.open(r.path);
     expect(await client.ask({ op: "hello", args: HELLO_ARGS })).toMatchObject({ ok: true });
   });

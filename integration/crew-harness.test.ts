@@ -1014,8 +1014,16 @@ describe("the lead speaks for the crew", () => {
     expect(peer.herdr!.writes).toEqual([]);
     // Two logs of one tap: the lead's line for the forward, and the member's own, stamped `via: crew`.
     const askLines = (at: Instance): string[] => readFileSync(join(at.stateDir, "audit.log"), "utf8").split("\n").filter((line) => line.includes('"action":"ask"'));
-    expect(askLines(lead).some((line) => line.includes(`"host":"${peerId}"`) && line.includes('"forwarded":"http 200"'))).toBe(true);
-    expect(askLines(peer).some((line) => line.includes('"via":"crew"') && line.includes('"reason":"ask_unknown"'))).toBe(true);
+    await waitFor(
+      () => Promise.resolve(askLines(lead).some((line) => line.includes(`"host":"${peerId}"`) && line.includes('"forwarded":"http 200"'))),
+      5000,
+      () => "the lead did not audit the forwarded ask",
+    );
+    await waitFor(
+      () => Promise.resolve(askLines(peer).some((line) => line.includes('"via":"crew"') && line.includes('"reason":"ask_unknown"'))),
+      5000,
+      () => "the member did not audit the refused ask",
+    );
   });
 });
 
