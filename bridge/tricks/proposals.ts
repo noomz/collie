@@ -4,19 +4,20 @@ import { dirname, join } from "node:path";
 
 import { asJsonNumber, asJsonObject, asJsonString, parseJson, type JsonValue } from "../../web/src/lib/json.ts";
 import type { HillCollieRef, HillDecision, HillPostInput } from "../../web/src/lib/hill/wire.ts";
+import { HOST } from "../host.ts";
 import type { JsonObject } from "../json.ts";
 import { givesAgentsInstructions, type TrickManifest } from "../../web/src/lib/tricks/schema.ts";
-import { HILL_OFF, type HillCollieSender, type HillCollieVerdict, type HillOneAnswer, type HillPostAnswer, type HillPostOptions } from "../hill/service.ts";
+import { type HillCollieSender, type HillCollieVerdict, type HillOneAnswer, type HillPostAnswer, type HillPostOptions } from "../hill/service.ts";
 import { codeHashOfFiles, isCodePath, unsafeText } from "./code-hash.ts";
 import type { ProposalOrigin } from "./origin.ts";
 import { hash16, tricksConfigDir, tricksStateDir } from "./paths.ts";
 import { recoverProposalWrites } from "./proposal-install.ts";
-import { proposalCard, proposalRequestId, proposalVersionCard, PROPOSAL_CARD_SENDER, PROPOSAL_LATER, PROPOSAL_ON, type ProposalCardResult, type ProposerFacts } from "./proposal-card.ts";
+import { proposalCard, proposalDiff, proposalRequestId, proposalVersionCard, PROPOSAL_CARD_SENDER, PROPOSAL_LATER, PROPOSAL_ON, type ProposalCardResult, type ProposerFacts } from "./proposal-card.ts";
 import { checkProposedFiles, foldKey, proposalHash, PROPOSE_HAS_RULES, PROPOSE_LIMITS, type ProposalRead, type ProposedFile, type ProposeRefusalCode } from "./propose-wire.ts";
 import { trickWarnings, WARN_PLAIN } from "./scan.ts";
 import type { ProposalPlaced, ProposalTarget } from "./service.ts";
-import { versionDiff, type VersionDiff } from "./version-diff.ts";
-import { addedDiff, GROUP_FILES_MAX, shippedHelpers } from "./card-group.ts";
+import { keepsFileModes, versionDiff, type VersionDiff } from "./version-diff.ts";
+import { GROUP_FILES_MAX, shippedHelpers } from "./card-group.ts";
 import { PROPOSALS_MACHINE_HOUR_MAX, PROPOSALS_MEMBER_OPEN_MAX, PROPOSALS_OPEN_MAX, PROPOSALS_SENDER_HOUR_MAX, PROPOSALS_SENDER_OPEN_MAX, PROPOSAL_EXPIRY_MS } from "../../web/src/lib/tricks/limits.ts";
 
 // The proposal caps live in web/src/lib/tricks/limits.ts, which the tricks catalogue reads too.
@@ -85,11 +86,19 @@ export const PROPOSAL_NOT_OPTION = "That is not an option of this card.";
 export const PROPOSAL_NO_TRICKS = "Tricks are not set up on this Collie, so nothing was proposed.";
 /** A new version Collie could not compare with the one that runs (review 7 R9): no card shows "0 files". */
 export const PROPOSAL_NOT_COMPARED = "Collie could not compare this version with the one that runs, so it was not proposed. Try again, or ask your person to add it on the machine.";
+/** A version whose code is the code that runs: no card, nothing to approve. */
+export const PROPOSAL_NO_CHANGE = "This version has the same code as the one that runs, so there is nothing to approve and it was not proposed.";
 /** The stored copy moved while its card was made (review 7 R9). */
 export const PROPOSAL_STORE_MOVED = "The stored proposal changed while its card was made, so nothing was proposed. Propose it again.";
 
+/** The line typed into the proposer's session after the option line (decision 9): what the answer did. */
+export function proposalTold(id: string, intent: string, kind: "new" | "version"): string {
+  if (intent === PROPOSAL_LATER.intent) return `Your person declined. The proposal of ${id} is closed, and nothing was installed.`;
+  return kind === "version" ? `The new version of ${id} is installed, and ${id} stays on.` : `${id} is installed and on.`;
+}
+
 /** Every warning kind, for a code search that failed. */
-const ALL_WARNINGS = ["spawn", "network", "write", "model", "import"] as const satisfies readonly (keyof typeof WARN_PLAIN)[];
+const ALL_WARNINGS = ["spawn", "network", "write", "model", "import", "api"] as const satisfies readonly (keyof typeof WARN_PLAIN)[];
 
 /** Who proposes, as this bridge knows them. */
 export interface Proposer extends ProposerFacts {
@@ -100,10 +109,21 @@ export interface Proposer extends ProposerFacts {
 }
 
 /** What a proposal came to. */
-export type ProposeAnswer = { ok: true; kind: "proposal" | "version"; id: string; hash: string; decision: string; replaced: string | null } | { ok: false; code: ProposeRefusalCode; error: string };
+export type ProposeAnswer = { ok: true; kind: "proposal" | "version"; id: string; hash: string; decision: string; replaced: string | null; where?: ProposalWhere } | { ok: false; code: ProposeRefusalCode; error: string };
+
+/**
+ * Where the person finds the card (package I, 2026-11-17), for the proposer's words: `session` while the
+ * card is tied to the proposer's live session (the phone draws it in that session's chat view), `hill`
+ * while the Hill is on (the Hill shows it too). Settings, Tricks always lists it.
+ */
+export interface ProposalWhere {
+  session: boolean;
+  hill: boolean;
+}
 
 /** What proposals need of the Hill: Collie's own door, which no agent and no crew member reaches. */
 export interface ProposalsHill {
+  /** Whether the Hill is on: the card then shows on the Hill too. Read only for the proposer's words. */
   isOn(): boolean;
   isAnswering(id: string): boolean;
   postCollie(from: HillCollieSender, input: HillPostInput, opts?: Pick<HillPostOptions, "tellOf">): HillPostAnswer;
@@ -114,8 +134,9 @@ export interface ProposalsHill {
 /** What proposals need of the tricks runner (service.ts). */
 export interface ProposalsTricks {
   proposalTarget(id: string): Promise<ProposalTarget>;
-  installProposed(id: string, files: readonly ProposedFile[], origin: ProposalOrigin): Promise<ProposalPlaced>;
-  installProposedVersion(id: string, files: readonly ProposedFile[], origin: ProposalOrigin, baseHash: string): Promise<ProposalPlaced>;
+  /** `cardHash`: the proposal hash the card showed; bytes that hash otherwise are never written (decision 4). */
+  installProposed(id: string, files: readonly ProposedFile[], origin: ProposalOrigin, cardHash: string): Promise<ProposalPlaced>;
+  installProposedVersion(id: string, files: readonly ProposedFile[], origin: ProposalOrigin, baseHash: string, cardHash: string): Promise<ProposalPlaced>;
 }
 
 export interface TrickProposalsDeps {
@@ -126,8 +147,12 @@ export interface TrickProposalsDeps {
   tricks: () => ProposalsTricks | null;
   /** Whether this bridge leads a crew (a trick's `inputs` then read on every machine). */
   crew?: () => boolean;
+  /** This bridge's own id and machine name. A proposal from another machine of the crew says "It will run on <machine>." */
+  self?: { memberId: string; machine: string };
   /** `nextExec`: the files the proposal marked executable; its stored copy is 0600 (review 7, `+x`). */
   diff?: (base: string | null, next: string, nextExec: ReadonlySet<string>) => Promise<VersionDiff>;
+  /** The platform: on Windows no file keeps a mode (version-diff.ts `keepsFileModes`). Default `HOST.platform` (bridge/host.ts). */
+  platform?: NodeJS.Platform;
   now?: () => number;
   warn?: (line: string) => void;
   audit?: (entry: { action: string; detail: Record<string, string> }) => void;
@@ -287,6 +312,7 @@ export class TrickProposals {
   private readonly deps: TrickProposalsDeps;
   private readonly now: () => number;
   private readonly warn: (line: string) => void;
+  private readonly platform: NodeJS.Platform;
   private readonly diff: (base: string | null, next: string, nextExec: ReadonlySet<string>) => Promise<VersionDiff>;
   private state: ProposalsState | null = null;
   /** Every change runs one at a time: a propose, an answer, a sweep. */
@@ -295,9 +321,10 @@ export class TrickProposals {
   constructor(deps: TrickProposalsDeps) {
     this.deps = deps;
     this.now = deps.now ?? Date.now;
+    this.platform = deps.platform ?? HOST.platform;
     this.warn = deps.warn ?? ((line) => console.warn(`[tricks] ${line}`));
     // Every changed file gets its diff, up to the most a group of cards shows (card-group.ts).
-    this.diff = deps.diff ?? ((base, next, nextExec) => versionDiff({ base, next, nextExec, filesMax: GROUP_FILES_MAX }));
+    this.diff = deps.diff ?? ((base, next, nextExec) => versionDiff({ base, next, nextExec, filesMax: GROUP_FILES_MAX, platform: this.platform }));
   }
 
   /** `<configDir>/tricks/.collie-proposed`. */
@@ -360,7 +387,8 @@ export class TrickProposals {
   private async take(proposal: ProposalRead, proposer: Proposer): Promise<ProposeAnswer> {
     // The wire refuses it first; here again, so no caller that skips the wire hands agents an author's words.
     if (givesAgentsInstructions(proposal.manifest)) return refused("has_rules", PROPOSE_HAS_RULES);
-    if (!this.deps.hill.isOn()) return refused("hill_off", HILL_OFF);
+    // No Hill switch here (spec 14): a proposal's card is Collie's own about a trick, an approval that works
+    // with the Hill on or off (hill/service.ts `postAny`). Every cap below holds either way.
     const tricks = this.deps.tricks();
     if (tricks === null) return refused("no_tricks", PROPOSAL_NO_TRICKS);
     const state = await this.load();
@@ -371,17 +399,18 @@ export class TrickProposals {
     const { hash } = proposal;
     // A request id answers as it did; with other files it is refused.
     const rid = state.rids.find((row) => row.sender === sender && row.requestId === proposal.requestId);
-    if (rid !== undefined) return rid.hash === hash ? rid.answer : refused("request_id_reused", "This request id already proposed other files. Propose with a new request id.");
+    if (rid !== undefined) return rid.hash === hash ? { ...rid.answer, where: { session: this.toldOf(rid.answer.decision), hill: this.deps.hill.isOn() } } : refused("request_id_reused", "This request id already proposed other files. Propose with a new request id.");
     // The open proposals that are still open on the Hill.
     const live = this.liveOpen(state);
     const same = live.find((row) => row.id === id);
     if (same !== undefined && same.sender !== sender) return refused("open_elsewhere", `Somebody else already proposed a trick named ${id}. It waits for your person's answer.`);
-    if (same !== undefined && same.hash === hash) return { ok: true, kind: same.kind === "version" ? "version" : "proposal", id, hash, decision: same.decision, replaced: null };
+    if (same !== undefined && same.hash === hash) return { ok: true, kind: same.kind === "version" ? "version" : "proposal", id, hash, decision: same.decision, replaced: null, where: { session: this.toldOf(same.decision), hill: this.deps.hill.isOn() } };
     // With no session placed, "the same sender" is anybody on that machine: never a silent replace.
     if (same !== undefined && proposer.address === null) return refused("open_elsewhere", `A proposal of ${id} from this machine already waits for your person's answer. Collie cannot confirm which session sent it, so it is not replaced.`);
     if (same !== undefined && this.deps.hill.isAnswering(same.decision)) return refused("answering", "Your person is answering your last proposal of this trick right now. Try again in a moment.");
     const target = await tricks.proposalTarget(id);
-    if (target.kind === "refused") return refused("exists", target.reason);
+    // Tricks switched off as a whole on the lead answer the wire's `no_tricks`, with the sentence that says where to switch them on.
+    if (target.kind === "refused") return refused(target.code ?? "exists", target.reason);
     const others = live.filter((row) => row !== same);
     const self = proposer.by === "agent" ? "This session" : "This terminal";
     if (others.filter((row) => row.sender === sender).length >= PROPOSALS_SENDER_OPEN_MAX) return refused("too_many_open", `${self} has ${String(PROPOSALS_SENDER_OPEN_MAX)} proposals waiting. Wait for your person's answers.`);
@@ -404,11 +433,15 @@ export class TrickProposals {
   private async cardOf(dir: string, proposal: ProposalRead, proposer: Proposer, base: Extract<ProposalTarget, { kind: "version" }> | null, replaces: boolean): Promise<ProposalCardResult> {
     const id = proposal.manifest.id;
     const crew = this.deps.crew?.() ?? false;
+    // Tricks run on this bridge, so a proposal that came from another machine of the crew runs elsewhere than it was written.
+    const runsOn = this.deps.self === undefined || proposer.memberId === this.deps.self.memberId ? null : clean(this.deps.self.machine);
     const kinds = await this.warningKinds(dir, proposal.manifest);
     if (base === null) {
       // A new trick's code is its files' own bytes, every line added: no git run, nothing left out.
       const sizes = new Map(proposal.files.map((file) => [file.rel, file.bytes.byteLength]));
-      return proposalCard({ id, manifest: proposal.manifest, proposer: facts(proposer), diff: addedDiff(proposal.files), warnings: kinds, crew, replaces, sizes, helpers: shippedHelpers(proposal.files) });
+      // A mode counts only where the platform keeps one: on Windows no file can run as a program by its mode.
+      const executable = new Set(keepsFileModes(this.platform) ? proposal.files.filter((file) => file.executable).map((file) => file.rel) : []);
+      return proposalCard({ id, manifest: proposal.manifest, proposer: facts(proposer), warnings: kinds, crew, replaces, runsOn, sizes, executable, settingsLeft: proposal.settingsLeft === true, ...proposalDiff(id, proposal.files) });
     }
     const exec = new Set(proposal.files.filter((file) => file.executable).map((file) => file.rel));
     const diff = await this.diff(base.baseDir, dir, exec).catch((): VersionDiff => ({ files: [], counted: false }));
@@ -416,8 +449,10 @@ export class TrickProposals {
     // the yes installs the new code (review 7 R9).
     const code = codeHashOfFiles(proposal.files.filter((file) => isCodePath(file.rel)));
     if ((!diff.counted && diff.files.length > 0) || (diff.files.length === 0 && code !== base.baseHash)) return { ok: false, code: "cannot_show", error: PROPOSAL_NOT_COMPARED };
+    // The same code as the one that runs: nothing for a yes to approve, so no card at all (the lead's decision, 2026-11-17).
+    if (diff.files.length === 0) return { ok: false, code: "exists", error: PROPOSAL_NO_CHANGE };
     const had = new Set(base.baseManifest === undefined ? [] : await this.warningKinds(base.baseDir, base.baseManifest));
-    return proposalVersionCard({ id, manifest: proposal.manifest, baseManifest: base.baseManifest, proposer: facts(proposer), diff, warnings: kinds.filter((kind) => !had.has(kind)), crew, replaces, helpers: shippedHelpers(proposal.files) });
+    return proposalVersionCard({ id, manifest: proposal.manifest, baseManifest: base.baseManifest, proposer: facts(proposer), diff, warnings: kinds.filter((kind) => !had.has(kind)), crew, replaces, runsOn, settingsLeft: proposal.settingsLeft === true, helpers: shippedHelpers(proposal.files, id) });
   }
 
   private async newProposal(state: ProposalsState, proposal: ProposalRead, proposer: Proposer, old: OpenProposal | null, base: Extract<ProposalTarget, { kind: "version" }> | null, now: number): Promise<ProposeAnswer> {
@@ -443,7 +478,6 @@ export class TrickProposals {
     const posted = this.deps.hill.postCollie(senderOf(id, hash), input, proposer.address === null ? {} : { tellOf: proposer.address });
     if (!posted.ok) {
       await rm(dir, { recursive: true, force: true });
-      if (posted.code === "hill_off") return refused("hill_off", HILL_OFF);
       if (posted.code === "bad_supersedes") return refused("answering", "Your person is answering your last proposal of this trick right now. Try again in a moment.");
       return refused("failed", `The Hill did not take the card, so nothing was proposed: ${posted.error}`);
     }
@@ -455,8 +489,15 @@ export class TrickProposals {
     const answer: ProposeAnswer & { ok: true } = { ok: true, kind: base === null ? "proposal" : "version", id, hash, decision: posted.decision.id, replaced: old?.decision ?? null };
     this.remember(state, senderKey(proposer), proposal.requestId, hash, answer, now);
     await this.save(state);
+    // Where the card is, for the proposer's words only; the replay key keeps the answer without it.
+    const where: ProposalWhere = { session: posted.decision.replyTo !== null, hill: this.deps.hill.isOn() };
     this.deps.audit?.({ action: "trick.proposal", detail: { trick: id, hash: hash.slice(0, 16), kind: base === null ? "proposal" : "version", decisionId: posted.decision.id, from: proposer.memberId } });
-    return answer;
+    return { ...answer, where };
+  }
+
+  /** Whether the open card `decision` is tied to a live session (its `replyTo`, hill/service.ts `postAny`). */
+  private toldOf(decision: string): boolean {
+    return this.deps.hill.collieDecisions("proposal").some((held) => held.id === decision && held.replyTo !== null);
   }
 
   /** Note a proposal for the hour's count and its request id. */
@@ -520,10 +561,10 @@ export class TrickProposals {
       const state = await this.load();
       const entry = state.open.find((row) => row.id === ref.id && row.hash === ref.hash);
       if (intent !== PROPOSAL_ON.intent && intent !== PROPOSAL_LATER.intent) return { ok: false, reason: PROPOSAL_NOT_OPTION };
-      if (entry === undefined) return intent === PROPOSAL_LATER.intent ? { ok: true } : { ok: false, reason: PROPOSAL_GONE };
+      if (entry === undefined) return intent === PROPOSAL_LATER.intent ? { ok: true, told: proposalTold(ref.id, intent, "new") } : { ok: false, reason: PROPOSAL_GONE };
       if (intent === PROPOSAL_LATER.intent) {
         await this.drop(state, entry);
-        return { ok: true };
+        return { ok: true, told: proposalTold(entry.id, intent, entry.kind) };
       }
       const tricks = this.deps.tricks();
       if (tricks === null) return { ok: false, reason: "Tricks are not running on this bridge." };
@@ -531,11 +572,11 @@ export class TrickProposals {
       // TOCTOU: the bytes installed are the bytes read here, and they must hash to the card's hash.
       if (files === null || proposalHash(files) !== ref.hash || !checkProposedFiles(files).ok) return { ok: false, reason: PROPOSAL_CHANGED };
       const origin: ProposalOrigin = { by: entry.proposer.by, host: entry.proposer.host, label: entry.proposer.label, at: new Date(this.now()).toISOString() };
-      const placed = entry.kind === "version" && entry.base !== null ? await tricks.installProposedVersion(entry.id, files, origin, entry.base) : await tricks.installProposed(entry.id, files, origin);
+      const placed = entry.kind === "version" && entry.base !== null ? await tricks.installProposedVersion(entry.id, files, origin, entry.base, ref.hash) : await tricks.installProposed(entry.id, files, origin, ref.hash);
       if (!placed.ok) return { ok: false, reason: placed.message };
       await this.drop(state, entry);
       this.deps.audit?.({ action: "trick.proposal.on", detail: { trick: entry.id, hash: entry.hash.slice(0, 16) } });
-      return { ok: true };
+      return { ok: true, told: proposalTold(entry.id, intent, entry.kind === "version" && entry.base !== null ? "version" : "new") };
     });
   }
 

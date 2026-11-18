@@ -8,12 +8,13 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { TRICKS_WINDOWS_LINE } from "../../web/src/lib/tricks/schema.ts";
+import { TRICKS_WINDOWS_LINE, TRICKS_WINDOWS_SHELL_LINE } from "../../web/src/lib/tricks/schema.ts";
 import { powersOfDir } from "./approved.ts";
 import { trickCodeHash } from "./code-hash.ts";
 import { OfficialTricks } from "./official-install.ts";
 import type { OfficialEntry } from "./official.ts";
 import { TRICKS_DIR } from "./paths.ts";
+import { proposalHash } from "./propose-wire.ts";
 import type { RunOutcome, RunSpec } from "./run.ts";
 import { TricksService, type TricksServiceDeps } from "./service.ts";
 import { withSwitch, writeSwitches, type Switches } from "./switches.ts";
@@ -38,7 +39,7 @@ interface Rig {
 }
 
 /** A bridge on `platform` with the trick `legs` in its folder, switched on at the folder's code hash. */
-async function rig(platform: NodeJS.Platform): Promise<Rig> {
+async function rig(platform: NodeJS.Platform, env: TricksServiceDeps["env"] = { PATH: "/usr/bin:/bin" }): Promise<Rig> {
   const root = await mkdtemp(join(tmpdir(), "collie-tricks-gate-"));
   dirs.push(root);
   const configDir = join(root, "config");
@@ -56,10 +57,11 @@ async function rig(platform: NodeJS.Platform): Promise<Rig> {
   const deps: TricksServiceDeps = {
     configDir,
     stateDir,
+    feature: { on: () => true },
     memberId: HOST,
     platform,
     world: (memberId) => ({ machine: "desk", sessions: [], spaces: [{ name: "collie", folder: `/work/${memberId}` }] }),
-    env: { PATH: "/usr/bin:/bin" },
+    env,
     now: () => clock.t,
     warn: () => {},
     revBase: 1000,
@@ -136,7 +138,7 @@ describe("windows gate", () => {
 
   test("windows gate: the official list is empty with the gate, and an add fetches nothing and writes nothing", async () => {
     const win = await rig("win32");
-    const entry: OfficialEntry = { id: "dash", name: "Dash", description: "A dash.", repo: "https://example.com/o/r", dir: "dash", commit: "a".repeat(40), hash: "b".repeat(64), extras: "c".repeat(64), rules: null, contract: 1, previous: [] };
+    const entry: OfficialEntry = { id: "dash", name: "Dash", description: "A dash.", repo: "https://example.com/o/r", dir: "dash", commit: "a".repeat(40), hash: "b".repeat(64), extras: "c".repeat(64), rules: null, contract: 1, places: ["belt"], previous: [] };
     const list = new OfficialTricks({ configDir: win.configDir, stateDir: win.stateDir, env: {}, entries: () => [entry], gate: () => win.service.gateLine(), lane: (work) => win.service.officialLane(work) });
     expect(await list.reply()).toEqual({ tricks: [], gate: "windows" });
     expect(await list.install("dash", "add")).toEqual({ status: 409, body: { error: "windows", message: TRICKS_WINDOWS_LINE } });
@@ -157,8 +159,8 @@ describe("windows gate", () => {
     expect(await win.service.proposalTarget("fresh")).toEqual({ kind: "refused", reason: TRICKS_WINDOWS_LINE });
     const files = [{ rel: "trick.toml", bytes: new TextEncoder().encode('id = "fresh"\nname = "F"\nplaces = ["belt"]\n'), executable: false }];
     const origin = { by: "agent" as const, host: HOST, label: "composer", at: "2026-11-12T09:00:00Z" };
-    expect(await win.service.installProposed("fresh", files, origin)).toEqual({ ok: false, message: TRICKS_WINDOWS_LINE });
-    expect(await win.service.installProposedVersion("legs", files, origin, "c".repeat(64))).toEqual({ ok: false, message: TRICKS_WINDOWS_LINE });
+    expect(await win.service.installProposed("fresh", files, origin, proposalHash(files))).toEqual({ ok: false, message: TRICKS_WINDOWS_LINE });
+    expect(await win.service.installProposedVersion("legs", files, origin, "c".repeat(64), proposalHash(files))).toEqual({ ok: false, message: TRICKS_WINDOWS_LINE });
     expect(await readdir(join(win.configDir, TRICKS_DIR))).toEqual(["legs"]);
   });
 
@@ -172,5 +174,26 @@ describe("windows gate", () => {
     expect(win.service.viewGate("legs")).toEqual({ ok: false, code: "trick_off", error: TRICKS_WINDOWS_LINE });
     expect(await win.service.viewGateFresh("legs")).toEqual({ ok: false, code: "trick_off", error: TRICKS_WINDOWS_LINE });
     expect(await win.service.media(HOST, "legs", "a.png")).toBeNull();
+  });
+
+  test("windows gate stays: gated() is true on win32 only, also after the four Windows faults are fixed", async () => {
+    expect((await rig("win32")).service.gated()).toBe(true);
+    expect((await rig("linux")).service.gated()).toBe(false);
+  });
+
+  test("the doctor's PATH (runnerPath) reads Path on a Windows bridge and never shows a secret (fault a)", async () => {
+    const env = { Path: "C:\\Windows\\system32", SystemRoot: "C:\\Windows", collie_token: "tok-must-not-leak" };
+    expect((await rig("win32", env)).service.runnerPath()).toBe("C:\\Windows\\system32");
+    expect((await rig("linux", env)).service.runnerPath()).toBe("");
+  });
+
+  test("after the gate (lifted here by hand, as Altan may one day), a shell run line is refused at switch-on (fault d)", async () => {
+    const win = await rig("win32");
+    expect(win.service.gated()).toBe(true);
+    // A test-only stand-in for a lifted gate: the real gate stays, and the test above pins it.
+    win.service.gated = () => false;
+    expect(await win.service.setSwitch(HOST, "legs", true)).toEqual({ status: 409, body: { error: "windows-shell", message: TRICKS_WINDOWS_SHELL_LINE } });
+    const linux = await rig("linux");
+    expect((await linux.service.setSwitch(HOST, "legs", true)).status).toBe(200);
   });
 });

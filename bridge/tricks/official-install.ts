@@ -2,14 +2,16 @@ import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { devNull } from "node:os";
 import { join } from "node:path";
 
-import { rulesTextProblems, type OfficialState, type OfficialTricksReply, type TricksRunsOn } from "../../web/src/lib/tricks/schema.ts";
+import { HOST } from "../host.ts";
+import { rulesTextProblems, TRICKS_WINDOWS_SHELL_LINE, type OfficialState, type OfficialTricksReply, type TricksRunsOn } from "../../web/src/lib/tricks/schema.ts";
+import { forgetLeftovers } from "./approved.ts";
 import { isCodePath, officialExtrasHash, trickCodeHash } from "./code-hash.ts";
-import { fetchSource, FetchRefused, readCandidate, writeCandidateFiles, type Candidate, type FetchOptions, type GitRunner } from "./fetch.ts";
-import { officialStanding, officialStateOf, officialWire, shippedOfficialList, type OfficialEntry, type OfficialStanding } from "./official.ts";
+import { fetchSource, FetchRefused, FetchSlot, readCandidate, writeCandidateFiles, type Candidate, type FetchOptions, type GitRunner } from "./fetch.ts";
+import { officialStanding, officialStateOf, officialWire, pinnedPlaces, shippedOfficialList, type OfficialEntry, type OfficialStanding } from "./official.ts";
+import type { RepoFactsPort } from "./repo-facts.ts";
 import { renderOrigin } from "./origin.ts";
 import { tricksConfigDir, tricksStateDir } from "./paths.ts";
 import { replaceCode, writeNewTrick, type ProposalWrite } from "./proposal-install.ts";
-import { updateSwitches, withSwitch } from "./switches.ts";
 
 // ADDING A TRICK FROM THE FROM COLLIE LIST (M94). The only network use of the feature, and only on the
 // person's tap: `POST /api/tricks/official/<id>/add` (or `/update`), write-gated like the trick switch
@@ -48,7 +50,7 @@ import { updateSwitches, withSwitch } from "./switches.ts";
 // new version path takes it (a pending copy and the card on the Hill, or `auto` when the person chose it).
 // There is no second consent path.
 //
-// One add or update at a time: a second one while one runs answers `busy`. Every git run ends by the
+// One fetch at a time per bridge (fetch.ts `FetchSlot`, shared with a repository's index): a second one while one runs answers `busy`. Every git run ends by the
 // deadline {@link OFFICIAL_ADD_TIMEOUT_MS} after the tap. The temp folder and any stage go on every path.
 // The write itself runs in the tricks runner's serial lane (service.ts `officialLane`), so no switch write
 // or version change runs beside it.
@@ -89,7 +91,7 @@ export type OfficialAnswer =
   | { status: 200; body: { id: string; state: OfficialState } }
   | { status: 400; body: { error: "official-invalid" } }
   | { status: 404; body: { error: "unknown-official" } }
-  | { status: 409; body: { error: "runs-on" | "windows" | "busy" | "taken" | "added" | "no-update" | "not-added" | "blocked" | "changed"; message: string } }
+  | { status: 409; body: { error: "runs-on" | "windows" | "windows-shell" | "tricks-off" | "busy" | "taken" | "added" | "no-update" | "not-added" | "blocked" | "changed"; message: string } }
   | { status: 422; body: { error: "mismatch" | "too-large"; message: string } }
   | { status: 502; body: { error: "unreachable"; message: string } }
   | { status: 500; body: { error: "failed"; message: string } };
@@ -113,12 +115,25 @@ export interface OfficialTricksDeps {
   runsOn?: () => TricksRunsOn | null;
   /** The Windows gate's line (service.ts `gateLine`), or null where tricks run: then the list is empty and nothing is fetched. */
   gate?: () => string | null;
+  /**
+   * The line while tricks as a whole are switched off (service.ts `offLine`), or null while they are on: then
+   * the list stays readable and an add or an update is refused before anything is fetched.
+   */
+  offLine?: () => string | null;
+  /** An add forgets what an earlier trick of that id left beside its files: its agent views and Hill keys (approved.ts `forgetLeftovers`). Absent: none held. */
+  forgetTrick?: (id: string) => void | Promise<void>;
+  /** The platform: on Windows an entry marked `posix` (a shell run line) is not added. Default `HOST.platform` (bridge/host.ts). */
+  platform?: NodeJS.Platform;
   /** Run a write in the tricks runner's serial lane and wait for its next scan (service.ts `officialLane`). Absent: run it as it is. */
   lane?: <T>(work: () => Promise<T>) => Promise<T>;
   /** One audit line per add and update. */
   audit?: (entry: { action: string; detail: Record<string, string> }) => void;
+  /** The list's repository facts (repo-facts.ts): a read of the list asks for the stale ones and carries what is cached. Absent: none. */
+  repoFacts?: RepoFactsPort;
   warn?: (line: string) => void;
   now?: () => number;
+  /** The bridge's one fetch slot, shared with a repository's index (repo-index.ts). Absent: a slot of its own. */
+  slot?: FetchSlot;
   /** TEST SEAM: the git runner, a `file://` source, a shorter deadline, a lower byte cap. The bridge never sets them. */
   git?: GitRunner;
   allowFile?: boolean;
@@ -168,13 +183,28 @@ export async function candidateHash(candidate: Candidate, dir: string): Promise<
   return hashed.hash;
 }
 
-/** The fetch options of an official fetch: the hardening, {@link OFFICIAL_GIT}, no global config, the deadline. */
-export function officialFetchOptions(deps: Pick<OfficialTricksDeps, "env" | "git" | "allowFile" | "now" | "maxBytes">, deadline: number): FetchOptions {
+/**
+ * An empty folder for one fetch to call its home: `home` inside the fetch's temp folder, so it goes with it.
+ * git reads `~/.netrc` through curl, and a login the operator keeps for one of the three hosts would go to
+ * that host on a phone fetch or an official add; with HOME and CURL_HOME here there is nothing to read.
+ */
+export async function fetchHome(fetchDir: string): Promise<string> {
+  const home = join(fetchDir, "home");
+  await mkdir(home, { recursive: true, mode: 0o700 });
+  return home;
+}
+
+/**
+ * The fetch options of an official fetch: the hardening, {@link OFFICIAL_GIT}, no global config, the deadline,
+ * and `home` (from {@link fetchHome}) as the home of every git run, so no `~/.netrc`, no XDG config and no
+ * user config is read.
+ */
+export function officialFetchOptions(deps: Pick<OfficialTricksDeps, "env" | "git" | "allowFile" | "now" | "maxBytes">, deadline: number, home: string): FetchOptions {
   const opts: FetchOptions = {
     env: deps.env,
     allowFile: deps.allowFile === true,
     extraConfig: OFFICIAL_GIT,
-    extraEnv: { GIT_CONFIG_GLOBAL: devNull },
+    extraEnv: { GIT_CONFIG_GLOBAL: devNull, HOME: home, CURL_HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: home },
     deadline,
     maxBytes: deps.maxBytes ?? OFFICIAL_FETCH_BYTES_MAX,
   };
@@ -184,10 +214,12 @@ export function officialFetchOptions(deps: Pick<OfficialTricksDeps, "env" | "git
 }
 
 export class OfficialTricks implements OfficialTricksSurface {
-  private busy = false;
   private warned = false;
+  private readonly slot: FetchSlot;
 
-  constructor(private readonly deps: OfficialTricksDeps) {}
+  constructor(private readonly deps: OfficialTricksDeps) {
+    this.slot = deps.slot ?? new FetchSlot();
+  }
 
   /** The list, or none with the reason said once when the list this binary carries was refused. */
   private entries(): readonly OfficialEntry[] {
@@ -205,7 +237,7 @@ export class OfficialTricks implements OfficialTricksSurface {
    * that start with {@link OFFICIAL_FETCH_PREFIX}; `rm` removes a link itself, never what it points at.
    */
   async sweep(): Promise<number> {
-    if (this.busy) return 0;
+    if (this.slot.busy) return 0;
     const root = tricksStateDir(this.deps.stateDir);
     const names = await readdir(root).catch(() => []);
     const stale = names.filter((name) => name.startsWith(OFFICIAL_FETCH_PREFIX));
@@ -217,18 +249,31 @@ export class OfficialTricks implements OfficialTricksSurface {
     if ((this.deps.gate?.() ?? null) !== null) return { tricks: [], gate: "windows" };
     const runsOn = this.deps.runsOn?.() ?? null;
     if (runsOn !== null) return { tricks: [], runsOn };
-    return { tricks: await officialWire(this.deps.configDir, this.entries()) };
+    const entries = this.entries();
+    const tricks = await officialWire(this.deps.configDir, entries);
+    const facts = this.deps.repoFacts;
+    if (facts === undefined) return { tricks };
+    // The repository's stars and last commit from the cache; a stale one is read in the background, never waited for.
+    facts.want(new Set(entries.map((e) => e.repo)));
+    for (const wire of tricks) {
+      const known = facts.facts(wire.repo);
+      if (known !== undefined) wire.repoFacts = known;
+    }
+    return { tricks };
   }
 
   async install(id: string, mode: "add" | "update"): Promise<OfficialAnswer> {
     const gate = this.deps.gate?.() ?? null;
     if (gate !== null) return { status: 409, body: { error: "windows", message: gate } };
+    const off = this.deps.offLine?.() ?? null;
+    if (off !== null) return { status: 409, body: { error: "tricks-off", message: off } };
     const runsOn = this.deps.runsOn?.() ?? null;
     if (runsOn !== null) return { status: 409, body: { error: "runs-on", message: "This machine runs no tricks: the lead of its crew does." } };
     const entry = this.entries().find((e) => e.id === id);
     if (entry === undefined) return { status: 404, body: { error: "unknown-official" } };
-    if (this.busy) return { status: 409, body: { error: "busy", message: OFFICIAL_LINES.busy } };
-    this.busy = true;
+    // Fault d: a POSIX trick (a shell run line) never runs on Windows, so its add fetches nothing there.
+    if (entry.posix === true && (this.deps.platform ?? HOST.platform) === "win32") return { status: 409, body: { error: "windows-shell", message: TRICKS_WINDOWS_SHELL_LINE } };
+    if (!this.slot.take()) return { status: 409, body: { error: "busy", message: OFFICIAL_LINES.busy } };
     let fetchDir: string | null = null;
     try {
       const wrong = stateRefusal(await officialStanding(this.deps.configDir, entry), mode);
@@ -249,7 +294,7 @@ export class OfficialTricks implements OfficialTricksSurface {
       return { status: 500, body: { error: "failed", message: `The trick could not be ${mode === "add" ? "added" : "updated"}. Nothing was changed.` } };
     } finally {
       if (fetchDir !== null) await rm(fetchDir, { recursive: true, force: true }).catch(() => {});
-      this.busy = false;
+      this.slot.free();
     }
   }
 
@@ -257,7 +302,7 @@ export class OfficialTricks implements OfficialTricksSurface {
   private async fetch(entry: OfficialEntry, fetchDir: string, mode: "add" | "update", deadline: number): Promise<Candidate> {
     let candidate: Candidate;
     try {
-      candidate = await fetchOfficial(entry, fetchDir, officialFetchOptions(this.deps, deadline));
+      candidate = await fetchOfficial(entry, fetchDir, officialFetchOptions(this.deps, deadline, await fetchHome(fetchDir)));
     } catch (err) {
       if (!(err instanceof FetchRefused)) throw err;
       this.deps.warn?.(`${entry.id}: the official fetch was refused (${err.step}): ${err.message}`);
@@ -272,6 +317,19 @@ export class OfficialTricks implements OfficialTricksSurface {
     const rules = candidateRules(candidate);
     if (!rules.ok || rules.sha256 !== entry.rules) {
       this.deps.warn?.(`${entry.id}: the official ${mode} was refused: ${rules.ok ? "the rules differ from the list's" : rules.reason}`);
+      throw new Stop(mismatch(mode));
+    }
+    // The places too (contract 2, the menu place): the phone said "Adds rows to a session's settings." or
+    // not from the list alone, so a folder whose manifest lists other places installs nothing.
+    const places = pinnedPlaces(candidate.manifest);
+    if (JSON.stringify(places) !== JSON.stringify(entry.places)) {
+      this.deps.warn?.(`${entry.id}: the official ${mode} was refused: the places differ from the list's`);
+      throw new Stop(mismatch(mode));
+    }
+    // And `decides`: the phone said "Uses agent tokens" or not from the list alone (a pin always follows the
+    // code hash, so this only stops a list written by hand).
+    if (candidate.manifest.decides !== entry.decides) {
+      this.deps.warn?.(`${entry.id}: the official ${mode} was refused: decides differs from the list's`);
       throw new Stop(mismatch(mode));
     }
     // An add writes config.toml and media/ too, which the code hash leaves out: the extras hash pins them.
@@ -297,7 +355,7 @@ export class OfficialTricks implements OfficialTricksSurface {
     let written: ProposalWrite;
     if (mode === "add") {
       // Added means switched off: a switch entry a removed folder left behind for this id goes first.
-      await updateSwitches(this.deps.stateDir, (now) => (now.on.has(entry.id) ? withSwitch(now, entry.id, false, at) : now));
+      await forgetLeftovers({ stateDir: this.deps.stateDir, configDir: this.deps.configDir, id: entry.id, at, forget: this.deps.forgetTrick });
       written = await writeNewTrick(root, entry.id, candidate.files, originText, { expect: entry.hash });
     } else {
       // Only code moves (the proposal version write's rule): the new version's config.toml, pictures and

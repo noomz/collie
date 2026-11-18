@@ -12,7 +12,7 @@ import { memoryHillReceipts } from "../bridge/hill/receipts.ts";
 import { CREW_HILL_MEDIA_ROUTE, CREW_HILL_POST_ROUTE, HILL_CALL_BUDGET_MS, HILL_FORWARD_BUDGET_MS, HILL_MEDIA_BUDGET_MS, HILL_POST_ASK_MS, HillCrewLead, HillHeldMedia, HillMemberForward, type HillLeadLink } from "../bridge/hill/crew.ts";
 import { HillService, type HillServiceDeps } from "../bridge/hill/service.ts";
 import { HillStore } from "../bridge/hill/store.ts";
-import { HillSwitch, readHillSwitch } from "../bridge/hill/switch.ts";
+import { HillSwitch, readHillSwitch, writeHillSwitch } from "../bridge/hill/switch.ts";
 import { walkyPlace } from "../bridge/hill/walky.ts";
 import type { WalkyHost, WalkyPane } from "../bridge/walky/deliver.ts";
 import { WalkyLog } from "../bridge/walky/log.ts";
@@ -28,6 +28,7 @@ import {
   cmdHillList,
   cmdHillPost,
   cmdHillStatus,
+  cmdHillOn,
   cmdHillSwitch,
   cmdHillWithdraw,
   durationMs,
@@ -47,7 +48,6 @@ import {
   parsePostArgs,
   readViewFile,
   refusalExit,
-  retryCommand,
   statusLines,
   type HillDeps,
 } from "./hill.ts";
@@ -97,6 +97,8 @@ async function bridge(withHill = true, extra: Partial<HillServiceDeps> = {}): Pr
   const host: WalkyHost = { panes: () => panes, send: async () => ({ outcome: "sent" }), sendState: () => ({ outcome: "sent" }), cancelHeld: () => undefined };
   const walky = new WalkyService({ log: new WalkyLog(join(stateDir, "walky")), host, memberId: null, enabled: () => true, machine: "desk", keyPem: () => null });
   let n = 0;
+  // The Hill is off until switched on (2026-11-13): this rig is a bridge whose person switched it on.
+  writeHillSwitch(stateDir, true);
   const hill = new HillService({
     store: new HillStore(null, () => 1000),
     receipts: memoryHillReceipts(),
@@ -113,7 +115,7 @@ async function bridge(withHill = true, extra: Partial<HillServiceDeps> = {}): Pr
     },
     media: new HillMediaStore(join(stateDir, "hill"), deniedFoldersSync([stateDir])),
     // The real switch on this bridge's own state folder, so `collie hill on|off` moves it.
-    hillSwitch: new HillSwitch(stateDir, () => undefined),
+    hillSwitch: new HillSwitch(stateDir, null, () => undefined),
     ...extra,
   });
   const base = { socketPath: walkySocketPath(stateDir), service: walky, targets: () => [target], log: () => undefined };
@@ -171,9 +173,9 @@ function deps(sockets: string[], env: Record<string, string> = inPane("%1"), ove
   };
 }
 
-/** The line every failed post ends with: its request id, and the command that sends it again once. */
-function retryLine(args: readonly string[], id = "0f8b5c1e-5a7d-4b8e-9f00-1a2b3c4d5e6f"): string {
-  return `hill: request id ${id}; to send this post again, it posts once: ${retryCommand(args, id)}`;
+/** The second line of a refused post that a retry can pass (exit 3 but not `hill_off`, and exit 5): it names the request id. */
+function retryLine(id = "0f8b5c1e-5a7d-4b8e-9f00-1a2b3c4d5e6f"): string {
+  return `hill: send it again with --request-id ${id}`;
 }
 
 const POST = ["--title", "Ship the zoom fix in 1.28.1?", "--summary", "The pill moves out of Chat. The leg is green.", "--option", "yes=Yes, Edge first", "--option", "no=No, wait for 1.29.0", "--recommend", "yes", "--why", "Edge users find it in a day."];
@@ -302,11 +304,11 @@ describe("post, status, withdraw and list against a bridge", () => {
     const d = deps([walkySocketPath(b.stateDir)]);
     expect(await cmdHillPost(d, ["--title", "t".repeat(121), "--summary", "s"])).toBe(EXIT.REFUSED);
     // The wording warnings come first, before the post; the refusal is the last line.
+    // Exit 4 is a refusal for the content: one line, no retry line, and no echo of the command.
     expect(d.io.stderr).toEqual([
       "warning: the title has 121 characters. Keep it to 60: the decision as a short question.",
       "warning: the title asks no question. Write the decision as a question the options answer.",
       "hill: the title is longer than 120 characters (bad_title)",
-      retryLine(["--title", "t".repeat(121), "--summary", "s"]),
     ]);
   });
 
@@ -407,7 +409,7 @@ describe("clear", () => {
   test("`collie hill clear` is a verb of the program, and `collie hill --help` lists it", async () => {
     const help = capture();
     expect(await run(["hill", "--help"], help)).toBe(EXIT.OK);
-    expect(help.stdout).toContain("  collie hill clear [--json]   (remove every closed decision from the Hill; open ones stay)");
+    expect(help.stdout.join("\n")).toContain("clear [--spoken]");
   });
 });
 
@@ -416,7 +418,7 @@ describe("the Hill's switch", () => {
     const b = await bridge();
     const sock = [walkySocketPath(b.stateDir)];
     expect(await cmdHillPost(deps(sock), POST)).toBe(EXIT.OK);
-    const own = { ctx: context({}, { stateDir: b.stateDir }), now: () => 1000 };
+    const own = { ctx: context({}, { stateDir: b.stateDir }), now: () => 1000, followSkill: null };
     const off = { ...own, io: capture() };
     expect(cmdHillSwitch(off, "off", [])).toBe(EXIT.OK);
     expect(off.io.stdout).toEqual([HILL_OFF_WORDS]);
@@ -424,7 +426,8 @@ describe("the Hill's switch", () => {
 
     const refused = deps(sock, inPane("%1"), { mintRequestId: () => "0f8b5c1e-5a7d-4b8e-9f00-1a2b3c4d5e71" });
     expect(await cmdHillPost(refused, POST)).toBe(EXIT.STATE);
-    expect(refused.io.stderr.slice(-2)).toEqual(["hill: the Hill is off on this Collie; your person can switch it on in Settings, Alerts, on the phone, or with: collie hill on (hill_off)", retryLine(POST, "0f8b5c1e-5a7d-4b8e-9f00-1a2b3c4d5e71")]);
+    // One line: a retry cannot pass until the person switches the Hill on, so no request id is offered.
+    expect(refused.io.stderr).toEqual(["hill: the Hill is off on this Collie; your person can switch it on in Settings, Experiments, on the phone, or with: collie hill on (hill_off)"]);
     // The open decision is still there, and its poster can read, list and withdraw it while the Hill is off.
     const status = deps(sock);
     expect(await cmdHillStatus(status, ["dc_cli000000001"])).toBe(EXIT.OK);
@@ -447,7 +450,11 @@ describe("the Hill's switch", () => {
   test("a switch already in place says so and writes nothing; --json prints the value; another argument is a usage error", () => {
     const stateDir = mkdtempSync(join(tmpdir(), "hill-switch-"));
     cleanups.push(() => rmSync(stateDir, { recursive: true, force: true }));
-    const own = { ctx: context({}, { stateDir }), now: () => 1000 };
+    const own = { ctx: context({}, { stateDir }), now: () => 1000, followSkill: null };
+    // No file is off (2026-11-13): "on" writes, and only the second "on" finds it in place.
+    const first = { ...own, io: capture() };
+    expect(cmdHillSwitch(first, "on", [])).toBe(EXIT.OK);
+    expect(first.io.stdout).toEqual([HILL_ON_WORDS]);
     const already = { ...own, io: capture() };
     expect(cmdHillSwitch(already, "on", [])).toBe(EXIT.OK);
     expect(already.io.stdout).toEqual(["The Hill is already on."]);
@@ -463,6 +470,56 @@ describe("the Hill's switch", () => {
     expect(bad.io.stderr[0]).toBe("error: unknown argument `now`");
   });
 
+  test("hill on in an agent's pane is refused with the person-only sentence and writes nothing; a shell pane writes", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "hill-switch-"));
+    cleanups.push(() => rmSync(stateDir, { recursive: true, force: true }));
+    const ctx = context({ HERDR_PANE_ID: "w1:p2", HERDR_SOCKET_PATH: "/run/user/1000/herdr.sock" }, { stateDir });
+    const agent = { ctx, now: () => 1000, followSkill: null, paneKind: async () => "agent" as const, io: capture() };
+    expect(await cmdHillOn(agent, [])).toBe(EXIT.REFUSED);
+    expect(agent.io.stderr[0]).toBe("error: collie hill on is your person's choice, and this runs in a pane where an agent works.");
+    expect(readHillSwitch(stateDir).on).toBe(false);
+    const shell = { ...agent, paneKind: async () => "shell" as const, io: capture() };
+    expect(await cmdHillOn(shell, [])).toBe(EXIT.OK);
+    expect(readHillSwitch(stateDir).on).toBe(true);
+  });
+
+  test("counsel A2: hill on fails closed in a pane the bridge does not prove a shell; a bare terminal still writes", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "hill-switch-"));
+    cleanups.push(() => rmSync(stateDir, { recursive: true, force: true }));
+    const ctx = context({ HERDR_PANE_ID: "w1:p2", HERDR_SOCKET_PATH: "/run/user/1000/herdr.sock" }, { stateDir });
+    const base = { ctx, now: () => 1000, followSkill: null };
+    const thrown = { ...base, paneKind: async (): Promise<"agent"> => Promise.reject(new Error("socket gone")), io: capture() };
+    expect(await cmdHillOn(thrown, [])).toBe(EXIT.REFUSED);
+    expect(thrown.io.stderr[0]).toBe("error: collie hill on is your person's choice, and this runs in a pane where an agent works.");
+    const unknown = { ...base, paneKind: async () => "unknown" as const, io: capture() };
+    expect(await cmdHillOn(unknown, [])).toBe(EXIT.REFUSED);
+    expect(unknown.io.stderr).toEqual(thrown.io.stderr);
+    expect(readHillSwitch(stateDir).on).toBe(false);
+    // No pane markers: a person's own terminal, the bridge is not asked and the verb writes.
+    const bare = { ...base, ctx: context({}, { stateDir }), paneKind: async (): Promise<"agent"> => Promise.reject(new Error("never asked")), io: capture() };
+    expect(await cmdHillOn(bare, [])).toBe(EXIT.OK);
+    expect(readHillSwitch(stateDir).on).toBe(true);
+  });
+
+  test("the WalkyTalky skill follows a real change only, and a sync fault is one line that does not change the exit (M96 spec 12)", () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "hill-switch-"));
+    cleanups.push(() => rmSync(stateDir, { recursive: true, force: true }));
+    const followed: boolean[] = [];
+    const own = { ctx: context({}, { stateDir }), now: () => 1000, followSkill: (on: boolean) => void followed.push(on) };
+    // No file reads off, so a first "off" is no change: it writes the file and syncs nothing.
+    expect(cmdHillSwitch({ ...own, io: capture() }, "off", [])).toBe(EXIT.OK);
+    expect(followed).toEqual([]);
+    expect(cmdHillSwitch({ ...own, io: capture() }, "on", [])).toBe(EXIT.OK);
+    expect(cmdHillSwitch({ ...own, io: capture() }, "on", [])).toBe(EXIT.OK);
+    expect(cmdHillSwitch({ ...own, io: capture() }, "off", ["--json"])).toBe(EXIT.OK);
+    expect(followed).toEqual([true, false]);
+    const broken = { ...own, followSkill: () => { throw new Error("disk full"); }, io: capture() };
+    expect(cmdHillSwitch(broken, "on", ["--json"])).toBe(EXIT.OK);
+    expect(broken.io.stdout).toEqual(['{"on":true}']);
+    expect(broken.io.stderr).toEqual(["hill: the WalkyTalky skill did not follow the switch: disk full"]);
+    expect(readHillSwitch(stateDir)).toEqual({ on: true, problem: null });
+  });
+
   test("`hill_off` exits STATE, apart from a post refused for its content (REFUSED)", () => {
     expect(refusalExit("hill_off")).toBe(EXIT.STATE);
     expect(refusalExit(null)).toBe(EXIT.STATE);
@@ -476,8 +533,10 @@ describe("the Hill's switch", () => {
   test("`collie hill on` and `off` are verbs of the tree", async () => {
     const help = capture();
     expect(await run(["hill", "--help"], help)).toBe(EXIT.OK);
-    expect(help.stdout).toContain("  collie hill on    (switch the Hill on for this Collie; it is on unless switched off)");
-    expect(help.stdout).toContain("  collie hill off   (switch the Hill off: every post is refused, the open decisions stay)");
+    // The operator's verbs leave the agent's usage lines; one sentence names them and the default.
+    expect(help.stdout[1]).toBe("The Hill is off until your operator switches it on (theirs alone: on, off, clear [--spoken], state).");
+    expect(help.stdout).not.toContain("  on");
+    expect(help.stdout.join("\n")).not.toContain("on unless switched off");
   });
 });
 
@@ -515,14 +574,16 @@ describe("an older bridge on the same machine", () => {
   test("no bridge at all: the same words", async () => {
     const d = deps([join(tmpdir(), "no-such-dir", "walky", "sock")]);
     expect(await cmdHillPost(d, POST)).toBe(EXIT.UNREACHABLE);
-    expect(d.io.stderr).toEqual([`hill: ${HILL_UNKNOWN}`, retryLine(POST)]);
+    // Exit 5: a retry can pass, so the second line names the request id. The command is not echoed.
+    expect(d.io.stderr).toEqual([`hill: ${HILL_UNKNOWN}`, retryLine()]);
+    expect(d.io.stderr.join("\n")).not.toContain("collie hill post");
   });
 
   socketTest("a bridge that knows the hill but not this pane says it does not know the pane", async () => {
     const b = await bridge();
     const d = deps([walkySocketPath(b.stateDir)], inPane("%9"));
     expect(await cmdHillPost(d, POST)).toBe(EXIT.STATE);
-    expect(d.io.stderr).toEqual([`hill: ${HILL_NOT_HERE}`, retryLine(POST)]);
+    expect(d.io.stderr).toEqual([`hill: ${HILL_NOT_HERE}`, retryLine()]);
   });
 
   test("Windows has no walky socket", async () => {
@@ -533,17 +594,11 @@ describe("an older bridge on the same machine", () => {
 
 describe("help", () => {
   const RULES = [
-    "Post a decision only for what needs the person.",
-    "Always write the summary in plain words, and recommend one option with a why.",
-    "One question per decision. To change one, post again with --supersedes; never repost.",
-    "Do not wait in a loop. The answer arrives as a WalkyTalky message and starts your next turn.",
-    "If no answer arrived, read it with collie hill status <id>.",
-    "An answer typed into your session for a decision you did not post carries only the id and the option word. Read the rest with collie hill status <id>.",
-    "A worker with a lead asks its lead first.",
-    "A --view only shows facts. No buttons: the options are the taps.",
-    "When your operator settles the question in your session, take the card back: collie hill withdraw <id>.",
-    "Before you post, read the crew state: collie hill state. here: post as usual. quiet: post, but do not wait for a fast answer. away: post nothing that needs an answer now; do work that needs no answer, then end your turn.",
-    'A typed answer or a post result can end with a line such as "Crew state: away." It is the state at that moment.',
+    "Post only what needs your person. A worker with a lead asks its lead first.",
+    "One question per post. To change it, post again with --supersedes <id>.",
+    'Do not wait or poll. The answer starts your next turn as "Answer to <id> ...". None arrived: collie hill status <id>.',
+    "Settled in your session: collie hill withdraw <id>.",
+    'A result that ends "Crew state: quiet." or "Crew state: away.": your person is not there. Ask nothing that needs an answer now.',
   ];
 
   test("the rules are worded as the brief words them", () => {
@@ -553,7 +608,7 @@ describe("help", () => {
   test("`collie hill --help` prints the usage and the rules and exits 0; a bare `collie hill` exits 2", async () => {
     const help = capture();
     expect(await run(["hill", "--help"], help)).toBe(EXIT.OK);
-    expect(help.stdout[0]).toBe("usage: collie hill {post|status|withdraw|list|clear|state|on|off}");
+    expect(help.stdout[0]).toBe("usage: collie hill {post|status|withdraw|list} [--json]");
     expect(help.stdout.slice(-RULES.length)).toEqual(RULES);
     const bare = capture();
     expect(cmdHill({ io: bare }, [])).toBe(EXIT.USAGE);
@@ -563,13 +618,29 @@ describe("help", () => {
     expect(wrong.stderr[0]).toBe("error: unknown hill command `ask`");
   });
 
-  test("`collie hill post --help` prints the usage and the rules, and posts nothing", async () => {
+  test("`collie hill post --help` prints the same text as `collie hill --help`, and posts nothing", async () => {
     const io = capture();
     expect(await run(["hill", "post", "--help"], io)).toBe(EXIT.OK);
     expect(io.stdout).toEqual(hillPostHelp());
-    expect(io.stdout[0]).toStartWith("usage: collie hill post");
-    expect(io.stdout).toContain("  With no --expires, a decision closes as expired after 14 days. --expires is at most 30 days.");
+    expect(hillPostHelp()).toEqual(hillHelp());
     expect(io.stdout.slice(-RULES.length)).toEqual(RULES);
+    // Every flag of `post` has its own line.
+    for (const flag of ["--title", "--summary", "--option", "--recommend", "--why", "--confirm", "--detail", "--priority", "--text", "--link", "--about", "--reply-to", "--supersedes", "--expires", "--request-id", "--image", "--view"]) {
+      expect(io.stdout.filter((line) => line.trimStart().startsWith(flag) || line.includes(` ${flag} `)).length, flag).toBeGreaterThan(0);
+    }
+  });
+
+  test("the help is short: at most 1,500 bytes, the text an agent reads each time it runs it", () => {
+    const bytes = Buffer.byteLength(`${hillHelp().join("\n")}\n`);
+    expect(bytes).toBeLessThanOrEqual(1500);
+    expect(HILL_RULES.length).toBe(5);
+    expect(HILL_WRITING.length).toBe(2);
+  });
+
+  test("the help says the Hill is off until the operator switches it on", () => {
+    const help = hillHelp().join("\n");
+    expect(help).toContain("off until your operator switches it on");
+    expect(help).not.toContain("on unless switched off");
   });
 });
 
@@ -891,10 +962,9 @@ describe("post --view", () => {
     expect(d.io.stderr).toEqual([`hill: ${HILL_VIEW_DROPPED}`]);
   });
 
-  test("the help names the kinds and says the options are the taps", () => {
+  test("the --view line says it shows facts and has no buttons", () => {
     const help = hillPostHelp().join("\n");
-    expect(help).toContain("--view view.json");
-    expect(help).toContain("No buttons: the options are the taps");
+    expect(help).toContain("--view <file.json>  facts, no buttons; kinds: collie docs tricks-reference");
   });
 });
 
@@ -983,13 +1053,14 @@ describe("a post on a slow crew link", () => {
     expect(await cmdHillPost(first, POST)).toBe(EXIT.UNREACHABLE);
     expect(first.io.stderr[0]).toBe(`hill: ${HILL_NOT_CONFIRMED}`);
     expect(first.io.stderr.join("\n")).not.toContain("no running Collie");
+    expect(first.io.stderr).toHaveLength(2);
+    expect(first.io.stderr[1]).toBe(retryLine("0f8b5c1e-5a7d-4b8e-9f00-1a2b3c4d5e99"));
     const retry = /--request-id (\S+)/u.exec(first.io.stderr[1] ?? "")?.[1];
     expect(retry).toBe("0f8b5c1e-5a7d-4b8e-9f00-1a2b3c4d5e99");
-    expect(first.io.stderr[1]).toContain(`collie hill post --title 'Ship the zoom fix in 1.28.1?'`);
     // The bridge went on and posted.
     await Bun.sleep(500);
     expect(leadStore.all()).toHaveLength(1);
-    // The agent runs the printed command: the same request id posts once.
+    // The agent sends the same post again with the printed request id: it posts once.
     const again = deps(sock);
     expect(await cmdHillPost(again, [...POST, "--request-id", retry!])).toBe(EXIT.OK);
     expect(again.io.stdout).toEqual([leadStore.all()[0]!.id]);
@@ -999,7 +1070,7 @@ describe("a post on a slow crew link", () => {
 
 describe("status of Collie's own card, from the session it tells", () => {
   const COLLIE = { kind: "collie" as const, ref: { type: "proposal" as const, id: "legs", hash: "a".repeat(64) }, label: "Collie" };
-  const CARD = { requestId: "0f8b5c1e-5a7d-4b8e-9f00-1a2b3c4d5e6f", title: "Switch on the trick legs?", summary: "An agent session (repo#one) on desk proposes it.", options: [{ intent: "on", label: "Switch it on" }, { intent: "later", label: "Not now" }], text: "none" as const, recommends: null };
+  const CARD = { requestId: "0f8b5c1e-5a7d-4b8e-9f00-1a2b3c4d5e6f", title: "Switch on the trick legs?", summary: "A session on desk proposes it.", options: [{ intent: "on", label: "Switch it on" }, { intent: "later", label: "Not now" }], text: "none" as const, recommends: null, view: [{ kind: "diff" as const, text: "@@ -0,0 +1 @@\n+console.log(1);", attrs: { file: "program.ts" } }] };
 
   socketTest("the proposing session reads the card before and after the answer; another pane does not", async () => {
     const b = await bridge(true, { onCollieAnswer: async () => ({ ok: true }) });
@@ -1009,7 +1080,8 @@ describe("status of Collie's own card, from the session it tells", () => {
     const before = deps(sock);
     expect(await cmdHillStatus(before, ["dc_cli000000001"])).toBe(EXIT.OK);
     expect(before.io.stdout).toEqual(["dc_cli000000001 open", "title: Switch on the trick legs?"]);
-    await b.hill.answer({ rid: "11111111-1111-4111-8111-111111111111", node: "hill/dc_cli000000001", intent: "on", value: { text: null } }, "dc_cli000000001", "Pixel 9");
+    // A phone that showed the card's code to its end (C-A2): a trick card's yes needs it.
+    await b.hill.answer({ rid: "11111111-1111-4111-8111-111111111111", node: "hill/dc_cli000000001", intent: "on", value: { text: null }, group: { digest: COLLIE.ref.hash, opened: [1] } }, "dc_cli000000001", "Pixel 9");
     const after = deps(sock);
     expect(await cmdHillStatus(after, ["dc_cli000000001"])).toBe(EXIT.OK);
     expect(after.io.stdout).toEqual(["dc_cli000000001 answered", "title: Switch on the trick legs?", "answer: on (Switch it on)", "by: Pixel 9", "delivery: typed"]);

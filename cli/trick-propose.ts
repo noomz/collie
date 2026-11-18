@@ -1,20 +1,23 @@
 import { randomUUID } from "node:crypto";
-import { join, resolve } from "node:path";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 
 import { edgeStateDirs, readEnvMarkers } from "./beacon.ts";
 import type { HillDeps } from "./hill.ts";
 import { holdSocketSafe } from "./hold.ts";
 import { EXIT } from "./io.ts";
-import { checkStatic, leadsCrewOnDisk, reportFails } from "./trick.ts";
+import { checkStatic, leadsCrewOnDisk, reportFails, runAgainstFixture } from "./trick.ts";
 import { readTrickFolder } from "./trick-folder.ts";
 
 export { PROPOSE_WALK_MAX, readTrickFolder, type FolderRead } from "./trick-folder.ts";
 import { AskLate, NO_SOCKET_TEXT, shown } from "./walky.ts";
-import { asJsonString, parseJsonObject } from "../web/src/lib/json.ts";
+import { asJsonBoolean, asJsonObject, asJsonString, parseJsonObject, type JsonValue } from "../web/src/lib/json.ts";
 import type { JsonObject } from "../bridge/json.ts";
 import { PROPOSE_ASK_MS } from "../bridge/tricks/propose-door.ts";
 import { proposalCardCount } from "../bridge/tricks/proposal-card.ts";
-import { manifestGivesRules, PROPOSE_HAS_RULES, readProposal, wireFiles } from "../bridge/tricks/propose-wire.ts";
+import { manifestGivesRules, PROPOSE_HAS_RULES, readProposal, wireFiles, type ProposedFile } from "../bridge/tricks/propose-wire.ts";
+import type { TrickManifest } from "../web/src/lib/tricks/schema.ts";
 import { MANIFEST_FILE } from "../bridge/tricks/paths.ts";
 import { warningLines } from "../bridge/tricks/scan.ts";
 import { unknownOp } from "../bridge/walky/refusals.ts";
@@ -25,8 +28,9 @@ import { isRequestId } from "../bridge/worktree-receipts.ts";
 // own pane: it switches nothing on. The folder is checked as `collie trick check` checks it, read the
 // hardened way (regular files only, never through a link, within the caps of `collie trick add`), and
 // sent over the walky socket to this machine's bridge, which keeps it on a lead or a solo Collie and
-// forwards it to the lead on a crew member (bridge/tricks/propose-door.ts). The person sees a card on the
-// Hill; nothing runs before their yes.
+// forwards it to the lead on a crew member (bridge/tricks/propose-door.ts). The person sees a card of
+// Collie's own, on the Hill or, with the Hill off, in Settings, Tricks (M96 spec 14); nothing runs before
+// their yes.
 //
 // Left behind, never sent: dot files and dot folders (`.env`, `.git`), `node_modules/`, `*.log`, the
 // bridge's own `inputs/`, `media/` and `captures/` (a proposal carries code only, security review F3), and
@@ -37,8 +41,52 @@ export const PROPOSE_UNKNOWN = "No running Collie on this machine takes trick pr
 /** What it prints when a bridge that knows proposals answered, and none of them drives this pane. */
 export const PROPOSE_NOT_HERE = "No Collie bridge on this machine knows this pane.";
 
+/**
+ * Where the person finds a proposal's card (M96 spec 14): it needs no Hill, so the words never tell anyone
+ * to switch the Hill on. The words of a bridge that does not say where the card is (before package I).
+ */
+export const PROPOSE_WHERE = "on the Hill, or in Settings, Tricks, while the Hill is off";
+
+/**
+ * Where the card really is (package I, 2026-11-17), from the bridge's `where`: in the proposer's session on
+ * the phone while the card is tied to it, on the Hill only while the Hill is on, and always in Settings,
+ * Tricks. No `where` (an older bridge): {@link PROPOSE_WHERE}.
+ */
+export function proposeWhere(where: JsonValue | undefined): string {
+  const row = asJsonObject(where);
+  const session = asJsonBoolean(row?.session);
+  const hill = asJsonBoolean(row?.hill);
+  if (session === undefined || hill === undefined) return PROPOSE_WHERE;
+  if (session && hill) return "in this session on the phone, on the Hill, and in Settings, Tricks";
+  if (session) return "in this session on the phone, and in Settings, Tricks";
+  if (hill) return "on the Hill, and in Settings, Tricks";
+  return "in Settings, Tricks, on the phone";
+}
+
 /** What the CLI says when the folder's config.toml stayed behind. */
 export const PROPOSE_CONFIG_LEFT = "config.toml stays behind: your person sets the trick up on the machine.";
+/** The warning for a trick that, run without its config.toml, drew nothing, failed or printed a part Collie refuses (decision 7). */
+export const PROPOSE_NEEDS_CONFIG =
+  "warning: run without config.toml, the trick drew nothing, failed or printed a part Collie refuses. It is proposed all the same, and the card tells your person it may show nothing until they add config.toml on the machine. Make the trick draw a short message when a setting is missing.";
+
+/**
+ * Run the files that go once, without the config.toml that stays behind, as the bridge would run them
+ * after the yes: true when the run draws no part, fails, or prints a part Collie refuses (the first full
+ * trick run, 2026-11-16, decision 7). Runs in a scratch folder of its own, removed after.
+ */
+async function needsItsConfig(manifest: TrickManifest, files: readonly ProposedFile[], env: ProposeDeps["ctx"]["env"]): Promise<boolean> {
+  const dir = await mkdtemp(join(tmpdir(), `collie-propose-${manifest.id}-`));
+  try {
+    for (const file of files) {
+      await mkdir(dirname(join(dir, file.rel)), { recursive: true });
+      await writeFile(join(dir, file.rel), file.bytes, { mode: file.executable ? 0o755 : 0o644 });
+    }
+    const ran = await runAgainstFixture(manifest, dir, env);
+    return ran.problem !== null || ran.parsed === null || ran.parsed.parts.length === 0 || ran.parsed.refusals.length > 0;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
 
 export type ProposeDeps = HillDeps;
 
@@ -51,7 +99,10 @@ function socketPaths(deps: ProposeDeps): string[] {
 
 type Asked = { ok: true; body: JsonObject } | { ok: false; error: string; code: string | null; exit: number };
 
-/** The exit code of a refusal: the Hill off is a state, a lead away is unreachable, the rest refused. */
+/**
+ * The exit code of a refusal: a state, a lead away is unreachable, the rest refused. `hill_off` comes only
+ * from a lead older than spec 14 (a 1.29.0 Edge build), which still refused a proposal with its Hill off.
+ */
 export function proposeExit(code: string | null): number {
   if (code === "lead_unreachable") return EXIT.UNREACHABLE;
   if (code === null || code === "hill_off" || code === "no_tricks" || code === "not_on_lead") return EXIT.STATE;
@@ -89,6 +140,18 @@ async function ask(deps: ProposeDeps, line: string, requestId: string): Promise<
   if (knows && notHere) return { ok: false, error: PROPOSE_NOT_HERE, code: null, exit: EXIT.STATE };
   return { ok: false, error: PROPOSE_UNKNOWN, code: null, exit: EXIT.UNREACHABLE };
 }
+
+/** The tail of the service's refusal for a trick that is in the tricks folder and not a proposal (bridge/tricks/service.ts `targetOf`). */
+const ADDED_HERE = "was added on this machine. Change it there.";
+/** What the CLI adds to that refusal: the way out for an agent that made its trick in the tricks folder. */
+export const PROPOSE_ADDED_HERE_HINT = "Copy the folder outside the tricks folder and propose the copy, or ask the person to switch it on.";
+
+/** What `trick.propose` carries: the request id, the files, and `settings` when the trick needs the config.toml it leaves behind. */
+type ProposeFields = {
+  requestId: string;
+  files: ReturnType<typeof wireFiles>;
+  settings?: true;
+};
 
 const USAGE = "usage: collie trick propose <folder> [--request-id <uuid>] [--json]";
 
@@ -149,16 +212,21 @@ export async function cmdTrickPropose(deps: ProposeDeps, args: readonly string[]
   const cards = proposalCardCount({ manifest: report.manifest!, files: read.files, warnings: [...new Set(report.warnings.map((w) => w.kind))], crew: leadsCrewOnDisk(deps) });
   if (!cards.ok) return fail(cards.error, cards.code, EXIT.REFUSED);
   const rid = requestId ?? (deps.mintRequestId ?? randomUUID)();
+  // A trick whose config.toml stays behind runs once without it: the person adds the settings only after the yes.
+  const settings = read.config && report.manifest!.run !== undefined && (await needsItsConfig(report.manifest!, read.files, deps.ctx.env));
   // The one reader the bridge and the lead use: what it refuses, they refuse.
-  const fields = { requestId: rid, files: wireFiles(read.files) };
+  const fields: ProposeFields = { requestId: rid, files: wireFiles(read.files) };
+  if (settings) fields.settings = true;
   const checked = readProposal(fields);
   if (!checked.ok) return fail(checked.refusal.error, checked.refusal.code, EXIT.FAIL);
-  if (!json) for (const line of warningLines(report.warnings)) deps.io.err(`warning: ${line}`);
+  if (!json) for (const line of warningLines(report.warnings)) deps.io.err(line);
+  if (!json && settings) deps.io.err(PROPOSE_NEEDS_CONFIG);
   // The op first: the bridge reads a long line only when it opens with it (parse.ts PROPOSE_LINE_PREFIX).
   const line = `${JSON.stringify({ op: "trick.propose", v: 1, markers: readEnvMarkers(deps.ctx.env), ...fields })}\n`;
   const answer = await ask(deps, line, rid);
   if (!answer.ok) {
     const exit = fail(answer.error, answer.code, answer.exit);
+    if (!json && answer.error.endsWith(ADDED_HERE)) deps.io.err(`propose: ${PROPOSE_ADDED_HERE_HINT}`);
     if (!json && answer.code !== "lead_unreachable") deps.io.err(`propose: request id ${rid}`);
     return exit;
   }
@@ -167,14 +235,15 @@ export async function cmdTrickPropose(deps: ProposeDeps, args: readonly string[]
   const id = asJsonString(body.id) ?? checked.proposal.manifest.id;
   const decision = asJsonString(body.decision) ?? null;
   const replaced = asJsonString(body.replaced) ?? null;
+  const place = proposeWhere(body.where);
   if (json) {
-    deps.io.out(JSON.stringify({ ok: true, kind, id, hash: checked.proposal.hash, decision, replaced, requestId: rid, files: read.files.length, left: read.left, warnings: report.warnings.map((w) => w.kind) }));
+    deps.io.out(JSON.stringify({ ok: true, kind, id, hash: checked.proposal.hash, decision, replaced, requestId: rid, files: read.files.length, left: read.left, warnings: report.warnings.map((w) => w.kind), needsConfig: settings, where: place }));
     return EXIT.OK;
   }
   deps.io.out(`Sent ${String(read.files.length)} files. Left behind: ${String(read.left)} (dot files, node_modules, logs, inputs/, media/, captures/, config.toml).`);
   if (read.config) deps.io.out(PROPOSE_CONFIG_LEFT);
-  if (kind === "version") deps.io.out(`Proposed a new version of ${id}. Your person sees it on the Hill as ${decision ?? "a card"}. Nothing of it is written or runs before their yes.`);
-  else deps.io.out(`Proposed ${id}. Your person sees it on the Hill as ${decision ?? "a card"}. Nothing runs before their yes.`);
+  if (kind === "version") deps.io.out(`Proposed a new version of ${id}. Your person sees it as ${decision ?? "a card"} ${place}. Nothing of it is written or runs before their yes.`);
+  else deps.io.out(`Proposed ${id}. Your person sees it as ${decision ?? "a card"} ${place}. Nothing runs before their yes.`);
   if (replaced !== null) deps.io.out(`It replaces your earlier proposal ${replaced}.`);
   if (decision !== null) deps.io.out(`Read the answer with: collie hill status ${decision}`);
   return EXIT.OK;

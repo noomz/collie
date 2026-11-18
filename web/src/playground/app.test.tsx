@@ -50,7 +50,7 @@ const SECTION_BUDGET = 20_000;
 /** The handles every section case collected, by section. */
 const handlesBySection = new Map<string, string[]>();
 
-describe("the states playground", () => {
+describe("the design reference", () => {
   // Each section's module (and what it imports) is loaded and transformed once, up front, so a case times
   // its section's render and not the cold import that the first section to use a module would pay.
   beforeAll(async () => {
@@ -157,6 +157,27 @@ describe("the held-send cards", () => {
       expect(held("held-mixed")?.getAttribute("data-mode")).toBe("collapsed");
       const stacked = card("held-with-draft-notice").querySelector('[data-slot="floating-cards"]')!;
       expect(Array.from(stacked.children).map((child) => child.getAttribute("data-slot"))).toEqual(["held-card", "terminal-draft-notice"]);
+    },
+    30_000,
+  );
+});
+
+describe("composer states: the cannot-tell cards (M102 spec 04)", () => {
+  it(
+    "cannot tell: draws the real card for a short message, a sign-in code, a read-only device and the wait, and the queued card with Send again",
+    async () => {
+      const { container } = render(<PlaygroundApp tab="composer-states" />);
+      const card = (state: string) => container.querySelector<HTMLElement>(`[data-state="${state}"]`)!;
+      await waitFor(() => expect(card("cannot-tell-queued")).not.toBeNull(), SLOW);
+      const words = (state: string) => Array.from(card(state).querySelectorAll("button")).map((button) => button.textContent);
+      expect(words("cannot-tell-short")).toEqual(["It arrived", "Send again"]);
+      expect(words("cannot-tell-secret")).toEqual(["It arrived", "Enter it again"]);
+      expect(words("cannot-tell-read-only")).toEqual([]);
+      // The wait: the sentence changes and Send again is off, with It arrived live.
+      expect(card("cannot-tell-waiting").textContent).toContain("Collie is waiting for the agent's own word");
+      expect(within(card("cannot-tell-waiting")).getByRole("button", { name: "Send again" })).toHaveAttribute("aria-disabled", "true");
+      // The queued card's unconfirmed state: Discard, then Send again on its right.
+      expect(words("cannot-tell-queued")).toEqual(["Discard", "Send again"]);
     },
     30_000,
   );
@@ -288,7 +309,7 @@ describe("the playground's pages", () => {
       // SAFETY: every file under sections/ that the registry names exports `DEF: SectionDef`; a file
       // without one fails the toEqual below on `undefined`, which is the failure this test wants.
       const mod = (await import(`./sections/${entry.def.id}.tsx`)) as { DEF: SectionDef };
-      expect({ id: mod.DEF.id, title: mod.DEF.title }).toEqual(entry.def);
+      expect({ id: mod.DEF.id, title: mod.DEF.title }).toEqual({ id: entry.def.id, title: entry.def.title });
     }
   });
 

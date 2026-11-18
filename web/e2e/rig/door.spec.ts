@@ -23,7 +23,7 @@ import { join } from "node:path";
 import { asJsonObject, asJsonString, parseJson, type JsonValue } from "../../src/lib/json";
 import { harnessDirs } from "./harnesses";
 import { NotReached, Rig, capture, captureScreen, phoneOn, runScenario, sendFromComposer, spendTurn, startHarness, tapWords, test, waitIdle, type Session } from "./leg";
-import { muxOf, sleep } from "./rig-lib";
+import { muxOf, paneClose, sleep } from "./rig-lib";
 import { PHONE, REPLY_MS, cliAgentPrompt } from "./walky-lib";
 
 const H = "pi" as const;
@@ -85,7 +85,13 @@ test.describe("pi's inbox", () => {
     }
   });
 
-  test("36 a desk draft, then a phone send through pi's inbox: taken, the draft stays, one turn", async ({ browser, rig }) => {
+  test.afterAll(() => {
+    if (session.paneId !== null && !paneClose(session.paneId)) {
+      throw new Error(`Could not close the inbox test pane ${session.paneId}`);
+    }
+  });
+
+  test("37 a desk draft, then a phone send through pi's inbox: taken, the draft stays, one turn", async ({ browser, rig }) => {
     await runScenario(H, "door-draft", session, async (pane, trail) => {
       const core = muxOf("lead") === "herdr-core";
       const { context, page, recorder } = await phoneOn(browser, rig, pane, PHONE);
@@ -139,8 +145,6 @@ test.describe("pi's inbox", () => {
         return { verdict: pass ? "pass" : "fail", taps: trail.log.length, minTaps: 1, note: notes.join("; "), taps_log: trail.log, captures: trail.captures };
       } finally {
         await context.close();
-        // Leave the box empty, as the next case on any pane expects of a pane it might share.
-        await rig.keys(pane, ["ctrl+u"]).catch(() => undefined);
       }
     });
   });

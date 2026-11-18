@@ -54,6 +54,14 @@ test("the report card floats over the mirror and moves neither the field nor the
     await expect(send).toBeEnabled();
     await send.click();
     await expect.poll(() => posts).toBe(n);
+    await expect(send).toBeEnabled();
+    await expect(page.locator('[data-slot="composer-refusal"]')).toBeVisible();
+    await page.locator('[data-slot="composer-box"]').first().evaluate(async (box) => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      await Promise.all(box.getAnimations({ subtree: true })
+        .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+        .map((animation) => animation.finished));
+    });
   };
   await sendOnce(1);
   await sendOnce(2);

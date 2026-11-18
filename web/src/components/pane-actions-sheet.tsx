@@ -4,7 +4,8 @@ import { Icon } from "@/components/icons/icon";
 import { BottomSheet } from "@/components/ui/sheet";
 import { WalkyIcon, WalkyOffIcon } from "@/components/walky-icon";
 import { ActionRow, DestructiveActionRow, RenameView } from "@/components/action-sheet-rows";
-import { SwitchRow } from "@/components/ui/switch-row";
+import { TrickMenuGroups } from "@/components/trick-menu-group";
+import type { TricksStore } from "@/lib/tricks/store";
 import { HostChip } from "@/components/host-chip";
 import { useHostWriteBlock, useCrew } from "@/components/crew-provider";
 import { useActionEcho } from "@/hooks/use-action-echo";
@@ -172,6 +173,8 @@ interface PaneActionsSheetProps {
     onShow: () => void;
     onSwitch?: (trick: string, on: boolean) => Promise<string | null>;
   };
+  /** The tricks store the trick groups read, for a test or the playground. Absent: the app's own. */
+  tricksStore?: TricksStore;
 }
 
 const NO_HERD: readonly AgentView[] = [];
@@ -226,6 +229,7 @@ export function PaneActionsSheet({
   onBranchOff,
   conversation = false,
   agentViews,
+  tricksStore: trickStore,
 }: PaneActionsSheetProps) {
   useLocale();
   // Whether this pane is pinned on this device, read live from the store so the row's word is right
@@ -523,19 +527,9 @@ export function PaneActionsSheet({
               }}
             />
           )}
-          {/* One switch per trick that offers a view: a write, so drawn only where the caller may write.
-              The sheet stays open, as a switch answers in place. */}
-          {agentViews?.onSwitch !== undefined &&
-            agentViews.rows.map((row) => (
-              <SwitchRow
-                key={row.trick}
-                icon={<Icon name="view-preview" className={ROW_ICON} />}
-                label={row.label}
-                hint={t("view.switch.hint")}
-                checked={row.on}
-                onChange={(next) => agentViews.onSwitch?.(row.trick, next) ?? Promise.resolve(null)}
-              />
-            ))}
+          {/* The switch of each trick that offers a view is in that trick's group, after Close
+              (TrickMenuGroups below): it is labelled with the trick's name, so it does not sit among
+              Collie's own rows. */}
           {/* Pane settings sits between the looking rows and zen: it is the one row here that opens a
               control rather than a view, and it is still the cheap, reversible half of this sheet — a
               preference on this collie, typed into no terminal. Close-then-act, for the reason the find
@@ -678,6 +672,19 @@ export function PaneActionsSheet({
           // A blank pane field clears the label (blank → null on the bridge), so Save stays enabled.
           canSave={true}
           placeholder={t("paneActions.rename.placeholder")}
+        />
+      )}
+      {/* THE TRICKS' GROUPS (the menu place, contract 2), after Collie's rows and Close, one per trick in
+          a frame of its own under "From the trick <name>": a trick's rows, and its agent view switch. The
+          rows freeze when the sheet opens. Agent sessions only; trick rows only where this device may
+          write. */}
+      {mode === "actions" && (
+        <TrickMenuGroups
+          open={open}
+          pane={pane}
+          canWrite={!readOnly && !savedCopy}
+          {...(trickStore === undefined ? {} : { store: trickStore })}
+          {...(agentViews === undefined ? {} : { views: agentViews.onSwitch === undefined ? { rows: agentViews.rows } : { rows: agentViews.rows, onSwitch: agentViews.onSwitch } })}
         />
       )}
     </BottomSheet>

@@ -13,7 +13,7 @@ export type SurfaceReason = "no-match" | "contested" | "stale" | "torn";
  * screen reads as (a cue rule, a fold rule, a lift rule). A profile change is not a reader change: the
  * profile's own version range says which binary it covers.
  */
-export const SURFACE_VERSION = 3;
+export const SURFACE_VERSION = 4;
 
 export type AskKind = "permission" | "question" | "menu";
 /**
@@ -61,6 +61,12 @@ export interface Surface {
    * on the reads that show the same box rows as the proven one, and gone at the first read that differs.
    */
   readonly staleFrame?: true;
+  /**
+   * The input box is a sign-in field (`idle.frame.secret`): the agent asks for the code or the redirect
+   * address a login page shows, or for a key. The phone keeps no draft of what is typed there and
+   * names the field; the send is still checked on screen. Absent on every other box.
+   */
+  readonly field?: "secret";
 }
 
 /**

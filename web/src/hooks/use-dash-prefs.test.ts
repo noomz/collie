@@ -47,6 +47,8 @@ describe("coerceDashPrefs", () => {
       paneOrder: "place",
       paneView: "chat",
       zoomPill: null,
+      pageZoom: true,
+      usageRow: "percent",
     });
   });
 
@@ -92,7 +94,22 @@ describe("coerceDashPrefs", () => {
       paneOrder: "activity",
       paneView: "terminal",
       zoomPill: "off",
+      pageZoom: true,
+      usageRow: "percent",
     });
+  });
+
+  it("reads pageZoom as on unless a boolean false is stored", () => {
+    expect(coerceDashPrefs({}).pageZoom).toBe(true);
+    expect(coerceDashPrefs({ pageZoom: "no" }).pageZoom).toBe(true);
+    expect(coerceDashPrefs({ pageZoom: false }).pageZoom).toBe(false);
+  });
+
+  it("reads the usage row as Percent unless Dots is stored, so an install with no value gets Percent", () => {
+    expect(coerceDashPrefs({}).usageRow).toBe("percent");
+    expect(coerceDashPrefs({ usageRow: "bars" }).usageRow).toBe("percent");
+    expect(coerceDashPrefs({ usageRow: 3 }).usageRow).toBe("percent");
+    expect(coerceDashPrefs({ usageRow: "dots" }).usageRow).toBe("dots");
   });
 
   it("reads an unknown stored zoomPill as never chosen", () => {
@@ -215,6 +232,8 @@ describe("coerceDashPrefs", () => {
       paneOrder: "place",
       paneView: "chat",
       zoomPill: null,
+      pageZoom: true,
+      usageRow: "percent",
     });
   });
 });
@@ -244,6 +263,8 @@ describe("useDashPrefs", () => {
       paneOrder: "place",
       paneView: "chat",
       zoomPill: null,
+      pageZoom: true,
+      usageRow: "percent",
     });
   });
 
@@ -269,6 +290,7 @@ describe("useDashPrefs", () => {
     act(() => first.result.current.setPaneOrder("activity"));
     act(() => first.result.current.setPaneView("terminal"));
     act(() => first.result.current.setZoomPill("off"));
+    act(() => first.result.current.setUsageRow("dots"));
 
     const second = renderHook(() => useDashPrefs());
     expect(second.result.current.prefs).toEqual({
@@ -291,6 +313,8 @@ describe("useDashPrefs", () => {
       paneOrder: "activity",
       paneView: "terminal",
       zoomPill: "off",
+      pageZoom: true,
+      usageRow: "dots",
     });
   });
 

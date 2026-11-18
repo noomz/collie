@@ -12,9 +12,9 @@ import { HillService, type HillPlace } from "../hill/service.ts";
 import { hillDir, HillStore } from "../hill/store.ts";
 import { hillAnswerRoute, hillListRoute, hillMediaRoute } from "../server.ts";
 import type { HillDecision, HillReceipt } from "../../web/src/lib/hill/wire.ts";
-import { parseJsonObject } from "../../web/src/lib/json.ts";
-import { parseFacts, parseTrickDocument, type Refusal, type TrickDecision, type TrickFacts, type TrickTapReply } from "../../web/src/lib/tricks/schema.ts";
-import { decisionContentHash, imageFileDigest, REASK_AFTER_MS, scopeKeyAddress, TrickHill, TRICKS_MAP_FILE, trickRequestId, type TrickHillTrick } from "./hill.ts";
+import { asJsonNumber, asJsonObject, parseJsonObject } from "../../web/src/lib/json.ts";
+import { DECIDES_REPLY_LINE, parseFacts, parseTrickDocument, type Refusal, type TrickDecision, type TrickFacts, type TrickTapReply } from "../../web/src/lib/tricks/schema.ts";
+import { decisionContentHash, forgetMapRecord, imageFileDigest, REASK_AFTER_MS, scopeKeyAddress, TrickHill, TRICKS_MAP_FILE, trickRequestId, type TrickHillTrick } from "./hill.ts";
 import { powersOfDir } from "./approved.ts";
 import { trickCodeHash } from "./code-hash.ts";
 import { TRICKS_DIR } from "./paths.ts";
@@ -290,6 +290,92 @@ describe("the diff by key", () => {
     expect(again?.id).not.toBe(first.id);
   });
 
+  // M96 spec 10: the hill clears a trick's card that closed without the person 60 s after it closed
+  // (HillService.selfClear). The runner reads the tombstone's state, so the self-clear moves none of its rules.
+  test("self-cleared after an expiry or an undeliverable close, an unchanged key asks again by the 10 minute rule, once, with a new request id", () => {
+    for (const closed of ["undeliverable", "expired"] as const) {
+      const r = rig();
+      sync(r, [decision("case-8")]);
+      const first = open(r)[0]!;
+      r.store.put({ ...first, state: closed, closedAt: 1100, closedReason: closed });
+      // No run saw it close: the map still says open when the 60 s self-clear takes the row.
+      expect(r.tricks.entries("legs")["case-8"]).toMatchObject({ state: "open" });
+      r.hill.sweep(1100 + 60_000);
+      expect(r.store.get(first.id)).toBeUndefined();
+      expect(r.hill.clearedState(first.id)).toBe(closed);
+      // Not at once on the next sync: the tombstone's state is read, and the 10 minutes count from the post.
+      sync(r, [decision("case-8")]);
+      expect(r.store.all()).toEqual([]);
+      expect(r.tricks.entries("legs")["case-8"]).toMatchObject({ decisionId: first.id, state: closed, seq: 1 });
+      r.clock.t += REASK_AFTER_MS - 1;
+      expect(sync(r, [decision("case-8")])).toEqual([]);
+      expect(r.store.all()).toEqual([]);
+      // Not never: at 10 minutes it asks again, under the next count, so the tombstone is not met.
+      r.clock.t += 1;
+      expect(sync(r, [decision("case-8")])).toEqual([]);
+      const [again] = open(r);
+      expect(again?.id).not.toBe(first.id);
+      expect(again?.requestId).not.toBe(first.requestId);
+      expect(again?.supersedes).toBeNull();
+      expect(r.tricks.entries("legs")["case-8"]).toMatchObject({ decisionId: again?.id, state: "open", seq: 2 });
+      // Once: the next run posts nothing more.
+      sync(r, [decision("case-8")]);
+      expect(open(r)).toHaveLength(1);
+    }
+  });
+
+  test("a key the trick withdrew does not come back when its closed row is self-cleared", () => {
+    const r = rig();
+    sync(r, [decision("case-8"), decision("case-9")]);
+    const nine = open(r).find((held) => held.from.trickKey === "case-9")!;
+    sync(r, [decision("case-8")]);
+    expect(r.store.get(nine.id)?.state).toBe("withdrawn");
+    r.hill.sweep(1000 + 60_000);
+    expect(r.store.get(nine.id)).toBeUndefined();
+    for (let run = 0; run < 3; run += 1) {
+      r.clock.t += REASK_AFTER_MS;
+      sync(r, [decision("case-8")]);
+    }
+    expect(r.store.all().map((held) => held.from.trickKey)).toEqual(["case-8"]);
+    expect(r.tricks.entries("legs")).not.toHaveProperty("case-9");
+  });
+
+  test("a superseded version does not come back when its closed row is self-cleared", () => {
+    const r = rig();
+    sync(r, [decision("case-8")]);
+    const first = open(r)[0]!;
+    sync(r, [decision("case-8", { summary: "Red again." })]);
+    const second = open(r)[0]!;
+    expect(r.store.get(first.id)?.state).toBe("superseded");
+    r.hill.sweep(1000 + 60_000);
+    expect(r.store.get(first.id)).toBeUndefined();
+    for (let run = 0; run < 3; run += 1) {
+      r.clock.t += REASK_AFTER_MS;
+      sync(r, [decision("case-8", { summary: "Red again." })]);
+    }
+    expect(r.store.all().map((held) => held.id)).toEqual([second.id]);
+    expect(r.tricks.entries("legs")["case-8"]).toMatchObject({ decisionId: second.id, state: "open", seq: 2 });
+  });
+
+  test("the runner does not warn or write again for a key whose decision the hill self-cleared", () => {
+    const r = rig();
+    const warned: string[] = [];
+    const tricks = new TrickHill({ stateDir: r.stateDir, hill: r.hill, addressOf: (scopeKey, listed) => scopeKeyAddress(scopeKey, (memberId) => memberId === HOST, "local", place(() => r.live), listed), now: () => r.clock.t, warn: (line) => warned.push(line) });
+    tricks.sync(r.trick, { decisions: [decision("case-8")], refusedKeys: [] });
+    const first = open(r)[0]!;
+    r.store.put({ ...first, state: "undeliverable", closedAt: 1100, closedReason: "undeliverable" });
+    r.hill.sweep(1100 + 60_000);
+    tricks.sync(r.trick, { decisions: [decision("case-8")], refusedKeys: [] });
+    const path = join(r.stateDir, "hill", TRICKS_MAP_FILE);
+    const saved = readFileSync(path, "utf8");
+    const mtime = statSync(path).mtimeMs;
+    for (let run = 0; run < 5; run += 1) expect(tricks.sync(r.trick, { decisions: [decision("case-8")], refusedKeys: [] })).toEqual([]);
+    expect(readFileSync(path, "utf8")).toBe(saved);
+    expect(statSync(path).mtimeMs).toBe(mtime);
+    expect(warned).toEqual([]);
+    expect(r.store.all()).toEqual([]);
+  });
+
   test("a key that closed without the person asks again on a later run, at most once per 10 minutes", () => {
     for (const closed of ["undeliverable", "expired", "withdrawn"] as const) {
       const r = rig();
@@ -356,6 +442,32 @@ describe("the diff by key", () => {
     expect(open(r)).toHaveLength(1);
     expect(open(r)[0]?.summary).toBe(a.summary);
     expect(r.store.all()).toHaveLength(3);
+  });
+});
+
+describe("decides = reply, enforced (2026-11-12)", () => {
+  const withReply = { v: 1, parts: [], decisions: [{ key: "case-8", title: "Leg red: case 8. Rerun it?", summary: "Case 8 failed.", options: [{ intent: "rerun", label: "Rerun" }], replyTo: "lodge:w6X:3" }] };
+
+  test("an open post of a key whose replyTo is now refused is withdrawn, so no answer to it reaches a session", () => {
+    const r = rig();
+    // Posted by a build before the check, while nothing was declared.
+    const before = parseTrickDocument(withReply);
+    expect(sync(r, before.decisions, before.refusedDecisions)).toEqual([]);
+    expect(open(r).map((held) => held.replyTo)).toEqual(["local/w6X:3#aaaa"]);
+    // This build reads the same document for a trick that does not declare it.
+    const now = parseTrickDocument(withReply, { decidesReply: false });
+    expect(now.refusals.map((refusal) => [refusal.code, refusal.reason])).toEqual([["undeclared", DECIDES_REPLY_LINE]]);
+    expect(now.refusedDecisions).toEqual([]);
+    expect(sync(r, now.decisions, now.refusedDecisions)).toEqual([]);
+    expect(open(r)).toEqual([]);
+  });
+
+  test("declared, the same document posts as before", () => {
+    const r = rig();
+    const parsed = parseTrickDocument(withReply, { decidesReply: true });
+    expect(parsed.refusals).toEqual([]);
+    expect(sync(r, parsed.decisions, parsed.refusedDecisions)).toEqual([]);
+    expect(open(r).map((held) => held.replyTo)).toEqual(["local/w6X:3#aaaa"]);
   });
 });
 
@@ -596,6 +708,13 @@ describe("images", () => {
   });
 });
 
+/** One trick's saved record in the map file: its generation and its keys, or undefined. */
+function recordOf(stateDir: string, id: string): { gen: number | undefined; keys: JsonObject | undefined } | undefined {
+  const tricks = asJsonObject(parseJsonObject(readFileSync(join(stateDir, "hill", TRICKS_MAP_FILE), "utf8"))?.tricks);
+  const row = asJsonObject(tricks?.[id]);
+  return row === undefined ? undefined : { gen: asJsonNumber(row.gen), keys: asJsonObject(row.keys) };
+}
+
 describe("switched off", () => {
   test("every open decision is withdrawn at once, the trick is off; answered ones stay; back on, the open ones post again", async () => {
     const r = rig();
@@ -609,6 +728,62 @@ describe("switched off", () => {
     sync(r, [decision("a"), decision("b")]);
     expect(open(r).map((held) => held.from.trickKey)).toEqual(["b"]);
     expect(open(r)[0]?.id).not.toBe(b.id);
+  });
+
+  test("forget (review J, last read): open decisions are withdrawn and the map drops every key of the id, answered ones too", async () => {
+    const r = rig();
+    sync(r, [decision("a"), decision("b")]);
+    const a = open(r).find((held) => held.from.trickKey === "a")!;
+    await answer(r, a, 100, "skip");
+    const b = open(r)[0]!;
+    r.tricks.forget(LEGS);
+    expect(r.store.get(b.id)).toMatchObject({ state: "withdrawn", closedReason: "the trick is off" });
+    expect(r.tricks.entries(LEGS.id)).toEqual({});
+    // The keys are gone and the generation only went up, so a request id of the old trick is never reused.
+    const saved = recordOf(r.stateDir, LEGS.id);
+    expect(saved?.keys).toEqual({});
+    expect(saved?.gen).toBeGreaterThan(0);
+    // The same content from a new trick of this id posts as new: nothing answered is remembered.
+    sync(r, [decision("a"), decision("b")]);
+    expect(open(r).map((held) => held.from.trickKey).toSorted()).toEqual(["a", "b"]);
+  });
+
+  test("forget (read of 1bf6c747a, point 2): a key whose withdraw failed stays open in the map; a later forget retries it", async () => {
+    const r = rig();
+    sync(r, [decision("a"), decision("b")]);
+    const a = open(r).find((held) => held.from.trickKey === "a")!;
+    await answer(r, a, 101, "skip");
+    const b = open(r)[0]!;
+    const real = r.hill.withdraw.bind(r.hill);
+    let failing = true;
+    r.hill.withdraw = (sender, id, reason) => (failing ? { ok: false, missing: false, error: "the change could not be saved on this machine; the decision stays open" } : real(sender, id, reason));
+    r.tricks.forget(LEGS);
+    expect(r.store.get(b.id)?.state).toBe("open");
+    expect(Object.keys(r.tricks.entries(LEGS.id))).toEqual(["b"]);
+    expect(r.tricks.seenOf(LEGS.id, b.id)).toBeDefined();
+    expect(r.tricks.seenOf(LEGS.id, a.id)).toBeUndefined();
+    expect(Object.keys(recordOf(r.stateDir, LEGS.id)?.keys ?? {})).toEqual(["b"]);
+    const gen = recordOf(r.stateDir, LEGS.id)?.gen ?? 0;
+    expect(gen).toBeGreaterThan(0);
+    failing = false;
+    r.tricks.forget(LEGS);
+    expect(r.store.get(b.id)).toMatchObject({ state: "withdrawn", closedReason: "the trick is off" });
+    expect(r.tricks.entries(LEGS.id)).toEqual({});
+    expect(recordOf(r.stateDir, LEGS.id)?.gen).toBeGreaterThan(gen);
+  });
+
+  test("forgetMapRecord empties one trick's keys in the file, moves its generation up and keeps the others; no file, no change", () => {
+    const r = rig();
+    forgetMapRecord(r.stateDir, "legs");
+    sync(r, [decision("a")]);
+    const path = join(r.stateDir, "hill", TRICKS_MAP_FILE);
+    const before = recordOf(r.stateDir, LEGS.id);
+    expect(Object.keys(before?.keys ?? {})).toEqual(["a"]);
+    const tricks = asJsonObject(parseJsonObject(readFileSync(path, "utf8"))?.tricks) ?? {};
+    writeFileSync(path, JSON.stringify({ v: 1, tricks: { ...tricks, other: tricks[LEGS.id] } }));
+    forgetMapRecord(r.stateDir, LEGS.id);
+    expect(recordOf(r.stateDir, LEGS.id)).toEqual({ gen: (before?.gen ?? 0) + 1, keys: {} });
+    expect(recordOf(r.stateDir, "other")).toEqual(before);
   });
 
   test("prune: a trick the scan no longer finds is off", () => {
@@ -687,18 +862,22 @@ const exited = (doc: JsonObject): RunOutcome => ({ kind: "exited", code: 0, stdo
 const doc = (decisions: JsonObject[]): JsonObject => ({ v: 1, parts: [{ at: "belt", id: "belt", mark: { label: "10/12", intent: "x" } }], decisions });
 const RED: JsonObject = { key: "case-8", title: "Leg red: case 8. Rerun it?", summary: "Case 8 failed.", options: [{ intent: "rerun", label: "Rerun" }, { intent: "skip", label: "Skip" }] };
 
-async function serviceRig(): Promise<ServiceRig> {
+/** The legs manifest that declares `decides = "reply"`: its Decisions may answer into a session. */
+const LEGS_REPLIES = 'id = "legs"\nname = "Browser leg"\nrun = "./legs.sh"\nplaces = ["belt"]\ndecides = "reply"\n';
+
+async function serviceRig(manifest?: string): Promise<ServiceRig> {
   const root = tempDir();
   const configDir = join(root, "config");
   const stateDir = join(root, "state");
   mkdirSync(stateDir, { recursive: true });
-  makeLegs(configDir);
+  makeLegs(configDir, manifest);
   const base = rig(stateDir);
   const clock = { t: T0 };
   const specs: RunSpec[] = [];
   const state: Scripted = { outcome: exited(doc([RED])) };
   const out = Object.assign(base, state, { configDir, clock, specs });
   const service = new TricksService({
+    feature: { on: () => true },
     configDir,
     stateDir,
     memberId: HOST,
@@ -765,12 +944,41 @@ describe("the runner posts", () => {
   });
 
   test("a refusal from the hill shows in the trick's refusals, the list the Settings row reads", async () => {
-    const r = await serviceRig();
+    const r = await serviceRig(LEGS_REPLIES);
     await switches(r.stateDir, true);
     r.outcome = exited(doc([{ ...RED, replyTo: "lodge:w6X:9" }]));
     await runNow(r);
     const info = (await r.service.reply(undefined)).tricks.find((trick) => trick.id === "legs");
     expect(info?.refusals?.map((refusal) => [refusal.code, refusal.path, refusal.decision])).toEqual([["target", "/decisions/0/replyTo", "case-8"]]);
+  });
+
+  test("decides = reply declared: a Decision with replyTo posts, and the answer is typed into that session", async () => {
+    const r = await serviceRig(LEGS_REPLIES);
+    await switches(r.stateDir, true);
+    r.outcome = exited(doc([{ ...RED, replyTo: "lodge:w6X:3" }]));
+    await runNow(r);
+    const info = (await r.service.reply(undefined)).tricks.find((trick) => trick.id === "legs");
+    expect(info?.refusals).toBeUndefined();
+    expect(info?.decidesReply).toBe(true);
+    const held = open(r)[0]!;
+    expect(held.replyTo).toBe("local/w6X:3#aaaa");
+    expect((await answer(r, held, 1, "rerun")).code).toBe("ok");
+    expect(r.sent.map((m) => m.to)).toEqual(["local/w6X:3#aaaa"]);
+  });
+
+  test("not declared: a Decision with replyTo is refused with the plain line, nothing posts and nothing is typed; one without replyTo posts", async () => {
+    const r = await serviceRig();
+    await switches(r.stateDir, true);
+    r.outcome = exited(doc([{ ...RED, replyTo: "lodge:w6X:3" }, { ...RED, key: "case-9" }]));
+    await runNow(r);
+    const info = (await r.service.reply(undefined)).tricks.find((trick) => trick.id === "legs");
+    expect(info?.refusals?.map((refusal) => [refusal.code, refusal.path, refusal.decision, refusal.reason])).toEqual([["undeclared", "/decisions/0/replyTo", "case-8", DECIDES_REPLY_LINE]]);
+    expect(info?.decidesReply).toBeUndefined();
+    // The trick still runs: the refusal is a line on its row, not a failure.
+    expect(info?.state).toBe("ok");
+    expect(open(r).map((held) => [held.from.trickKey, held.replyTo])).toEqual([["case-9", null]]);
+    expect((await answer(r, open(r)[0]!, 1, "rerun")).code).toBe("ok");
+    expect(r.sent).toEqual([]);
   });
 
   test("decides: the trick's entry says its last good document lists Decisions, so the row can say they are not shown", async () => {
@@ -809,6 +1017,19 @@ describe("the runner posts", () => {
     rmSync(join(r.configDir, TRICKS_DIR, "legs"), { recursive: true });
     await r.service.refresh(true);
     expect(open(r)).toEqual([]);
+  });
+
+  test("point 2 (read of 1bf6c747a): an answer for a card the trick's map does not hold is refused, and nothing runs", async () => {
+    const r = await serviceRig();
+    await switches(r.stateDir, true);
+    await runNow(r);
+    const held = open(r)[0]!;
+    // The old trick's card, still open on the Hill, but the new trick's map forgot it.
+    r.tricks.forget(LEGS);
+    const runs = r.specs.length;
+    expect(await r.service.tapFromHill(HOST, "legs", { rid: uuid(11), node: "hill/case-8", intent: "skip", value: { text: "flaky" } }, held.id)).toBe(false);
+    expect(await r.service.tapFromHill(HOST, "legs", { rid: uuid(12), node: "hill/case-8", intent: "skip", value: { text: null } }, "dc_nonexistent1")).toBe(false);
+    expect(r.specs.length).toBe(runs);
   });
 
   test("the hill's tap reaches the program with the answer's rid and seen; the phone's own tap on hill/ is refused", async () => {
@@ -851,6 +1072,7 @@ describe.skipIf(process.platform === "win32")("end to end with the legs trick", 
     const base = rig(stateDir, T0);
     const clock = { t: T0 };
     const service = new TricksService({
+      feature: { on: () => true },
       configDir,
       stateDir,
       memberId: HOST,

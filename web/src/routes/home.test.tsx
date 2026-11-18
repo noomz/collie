@@ -148,22 +148,22 @@ describe("the dashboard across machines", () => {
     // Three buttons now, not two — "All sessions" leads the list. It is not a session and does not
     // pretend to be one: it answers "do I have to choose at all", which is why it stands above the
     // rows rather than among them.
-    const sessionTrigger = screen.getByRole("button", { name: /switch session/i });
+    const sessionTrigger = screen.getByRole("button", { name: /switch space/i });
     await userEvent.click(sessionTrigger);
     const sheet = screen.getByRole("list");
     const rows = within(sheet).getAllByRole("button");
     expect(rows).toHaveLength(3);
-    expect(rows[0]).toHaveTextContent("All sessions");
+    expect(rows[0]).toHaveTextContent("All spaces");
   });
 
   it("labels each row with its machine — a label, never a split", async () => {
     renderHome(packed());
     await settled();
-    expect(screen.getAllByLabelText("Host: bluefin").length).toBeGreaterThan(0);
+    expect(screen.getAllByLabelText("Host: lodge").length).toBeGreaterThan(0);
     expect(screen.getAllByLabelText("Host: workshop").length).toBeGreaterThan(0);
     // No per-host heading anywhere: hosts do not carve the list up.
     const headings = screen.getAllByRole("heading").map((h) => h.textContent ?? "");
-    expect(headings.some((h) => /workshop|bluefin/i.test(h))).toBe(false);
+    expect(headings.some((h) => /workshop|lodge/i.test(h))).toBe(false);
   });
 
   it("opens a PEER's row addressed to the peer, not to the machine the URL points at", async () => {
@@ -337,9 +337,9 @@ describe("the dashboard across sessions", () => {
   it("marks the row that is NOT in the primary session, and only that one", async () => {
     renderHome(widened(), "/?all=1");
     await settled();
-    expect(screen.getByLabelText("In session: work")).toBeInTheDocument();
+    expect(screen.getByLabelText("In space: work")).toBeInTheDocument();
     // The primary needs no mark: an absent `?s=` already means it.
-    expect(screen.queryByLabelText("In session: default")).toBeNull();
+    expect(screen.queryByLabelText("In space: default")).toBeNull();
   });
 
   it("opens each row in its OWN session", async () => {
@@ -811,7 +811,7 @@ describe("the dashboard's footer (ADR 0066, ADR 0085)", () => {
     expect(rowsOf(section)[0]).toHaveTextContent("worktree-agent");
     // Clicking "+" on the root heading opens a tab in the root workspace (`w1`), not the worktree (`w2`).
     await userEvent.click(screen.getByRole("button", { name: "New tab in membero" }));
-    await waitFor(() => expect(createdTabBody).toBe(JSON.stringify({ workspaceId: "w1" })));
+    await waitFor(() => expect(JSON.parse(createdTabBody)).toEqual({ workspaceId: "w1", requestId: expect.any(String) }));
     // Spaces below also shows both membero and lucky-meadow-d1ec, not lucky-meadow-d1ec alone.
     expect(screen.getByRole("button", { name: /membero.*0 panes/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /lucky-meadow-d1ec.*1 pane/i })).toBeInTheDocument();
@@ -1079,7 +1079,8 @@ describe("the dashboard heading's '+' and the New tab sheet", () => {
     const sheet = within(await screen.findByRole("dialog", { name: "New tab in webapp" }));
     await userEvent.click(sheet.getByRole("button", { name: "Just a shell" }));
     await waitFor(() => expect(url(router)).toBe("/pane/w1%3Ap8"));
-    expect(sent.tab).toEqual([JSON.stringify({ workspaceId: first.workspaceId })]);
+    // The same create as always, now with the request id every create carries (M100 spec 04).
+    expect(sent.tab.map((body) => JSON.parse(body))).toEqual([{ workspaceId: first.workspaceId, requestId: expect.any(String) }]);
     expect(sent.launch).toEqual([]);
   });
 

@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 
 import { ViewEarlier, ViewPendingBlock, ViewReceiptCard, ViewSentLine } from "@/components/agent-view-blocks";
 import { ViewChoiceBlock, ViewChoiceDone } from "@/components/agent-view-choice";
@@ -9,10 +9,12 @@ import type { ViewSendResult, ViewTap } from "@/components/composer";
 import { HillImageStrip, viewPictures, type HillMediaSource } from "@/components/hill-media";
 import { MarkdownText } from "@/components/markdown-text";
 import { StatusDot } from "@/components/status-badge";
+import { TailRoomContext, tailRoomStyle } from "@/components/ui/chat/chat-message-list";
 import { KeyedFlow, type FlowItem } from "@/components/ui/keyed-flow";
 import { OneOf } from "@/components/ui/one-of";
 import { PresenceList } from "@/components/ui/presence";
 import { useLocale } from "@/hooks/use-locale";
+import { SETTLE_MS, useSettled } from "@/hooks/use-settled";
 import {
   blockControl,
   choiceControl,
@@ -127,28 +129,21 @@ export interface AgentViewScreenProps {
   now?: number;
   /** The settle window in ms, for a test. Absent: {@link VIEW_SETTLE_MS}. */
   settleMs?: number;
+  /**
+   * What stands last in this view's own scroll, after the screen: a trick this session proposed
+   * (components/session-trick-card.tsx), so the card is answered here too and never needs a trip to Settings.
+   */
+  tail?: ReactNode;
 }
 
 /**
- * How long a control must stand still before a tap on it counts, in ms (review 10 W3). The rev a tap
- * names is current, so the bridge would send it: the phone alone knows that the button under the finger
+ * How long a control must stand still before a tap on it counts, in ms (review 10 W3): the shared settle
+ * window (hooks/use-settled.ts), the same for a trick's rows in a session's settings. The rev a tap names
+ * is current, so the bridge would send it: the phone alone knows that the button under the finger
  * mounted, faded in (`ui/keyed-flow.tsx` staggers a first screen in, 350 ms at most) or moved a moment
  * ago, so the person may have aimed at another one.
  */
-export const VIEW_SETTLE_MS = 500;
-
-/**
- * Whether the screen has stood still for `settleMs`: `layout` names everything that places a control (the
- * screen's rev, the request block and its lines, the text answer), and any change to it starts the window
- * again. The answer is read at the tap, from the clock, so no timer runs.
- */
-function useSettled(layout: string, settleMs: number): () => boolean {
-  const since = useRef<number | null>(null);
-  useLayoutEffect(() => {
-    since.current = Date.now();
-  }, [layout]);
-  return useCallback(() => since.current !== null && Date.now() - since.current >= settleMs, [settleMs]);
-}
+export const VIEW_SETTLE_MS = SETTLE_MS;
 
 /** Where a view's picture bytes are: the set id stands where the hill's source takes a decision id. */
 export const viewMediaSource: HillMediaSource = (set, media) => viewMediaPath(set, media.id);
@@ -411,6 +406,7 @@ export function AgentViewScreen({
   onLink,
   now,
   settleMs = VIEW_SETTLE_MS,
+  tail,
 }: AgentViewScreenProps) {
   useLocale();
   const clock = useBridgeNow(now);
@@ -533,6 +529,8 @@ export function AgentViewScreen({
   // The title and the picture row belong to the part that holds the answer: on top while anything is
   // fresh, inside the Earlier fold when nothing is.
   const isTopOwner = hasFresh || requestAt === null;
+  // The model tag floats over this scroller's bottom like the others (#759): keep its room clear below the last line.
+  const tailRoom = useContext(TailRoomContext);
   const hasEarlier = split.stale.length > 0 || split.isChoiceStale;
   const strip =
     view?.set !== undefined && stripMedia.length > 0 ? <HillImageStrip decisionId={view.set} media={stripMedia} source={viewMediaSource} className="-mx-4 mt-2" scrollerClassName="px-4" /> : null;
@@ -545,7 +543,8 @@ export function AgentViewScreen({
   return (
     <div data-slot="agent-view" data-state={state} data-held={held ? "" : undefined} className="flex h-full w-full min-w-0 flex-col">
       <ViewBand name={name} line={bandLine} age={age} />
-      <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-4 pt-3 pb-4">
+      {/* `data-scroll-root`: the box a trick card at the tail watches its code's end in (decision-group.tsx `scrollBoxOf`). */}
+      <div data-scroll-root style={tailRoomStyle(tailRoom)} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-4 pt-3 pb-[max(1rem,var(--tail-room,0px))]">
         {request !== null && (
           <div data-slot="view-request" key={`${String(request.at)}:${request.text}`} className="mb-3 min-w-0">
             {receipt === null ? <ViewRequestBubble text={request.text} /> : <ViewReceiptCard receipt={receipt} phase={request.phase} reason={request.reason} pictures={pictures} />}
@@ -589,6 +588,7 @@ export function AgentViewScreen({
             {split.isChoiceStale && <ChoicePart view={view} pictures={pictures} pressed={pressed} busy={null} canAct="stale" canTap={canTap} onPick={onPick} />}
           </ViewEarlier>
         )}
+        {tail}
       </div>
     </div>
   );

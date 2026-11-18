@@ -214,6 +214,13 @@ function readGroupAnswer(value: JsonValue | undefined): HillGroupAnswer | null |
 export type HillAnswerRead = { readonly ok: true; readonly request: HillAnswerRequest; readonly id: string } | { readonly ok: false; readonly error: string };
 
 /**
+ * The level `POST /api/hill/answer` needs: a paired device with the write right. The answer to a trick's
+ * proposal card switches the trick on, so a read-only device can never give it (security read of package I,
+ * 2026-11-17, point 7). bridge/server.ts asks the guard for exactly this level; api-front-gate.test.ts holds it.
+ */
+export const HILL_ANSWER_RIGHT = "write" as const;
+
+/**
  * A phone's `POST /api/hill/answer` body, or why it is not one: `rid` a canonical UUID, `node`
  * `hill/<decision id>`, `intent` a string of at most 32 characters, `value.text` a string or null. A body
  * of another shape is a 400 and writes no receipt.
@@ -321,7 +328,9 @@ function readAnswer(value: JsonValue | undefined): HillDecision["answer"] | unde
   // Absent on an answer stored before answers carried the device's record id.
   const deviceId = row.deviceId === undefined ? undefined : asJsonString(row.deviceId);
   if (row.deviceId !== undefined && (deviceId === undefined || !HILL_DEVICE_ID_RE.test(deviceId))) return undefined;
-  const answer = { rid, intent, label, text, by, at, delivery, trick };
+  if (row.unconfirmed !== undefined && row.unconfirmed !== true) return undefined;
+  const base = { rid, intent, label, text, by, at, delivery, trick };
+  const answer = row.unconfirmed === true ? { ...base, unconfirmed: true as const } : base;
   return deviceId === undefined ? answer : { ...answer, deviceId };
 }
 

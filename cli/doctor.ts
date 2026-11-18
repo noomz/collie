@@ -11,7 +11,7 @@ import {
   resolveHookCommand,
   type HookTarget,
 } from "./hooks.ts";
-import { skillReport } from "./skill-install.ts";
+import { BY_HAND, skillReport } from "./skill-install.ts";
 import { oldMorphSkillCopies, oldMorphSteps } from "./old-morph-skill.ts";
 import { HOST, type Host } from "../bridge/host.ts";
 import { beaconReader } from "../bridge/beacon-io.ts";
@@ -62,12 +62,14 @@ import { collieVersionBare, type CliContext } from "./context.ts";
 import { CrewOpsStore } from "../bridge/crew/ops-store.ts";
 import { crewDelta, deltaLines } from "./crew-delta.ts";
 import { aboutCrew, bad, ok, skipped, warn, type DoctorStatus, type Finding } from "./finding.ts";
+import { statusLineState } from "./statusline.ts";
 import { parseAccountWindowsSetting } from "../bridge/account-windows-setting.ts";
 import { accountWindowsDoctorLine, grokAuthPath, hasOpencodeGoEntry, opencodeAuthPath } from "../bridge/account-windows.ts";
 import { muxFinding, muxSettings, pathLinkFinding, tailscaleFindings, type MuxSettings } from "./setup-findings.ts";
 import { cacheFindings } from "./cache-findings.ts";
 import { surfaceFindings } from "./surface-findings.ts";
 import { harnessFindings, harnessReader, type ReadHarness } from "./harness-findings.ts";
+import { linkFindings } from "./harness-link.ts";
 import { sendsSection } from "./send-findings.ts";
 import { durableFindings, sourcesFindings } from "./durable-findings.ts";
 import { herdrCoreFindings, type HcDial } from "./herdr-core-findings.ts";
@@ -263,6 +265,7 @@ export async function cmdDoctor(deps: DoctorDeps, args: readonly string[]): Prom
   // history section reads the panes off it, and `restart-pending` reads the bridge's own verdict on
   // whether it is still running the collie on disk (issue #238). One request, two readers.
   const ownRead = once(() => ownSnapshot(deps));
+  const harnessRows = deps.harnesses === undefined ? [] : await harnessFindings(deps.harnesses);
   const local: Finding[] = [
     identity(deps),
     configFile(deps),
@@ -305,6 +308,7 @@ export async function cmdDoctor(deps: DoctorDeps, args: readonly string[]): Prom
     // on POSIX the mode bits are checked where the files are read, as before.
     ...(deps.host.platform === "win32" ? [windowsTask(deps), windowsLongPaths(deps), secretsPrivate(deps)] : []),
     beaconHooks(deps, hookEntries, declaration?.supports.agentDetection ?? true, sessionsFromHooks),
+    ...statusLineWrap(deps, hookEntries.length > 0),
     await beacons(deps, hookEntries.length > 0),
     skillWalkyTalky(deps),
     ...skillOldMorph(deps),
@@ -337,7 +341,9 @@ export async function cmdDoctor(deps: DoctorDeps, args: readonly string[]): Prom
     // summary line and one line per row, read from the bridge's own day files. A read, like the rest.
     ...surfaceFindings({ ctx: deps.ctx, files: deps.files, now: deps.now }),
     // The binary and version of every harness with a profile, and what the profile says (1.24.1).
-    ...(deps.harnesses === undefined ? [] : await harnessFindings(deps.harnesses)),
+    ...harnessRows,
+    // Which harnesses are linked for the data path (M99 spec 09): one row each, read from files.
+    ...linkFindings({ ctx: deps.ctx, files: deps.files }, (harness) => harnessRows.find((row) => row.harness === harness)?.version ?? null),
     // Whether sends reach each harness (M71 spec 01): the outcomes of its recent sends, read from the
     // receipts in `<stateDir>/sends/` without a store, and three rules over them. Local: no stamp.
     // Then the held sends still open and how often a send met a screen it could not type into (spec 02).
@@ -1806,6 +1812,43 @@ function installedEntries(deps: DoctorDeps): InstalledEntry[] {
 }
 
 /**
+ * `statusline-claude`: does Claude Code tell Collie the context window's size? Only a wrapped
+ * statusLine does (.adr/0115, amended 2026-11-13), and without it the phone shows the context as a
+ * token count, not a percent. `collie update` writes no settings, so an install from before the wrap
+ * became the default keeps a plain statusLine until `hooks install claude` runs again: this row names
+ * it, as a hint, never an error. No row where the beacon hooks are not installed (`beacon-hooks-claude`
+ * speaks for that).
+ */
+export function statusLineWrap(deps: Pick<DoctorDeps, "ctx" | "files" | "host">, hooksInstalled: boolean): Finding[] {
+  if (!hooksInstalled) return [];
+  const check = "statusline-claude";
+  if (deps.host.platform === "win32") return [ok(check, "not wrapped on Windows, so the phone shows the context as a token count")];
+  const plain: string[] = [];
+  let wrapped = 0;
+  for (const target of claudeSettingsTargets(deps.ctx)) {
+    const text = deps.files.read(target.path);
+    if (text === null || text.trim() === "") continue;
+    // A file that does not parse is `hooks install`'s refusal to speak of, not this row's.
+    const document = asJsonObject(parseJson(text));
+    if (document === undefined) continue;
+    const state = statusLineState(document).kind;
+    if (state === "plain") plain.push(target.path);
+    if (state === "wrapped") wrapped += 1;
+  }
+  if (plain.length > 0) {
+    return [
+      warn(
+        check,
+        `your statusLine in ${plain.join(", ")} is not wrapped, so Claude Code does not tell Collie the context window's size and the phone shows the context as a token count, not a percent`,
+        "`collie hooks install claude` wraps it; your command still prints exactly as before. To undo it: `collie hooks install claude --no-statusline`",
+      ),
+    ];
+  }
+  if (wrapped > 0) return [ok(check, "wrapped: the phone shows the context in percent of the window Claude Code states")];
+  return [ok(check, "no statusLine configured, and Collie adds none (one would hide Claude Code's footer hints), so the phone shows the context as a token count")];
+}
+
+/**
  * `beacon-hooks-claude` — is the emitter registered in the agent's own settings, is it current, and
  * does the command it runs still exist?
  *
@@ -1913,19 +1956,28 @@ function beaconHooks(
  * Warn on stale, ok otherwise, as `hooksAreBehind` treats the hooks: a target with no skill is not
  * drift (the harness is not here, the sync is off, or the operator uninstalled it, ADR 0111). A refused
  * target is named, because install would not heal it, but it is not a warning either.
+ *
+ * An old block that an earlier build left in an instruction file (#770) is a copy behind this build:
+ * sync cuts it. One that sync may not cut (damaged or doubled markers, a symlinked file) is a warning
+ * of its own, because only the operator can take it out.
  */
 function skillWalkyTalky(deps: DoctorDeps): Finding {
   const check = "skill-walky-talky";
   const report = skillReport({ ctx: deps.ctx, files: deps.files, fs: deps.link });
-  const stale = report.filter((r) => r.state.kind === "stale");
+  const stuck = report.flatMap((r) => (r.legacy.kind === "refused" ? [r.legacy] : []));
+  const stuckLine = stuck.length === 0 ? null : `an old WalkyTalky block Collie may not cut: ${stuck.map((l) => `${l.path} (${l.reason})`).join("; ")}`;
+  const stale = report.filter((r) => r.state.kind === "stale" || r.legacy.kind === "block");
   const installed = report.filter((r) => r.state.kind === "installed");
   if (stale.length > 0) {
+    // A stuck block does not hide a stale copy elsewhere: one row names both.
+    const install = "`collie skill install all` — it replaces our own skill file and cuts an old block, and leaves every other line alone";
     return warn(
       check,
-      `${String(stale.length)} installed copy behind this build (${stale.map((r) => r.file.target.harness).join(", ")}) — the agent reads old advice`,
-      "`collie skill install all` — it replaces our own file or block in place and leaves every other line alone",
+      `${String(stale.length)} installed copy behind this build (${stale.map((r) => r.file.target.harness).join(", ")}) — the agent reads old advice${stuckLine === null ? "" : `; ${stuckLine}`}`,
+      stuckLine === null ? install : `${install}. ${BY_HAND}`,
     );
   }
+  if (stuckLine !== null) return warn(check, stuckLine, BY_HAND);
   if (installed.length === 0) return ok(check, "not installed — `collie skill install all` teaches agents to message each other");
   const refused = report.filter((r) => r.state.kind === "refused").length;
   const left = refused > 0 ? `; ${String(refused)} target${refused === 1 ? "" : "s"} refused, see \`collie skill status\`` : "";
@@ -2042,7 +2094,7 @@ export function accountWindowsFinding(deps: Pick<DoctorDeps, "ctx" | "host" | "f
  *
  * Nothing here removes a file. The sweep is a READ, on this path as on the bridge's.
  *
- * A platform with no start-time probe (`bridge/beacon/liveness.ts`: not Linux, not macOS) never gets
+ * A platform with no start-time probe (`bridge/beacon/liveness.ts`: not Linux, macOS or Windows) never gets
  * a beacon, so with the emitter installed and none on disk the row says that rather than "not yet"
  * (M80 spec 11).
  */
@@ -2054,7 +2106,7 @@ async function beacons(deps: DoctorDeps, installed: boolean): Promise<Finding> {
     return skipped(
       "beacons",
       "no agent writes one on this platform, because Collie cannot read a process's start time here",
-      "nothing to do here: only Linux and macOS have that probe",
+      "nothing to do here: only Linux, macOS and Windows have that probe",
     );
   }
   if (readings.length === 0) {

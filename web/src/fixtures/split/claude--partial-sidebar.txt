@@ -1,0 +1,49 @@
+                                                                                                                          │ xxxxxxxxxx   xxxxxxxx                     ✕
+  xxxxxxxxx:                                                                                                              │         xxxxxxxxxx · xxxx x.x xxxx
+  x. [x] xxxxx x–xx                                                                                                       │          ■ xxxx  ■ xxxxxx  ■ xxxx
+  x. [ ] xxxxx xxxxxx: xxxxx xxx xxxxxx xxxxxxx, xxxxxxx xxxxxx xxxxxx xxxxx xxxxxxx.                                     │╭───────────────────────────────────────────╮
+  x. [ ] xxx: xxx xx xxx xxxx, xxxx xx xx.                                                                                ││ xxxx x.x · xxxx                    ○ xxxx │
+  x. [ ] xxx x xx xxxxx: xxxxxx xxxx xxx xxx xxxxxxx xxx xx.                                                              ││ xxxxxxx xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxx… │
+  x. [ ] xxxx xxxxxx, xxx xxxxxx, xxxx xxx xxxx, xxxxxx (#x)                                                              ││ xxxxxx ▮▮▯▯ xxxxxx   xxx xxx              │
+                                                                                                                          ││ xxx ▰▱▱▱▱▱▱▱▱▱ xx% xxxx/x.xx              │
+✻ xxxxxx xxx xxx · xxxx x:xx xx · x xxxxxx xxxxx xxxxxxx                                                                  ││ $xx.xx   xx ▰▱▱▱▱ xx%  xx ▰▰▱▱▱ xx%       │
+                                                                                                                          ││ xxxx xxx  xxxx x.xx · xxx xxx/x           │
+※ xxxxx: xx'xx xxxxxxxxx xxx, xxx xxxxxx xxxxx xxxxxx xx xxxxx xxx xxxxxxx, xxx xxx xxxx xxxxxx xxx xxxxxxxx: xxxxx xxx   │╰───────────────────────────────────────────╯
+  xxxxxxx xxx xxxxxxx, xxx xxx xxx xxx xx xxx xxxxxx xxxxxxx. xxxx, xxxx xxx xxx xxxxxxx xxxxxx, x'xx xxxxxx xxx x xxx    │─────────────────────────────────────────────
+  xxxxxx.                                                                                                                 │╭───────────────────────────────────────────╮
+                                                                                                                          ││ xxxx ·          xxx       · xxxxxxxxxxxx  │
+❯ xxxx'x xxx xxx                                                                                                          ││ xxxxxxxxxxx     xxxxxx   xx               │
+  ⎿  x xxxxx xxxxxxxxx                                                                                                    ││ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■ │
+                                                                                                                          ││ ■ xx xxxxxxx  ■ xxx xxx  ✗ x xxxxxx       │
+  xxx x xxxxx xxxxxxxx                                                                                                    ││ x: xxxx xx  x: xxxxx xxx  x: xxxxx xx  x: │
+                                                                                                                          │╰───────────────────────────────────────────╯
+● xxx xxxxx xxxxxx xx xxxx xx xxxxx xx:xx xxxx xxxx. xxxxx xxx xxxxxxx xxxxxx xxxxxx xx:xx xxx xxx xxx xxxxx xx:xx–xx:xx. │─────────────────────────────────────────────
+                                                                                                                          │╭───────────────────────────────────────────╮
+  ┌──────────────────────────────┬────────────────────────┬────────────────────────────────────────┬─────────────────┐    ││ ✓ xxxx xxxx xxx · x xxxxxx · x xxxxx · x… │
+  │             xxxx             │      xxxxxxx xxx       │                  xxxx                  │ xxx (xxxx xxxx) │    ││ xxxxxxx · x xxxxxx                        │
+  ├──────────────────────────────┼────────────────────────┼────────────────────────────────────────┼─────────────────┤    │╰───────────────────────────────────────────╯
+  │ xxxxx, xxx xxxxxx            │ xxxx! xxxxx xxxxx      │ xx xx xx                               │ ~xx:xx          │    │
+  ├──────────────────────────────┼────────────────────────┼────────────────────────────────────────┼─────────────────┤    │╭───────────────────────────────────────────╮
+  │ xxxxxxx, xxxxxx xxxxx x xx x │ (xx xxxxxx)            │ xxxxx xxxxxxx; xxxxx x xxxxxx          │ ~xx:xx          │    ││ xxxxxxx xxx                               │
+  ├──────────────────────────────┼────────────────────────┼────────────────────────────────────────┼─────────────────┤    ││ xx:xx:xx xxx          xxx xxxx · x xxxxx  │
+  │ xxx, xxx xxxxxx              │ xxxxxx (xxxxxxx xx:xx) │ x xx x: xxxxx, xxxxxxx, xxxxxxx xxxxxx │ ~xx:xx–xx:xx    │    ││ xx:xx:xx xxxx         xxxx ✗              │
+  └──────────────────────────────┴────────────────────────┴────────────────────────────────────────┴─────────────────┘    ││ xx:xx:xx xxxxxx       xxxxxxx xxxxxxxxx   │
+                                                                                                                          ││ xx:xx:xx xxxxxx       xxxxxxx xxxxxxxxx   │
+  xxx xxx xxxxxxxx xx xxxxx xx xxx xxxxxx xx xxx xxxxxxx xxxxxxxx:                                                        ││ xx:xx:xx xxx          xxx xxxx · xx xxxxx │
+  - xxxxx xxxx x xxxxxxx, xxxxxxx xx xxx xxxxxxx xx.                                                                      ││ xx:xx:xx xxxx         xxxx → xx ✗         │
+  - xxxxxx xx xxxxxxx xxxx xxxxxxx, xx x xxxxxx xx–xx xxxxxxx. xxx xxxxxxxx xxxxx xxx xxx xxxx xxxx xxxxxxxx xxxxx xxxxxx ││ xx:xx:xx xxx          xxx xxxx · x xxxxx  │
+    xxx xxxxx xx xxxx.                                                                                                    ││ xx:xx:xx xxx          xxx xxxx · xx xxxxx │
+  - xxx xxxxxx xxxxx xx xxxx xxx xxx xxxx xxxxx xxxxx x xxx x xx xxxxx.                                                   │╰───────────────────────────────────────────╯
+                                                                                                                          │
+  xxxx xxx xxxxx xxx xxxx, x'xx xxxxxx xx x xxx xxxxx xx xxx. xxxx xxxxxx xxxx xxxxx xxxxxxx xx xxxxxxx, xxxxxx x xxxxx x │
+  xxxxx xxxxxx. x xxxxx xxxxxx xxxxx xxxx xxxxxxxx xxx xxxxxxx xxx xxx.                                                   │
+                                                                                                                          │
+✻ xxxxx xxx xxx · xxxx x:xx xx · x xxxxxx xxxxx xxxxxxx                                                                   │
+                                                                              xxxxxx xxxxxxxxx! xxx: xxxx xxxxxxx xxxxxx  │
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ flightdeck: ctx 10%
+  branch:main | !6 ?6 ⇡400 | profile:work | session:1089m | ctx:10%
+  [OMC#5.8.6] | Model: Opus 5.5 | 5h:16%(2h51m) wk:35%(4d5h) fable:0%(4d5h)
+  ⏵⏵ auto mode on · 4 shells

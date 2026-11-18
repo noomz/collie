@@ -8,6 +8,7 @@ import {
   BY_THE_POSTER,
   HILL_DEFAULT_EXPIRY_MS,
   HILL_MAX_EXPIRY_MS,
+  HILL_SELF_CLEAR_MS,
   HILL_WALKY_OFF,
   HillService,
   hillPostDigest,
@@ -15,9 +16,10 @@ import {
   mintDecisionId,
   NOT_ON_LEAD,
   TARGET_ENDED,
+  LEFT_THE_CREW,
   type HillAgentSender,
   type HillCrewMode,
-  type HillDelivery,
+  type HillSendResult,
   type HillPlace,
   notCollie,
   type HillPostAnswer,
@@ -25,6 +27,8 @@ import {
   type HillTrickTap,
 } from "./service.ts";
 import { HillStore } from "./store.ts";
+import { readDecision } from "./parse.ts";
+import { parseJsonObject } from "../../web/src/lib/json.ts";
 
 const POSTER: HillAgentSender = { kind: "agent", address: "local/%1#aaaa", memberId: null, harness: "agent-x", label: "repo#one", host: "desk" };
 const OTHER: HillAgentSender = { kind: "agent", address: "local/%2#bbbb", memberId: null, harness: "agent-y", label: "repo#two", host: "desk" };
@@ -68,7 +72,7 @@ interface Rig {
   mode: HillCrewMode;
   walky: boolean;
   clock: number;
-  delivery: HillDelivery | "throw";
+  delivery: HillSendResult | "throw";
   onSend?: (to: string) => void;
   /** Every tap the hill handed the tricks runner, in order. */
   readonly taps: Tapped[];
@@ -76,11 +80,15 @@ interface Rig {
   tapResult: boolean | "throw";
   /** What happened, in order: "receipt", "closed", "send", "tap". */
   readonly events: string[];
-  /** Whether the bridge lists any session yet (false right after boot). */
+  /** Whether this machine's census was read with success (false right after boot, or a failed read). */
   known: boolean;
+  /** Crew machines (the address's member part) whose census is unknown now. */
+  readonly unknownMembers: Set<string>;
+  /** Crew machines the roster, read with success, no longer lists. */
+  readonly removedMembers: Set<string>;
 }
 
-function rig(receipts: HillReceiptSurface = memoryHillReceipts(), keepId?: () => void): Rig {
+function rig(receipts: HillReceiptSurface = memoryHillReceipts(), keepId?: () => void, tricksOn?: () => boolean): Rig {
   let n = 0;
   const store = new HillStore(null, () => state.clock);
   const state: Omit<Rig, "hill"> = {
@@ -97,6 +105,8 @@ function rig(receipts: HillReceiptSurface = memoryHillReceipts(), keepId?: () =>
     tapResult: true,
     events: [],
     known: true,
+    unknownMembers: new Set<string>(),
+    removedMembers: new Set<string>(),
   };
   const hill = new HillService({
     store,
@@ -115,9 +125,14 @@ function rig(receipts: HillReceiptSurface = memoryHillReceipts(), keepId?: () =>
     },
     crewMode: () => state.mode,
     walkyOn: () => state.walky,
-    sessionsKnown: () => state.known,
+    removed: (address) => state.removedMembers.has(address.split("/")[0] ?? ""),
+    censusKnown: (address) => {
+      const member = address.split("/")[0] ?? "";
+      return member === "local" ? state.known : !state.unknownMembers.has(member);
+    },
     memberId: "m_aaaaaaaaaa",
     keepId,
+    tricksOn,
     machine: "desk",
     now: () => state.clock,
     mintId: () => {
@@ -515,7 +530,7 @@ describe("the sweep closes decisions whose target ended", () => {
     expect(r.store.get(decision.id)?.state).toBe("open");
   });
 
-  test("never while the bridge lists no session (right after boot), and such a sweep breaks the row", () => {
+  test("never while the census is unknown (right after boot, a failed read), and such a sweep breaks the row", () => {
     const r = rig();
     const decision = posted(r.hill.post(POSTER, input(1)));
     r.live = [];
@@ -531,6 +546,46 @@ describe("the sweep closes decisions whose target ended", () => {
     expect(r.hill.sweep(6000)).toBe(0);
     expect(r.store.get(decision.id)?.state).toBe("open");
     expect(r.hill.sweep(7000)).toBe(1);
+  });
+
+  test("the empty census: a machine whose last agent left closes its cards at the second good read", () => {
+    const r = rig();
+    const one = posted(r.hill.post(POSTER, input(1)));
+    const two = posted(r.hill.post(OTHER, input(2)));
+    // Every agent left; the multiplexer was read with success and lists none.
+    r.live = [];
+    expect(r.hill.sweep(2000)).toBe(0);
+    expect(r.hill.sweep(3000)).toBe(2);
+    expect(r.store.get(one.id)).toMatchObject({ state: "undeliverable", closedReason: TARGET_ENDED });
+    expect(r.store.get(two.id)?.state).toBe("undeliverable");
+  });
+
+  test("an empty list from a read that failed closes nothing, however long it lasts", () => {
+    const r = rig();
+    const decision = posted(r.hill.post(POSTER, input(1)));
+    r.live = [];
+    r.known = false;
+    for (let at = 2000; at < 20000; at += 1000) expect(r.hill.sweep(at)).toBe(0);
+    expect(r.store.get(decision.id)?.state).toBe("open");
+  });
+
+  test("the census is judged per machine: an unknown crew machine keeps its cards, a known one ends its own", () => {
+    const r = rig();
+    const lead = posted(r.hill.post(POSTER, input(1)));
+    const remote: HillAgentSender = { kind: "agent", address: "far/%7#cccc", memberId: "far", harness: "agent-x", label: "repo#far", host: "far" };
+    r.live = [...PLACES, { address: "far/%7#cccc", label: "repo#far", host: "far", unattended: false }];
+    const far = posted(r.hill.post(remote, input(2)));
+    r.live = [];
+    r.unknownMembers.add("far");
+    r.hill.sweep(2000);
+    expect(r.hill.sweep(3000)).toBe(1);
+    expect(r.store.get(lead.id)?.state).toBe("undeliverable");
+    expect(r.store.get(far.id)?.state).toBe("open");
+    // Its census read with success once: one more good read ends it.
+    r.unknownMembers.clear();
+    expect(r.hill.sweep(4000)).toBe(0);
+    expect(r.hill.sweep(5000)).toBe(1);
+    expect(r.store.get(far.id)?.state).toBe("undeliverable");
   });
 
   test("the target is replyTo when set: the poster ending does not close it, replyTo ending does", () => {
@@ -563,6 +618,138 @@ describe("the sweep closes decisions whose target ended", () => {
     r.hill.sweep(2000);
     expect(r.hill.sweep(3000)).toBe(1);
     expect(r.store.get(decision.id)?.state).toBe("undeliverable");
+  });
+});
+
+describe("a member that left the crew (M96 spec 10)", () => {
+  const FAR: HillAgentSender = { kind: "agent", address: "far/%7#cccc", memberId: "far", harness: "agent-x", label: "repo#far", host: "far" };
+  const FAR_PLACE: HillPlace = { address: "far/%7#cccc", label: "repo#far", host: "far", unattended: false };
+
+  test("its open cards close `undeliverable` at the first sweep after the roster drops it, with nothing typed", () => {
+    const r = rig();
+    r.mode = "lead";
+    r.live = [...PLACES, FAR_PLACE];
+    const far = posted(r.hill.post(FAR, input(1)));
+    const own = posted(r.hill.post(POSTER, input(2)));
+    r.removedMembers.add("far");
+    expect(r.hill.sweep(2000)).toBe(1);
+    expect(r.store.get(far.id)).toMatchObject({ state: "undeliverable", closedAt: 2000, closedReason: LEFT_THE_CREW });
+    expect(r.store.get(own.id)?.state).toBe("open");
+    expect(r.sent).toEqual([]);
+  });
+
+  test("a member that does not answer keeps its cards: not removed, its census unknown", () => {
+    const r = rig();
+    r.mode = "lead";
+    r.live = [...PLACES, FAR_PLACE];
+    const far = posted(r.hill.post(FAR, input(1)));
+    r.live = [...PLACES];
+    r.unknownMembers.add("far");
+    for (let at = 2000; at < 10000; at += 1000) expect(r.hill.sweep(at)).toBe(0);
+    expect(r.store.get(far.id)?.state).toBe("open");
+  });
+
+  test("a card from a removed member whose answer goes to a session here stays: it can still be typed", () => {
+    const r = rig();
+    r.mode = "lead";
+    r.live = [...PLACES, FAR_PLACE];
+    const routed = posted(r.hill.post(FAR, input(1, { replyTo: POSTER.address })));
+    r.removedMembers.add("far");
+    r.hill.sweep(2000);
+    r.hill.sweep(3000);
+    expect(r.store.get(routed.id)?.state).toBe("open");
+  });
+
+  test("a peer and a deposed lead close nothing for a removed member: they hold no Hill", () => {
+    const r = rig();
+    r.mode = "lead";
+    r.live = [...PLACES, FAR_PLACE];
+    const far = posted(r.hill.post(FAR, input(1)));
+    r.removedMembers.add("far");
+    r.unknownMembers.add("far");
+    r.mode = "peer";
+    expect(r.hill.sweep(2000)).toBe(0);
+    expect(r.store.get(far.id)?.state).toBe("open");
+  });
+});
+
+describe("a card that closed without the person leaves by itself (M96 spec 10)", () => {
+  test("expired, withdrawn, superseded and undeliverable stay 60 seconds with their closing line, then leave as Clear removes them", () => {
+    const r = rig();
+    const expiring = posted(r.hill.post(POSTER, input(1, { expiresAt: 2000 })));
+    const withdrawn = posted(r.hill.post(POSTER, input(2)));
+    const old = posted(r.hill.post(POSTER, input(3)));
+    const ending = posted(r.hill.post(OTHER, input(4)));
+    r.clock = 2000;
+    r.hill.withdraw(POSTER, withdrawn.id);
+    posted(r.hill.post(POSTER, input(5, { supersedes: old.id })));
+    r.live = PLACES.filter((place) => place.address !== OTHER.address);
+    r.hill.sweep(2000);
+    r.hill.sweep(3000);
+    expect(r.store.get(expiring.id)?.state).toBe("expired");
+    expect(r.store.get(ending.id)?.state).toBe("undeliverable");
+    // Inside the minute every one is still served, closed, with its line.
+    r.audit.length = 0;
+    r.hill.sweep(2000 + HILL_SELF_CLEAR_MS - 1);
+    expect(r.hill.list().closed.map((d) => d.id).toSorted()).toEqual([expiring.id, withdrawn.id, old.id, ending.id].toSorted());
+    expect(r.audit.filter((entry) => entry.action === "hill.clear.self")).toEqual([]);
+    // At the minute the three closed at 2000 leave; the one closed at 3000 waits one more second.
+    r.hill.sweep(2000 + HILL_SELF_CLEAR_MS);
+    expect(r.hill.list().closed.map((d) => d.id)).toEqual([ending.id]);
+    expect(r.hill.clearedState(expiring.id)).toBe("expired");
+    expect(r.hill.clearedState(withdrawn.id)).toBe("withdrawn");
+    expect(r.hill.clearedState(old.id)).toBe("superseded");
+    expect(r.audit).toContainEqual({ action: "hill.clear.self", detail: { count: 3 } });
+    r.hill.sweep(3000 + HILL_SELF_CLEAR_MS);
+    expect(r.hill.list().closed).toEqual([]);
+    expect(r.hill.clearedState(ending.id)).toBe("undeliverable");
+    // Nothing was typed for any of them.
+    expect(r.sent).toEqual([]);
+  });
+
+  test("answered and dismissed stay under Answered until the person clears them", async () => {
+    const r = rig();
+    const answered = posted(r.hill.post(POSTER, input(1)));
+    const dismissed = posted(r.hill.post(POSTER, input(2)));
+    await receiptOf(r, answerOf(answered, 100, "yes"));
+    await receiptOf(r, answerOf(dismissed, 101, "dismiss"));
+    r.hill.sweep(1000 + 10 * HILL_SELF_CLEAR_MS);
+    expect(r.hill.list().closed.map((d) => d.state).toSorted()).toEqual(["answered", "dismissed"]);
+  });
+
+  test("Collie's own cards keep today's rule: they stay until the person clears them", () => {
+    const r = rig();
+    const ref = { type: "version" as const, id: "nightly-leg", hash: "a".repeat(64) };
+    const card = r.hill.postCollie({ kind: "collie", ref, label: "Nightly leg" }, input(1));
+    if (!card.ok) throw new Error("not posted");
+    r.hill.withdrawCollie({ kind: "collie", ref, label: "Nightly leg" }, card.decision.id, "gone");
+    r.hill.sweep(1000 + 10 * HILL_SELF_CLEAR_MS);
+    expect(r.store.get(card.decision.id)?.state).toBe("withdrawn");
+  });
+
+  test("the poster still reads the state after the clear, with status and withdraw", () => {
+    const r = rig();
+    const decision = posted(r.hill.post(POSTER, input(1, { expiresAt: 2000 })));
+    r.hill.sweep(2000);
+    r.hill.sweep(2000 + HILL_SELF_CLEAR_MS);
+    expect(r.store.get(decision.id)).toBeUndefined();
+    expect(r.hill.status(POSTER, decision.id)).toEqual({ ok: false, missing: false, error: `${decision.id} is expired; it has left the Hill` });
+    expect(r.hill.withdraw(POSTER, decision.id)).toEqual({ ok: false, missing: false, error: `${decision.id} is expired; it has left the Hill` });
+    // Another session still reads it as not found.
+    expect(r.hill.status(OTHER, decision.id)).toMatchObject({ ok: false, missing: true });
+  });
+
+  test("a write that fails leaves the closed cards where they are, for the next sweep", () => {
+    const r = rig();
+    const decision = posted(r.hill.post(POSTER, input(1, { expiresAt: 2000 })));
+    r.hill.sweep(2000);
+    const real = r.store.forget.bind(r.store);
+    r.store.forget = () => null;
+    r.hill.sweep(2000 + HILL_SELF_CLEAR_MS);
+    expect(r.store.get(decision.id)?.state).toBe("expired");
+    r.store.forget = real;
+    r.hill.sweep(2000 + HILL_SELF_CLEAR_MS + 15_000);
+    expect(r.store.get(decision.id)).toBeUndefined();
   });
 });
 
@@ -966,6 +1153,30 @@ describe("answering at the edges", () => {
     await receiptOf(typed, answerOf(decision, 100, "yes"));
     expect(typed.audit.some((entry) => entry.action === "hill.undelivered")).toBe(false);
   });
+
+  test("only a typed line whose write was not confirmed marks the answer unconfirmed; the poster still reads the answer", async () => {
+    for (const [delivery, stored, unconfirmed] of [
+      ["unknown", "unknown", true],
+      ["throw", "unknown", true],
+      ["typed", "typed", false],
+      ["held", "held", false],
+      ["inbox-only", "unknown", false],
+    ] as const) {
+      const r = rig();
+      const decision = posted(r.hill.post(POSTER, input(1)));
+      r.delivery = delivery;
+      await receiptOf(r, answerOf(decision, 100, "yes", "Go."));
+      const answer = r.store.get(decision.id)?.answer;
+      expect(answer?.delivery).toBe(stored);
+      expect(answer?.unconfirmed === true).toBe(unconfirmed);
+      // Nothing is sent again, and `collie hill status` gives the poster the answer either way.
+      expect(r.sent).toHaveLength(1);
+      expect(r.hill.status(POSTER, decision.id)).toMatchObject({ ok: true, decision: { state: "answered", answer: { intent: "yes", text: "Go.", delivery: stored } } });
+      // The mark survives a restart: the file's reader takes it back.
+      const reread = readDecision(parseJsonObject(JSON.stringify(r.store.get(decision.id))) ?? {}, { collie: true });
+      expect(reread?.answer?.unconfirmed === true).toBe(unconfirmed);
+    }
+  });
 });
 
 describe("answering a trick's decision (M94)", () => {
@@ -1187,5 +1398,39 @@ describe("clearing closed decisions", () => {
     expect(hill.clear(null)).toEqual({ cleared: [decision.id], skipped: [] });
     expect(store.all()).toEqual([]);
     expect(audit.at(-1)).toMatchObject({ action: "hill.clear", detail: { count: 1 } });
+  });
+});
+
+describe("tricks switched off as a whole (bridge/tricks/feature-switch.ts)", () => {
+  test("a trick's open Decision stays stored, is not served, and its answer is refused before anything closes or runs", async () => {
+    const switched = { on: true };
+    const r = rig(memoryHillReceipts(), undefined, () => switched.on);
+    const asked = posted(r.hill.postDecision(trickSender(), input(1)));
+    const agent = posted(r.hill.post(POSTER, input(2)));
+    const revOn = r.hill.rev();
+    expect(r.hill.list().open.map((decision) => decision.id).toSorted()).toEqual([agent.id, asked.id].toSorted());
+
+    switched.on = false;
+    // The list's revision moves with the switch, so a phone holding the old one refetches.
+    expect(r.hill.rev()).not.toBe(revOn);
+    expect(r.hill.list().open.map((decision) => decision.id)).toEqual([agent.id]);
+    expect(await r.hill.answer(answerOf(asked, 100, "yes"), asked.id, "Pixel 9")).toEqual({ kind: "tricks-off" });
+    expect(r.taps).toEqual([]);
+    expect(r.store.get(asked.id)?.state).toBe("open");
+    // An agent's Decision is not a trick's: it is served and answered as before.
+    expect((await receiptOf(r, answerOf(agent, 101, "yes"))).code).toBe("ok");
+
+    // Back on: the same Decision shows again and its answer runs the trick.
+    switched.on = true;
+    expect(r.hill.list().open.map((decision) => decision.id)).toEqual([asked.id]);
+    expect((await receiptOf(r, answerOf(asked, 102, "yes"))).code).toBe("ok");
+    expect(r.taps.map((tap) => tap.trickId)).toEqual(["nightly-leg"]);
+  });
+
+  test("with no switch wired (a test seam) a trick's Decisions are served as before", () => {
+    const r = rig();
+    const asked = posted(r.hill.postDecision(trickSender(), input(1)));
+    expect(r.hill.tricksOff()).toBe(false);
+    expect(r.hill.list().open.map((decision) => decision.id)).toEqual([asked.id]);
   });
 });

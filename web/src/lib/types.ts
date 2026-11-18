@@ -21,6 +21,11 @@ export interface AgentView {
   /** True when the session turned its walky talky off (M89). Absent when on, and on an older machine. */
   walkyOff?: true;
   /**
+   * True when the session is linked (M99 spec 15): a part inside the agent program takes a plain message by data.
+   * Absent otherwise, and on an older machine. Deliver now on a held message needs it.
+   */
+  linked?: true;
+  /**
    * How many pinned messages the pane's session holds (M90). Absent at zero, on a machine that predates pins, and on
    * a pane whose session the bridge has not read yet, so the pane view reads the list once when it opens.
    */
@@ -45,11 +50,18 @@ export interface AgentView {
   /** User-set pane label (herdr `pane.rename`), when one is set; absent when the pane is unlabelled. */
   paneLabel?: string;
   /**
-   * Claude's OWN session name (set in-agent via `/rename`), derived bridge-side from the pane text.
-   * Claude-only; absent for unnamed sessions and non-claude panes. Shown below an explicit `paneLabel`
-   * — see `paneName` in lib/pane-name.ts. Render as text only (never markup) — same XSS boundary as paneLabel.
+   * The harness's OWN session name, set in-agent by the person (Claude's `/rename`, pi's `/name`, an
+   * Oh My Pi title the person set, Muse's name), derived bridge-side from the harness's journal or its
+   * screen. Absent for an unnamed session. Shown below an explicit `paneLabel`, see `paneName` in
+   * lib/pane-name.ts. Render as text only (never markup), the same XSS boundary as paneLabel.
    */
   sessionName?: string;
+  /**
+   * The title the agent gave its session itself (Claude's own title, Oh My Pi's automatic title,
+   * OpenCode's session title), from the harness's journal. Names the pane after the two hand-set names
+   * and before a sole tab's name (lib/pane-name.ts). Absent from an older bridge. Text only.
+   */
+  agentTitle?: string;
   /**
    * True when the agent named a session, so a journal may exist for this pane — what the History
    * affordance keys off, without a speculative fetch.
@@ -221,6 +233,13 @@ export interface AgentView {
    */
   usage?: PaneUsage;
   /**
+   * The added account this session runs under (M101), present only for an ADDED account. Mirrors
+   * `PaneWire.account` in bridge/types.ts. **Absent, never a placeholder**: the Default account, a
+   * pane of no account-capable agent, and an older bridge all send no key, and every one of those
+   * renders what it rendered before the field existed.
+   */
+  account?: { id: string; label: string };
+  /**
    * What the checkout holding this pane's folder is on. Mirrors `PaneWire.gitHead` in bridge/types.ts.
    *
    * **Absent, never a placeholder**: a folder in no checkout, a reading the bridge has not taken yet,
@@ -273,6 +292,12 @@ export interface AgentView {
    * a crew member older than the protocol), and the composer says so (M56 spec 06).
    */
   sendProtocol?: true;
+  /**
+   * Present on a terminal pane whose bridge answers a screen card's tap by `POST /api/ask/<id>`, also
+   * when a lead forwards it (M102 spec 14). On a crew member's pane it moves card taps off the raw keys
+   * route. Absent from an older bridge.
+   */
+  askRoute?: true;
   /**
    * Mirrors `PaneWire.canStop` (M68): a Stop has a key to press on this pane, because its profile names an
    * interrupt key and is not revoked. The belt draws Stop for a pane with a screen only with it, and
@@ -1445,6 +1470,17 @@ export interface SnapshotResponse {
    * while the Hill is on, so an install that never switched it keeps its bytes.
    */
   hillOff?: true;
+  /**
+   * Tricks as a whole are switched off on this bridge (bridge/tricks/feature-switch.ts, off by default):
+   * Settings, Tricks draws the list read-only with one line saying so. Absent while tricks are on.
+   */
+  tricksOff?: true;
+  /**
+   * With the Hill off (M96 spec 14): the hill's revision while it holds a card of Collie's own about a
+   * trick. The phone reads `GET /api/hill`, which then serves only those cards, for Settings, Tricks, the
+   * Dashboard's line and the card's page. Absent with the Hill on (then `hillRev` rides) and when none is held.
+   */
+  trickCardsRev?: number;
   ts: number;
 }
 
@@ -1455,9 +1491,11 @@ export interface PaneReadResponse {
   /** Herdr's monotonic pane revision — the prompt-select race guard checks a tapped menu against it. */
   revision: number;
   /**
-   * The same rows with soft wraps undone, sent only when {@link text} shows a URL the pane's column
-   * edge cut in two. `lib/links.ts` uses it to give every fragment of that URL the href of the whole
-   * URL; absent for every other pane.
+   * The same rows with soft wraps undone. By default, sent (with SGR stripped) only when {@link text}
+   * shows a URL the pane's column edge cut in two: `lib/links.ts` uses it to give every fragment of
+   * that URL the href of the whole URL, and it is absent for every other pane. With `?logical=1`,
+   * always sent on a multiplexer that implements `readLogicalText` (Herdr, Tern) with SGR styling
+   * preserved; still absent when the multiplexer has no logical read.
    */
   logicalText?: string;
   /**
@@ -2469,6 +2507,8 @@ export interface FolderBrowseResponse {
 export interface BridgeConfig {
   push: boolean;
   vapidPublicKey: string;
+  /** The bridge's API number (M102 spec 14, lib/api-version.ts). Absent from an older bridge. */
+  apiVersion?: number;
   /** Build id of the bundle the bridge is currently serving (for stale-cache detection). */
   build?: string;
   /**
@@ -2733,6 +2773,15 @@ export interface CacheWatchListResponse {
   entries: CacheWatchListEntry[];
 }
 
+/**
+ * POST /api/notifications/clear — the pane slots the clear emptied (`paneTag` of the session's herd
+ * tag and the pane id), one per pane it marked seen that has no alert left. A pane still blocked on
+ * the operator is not listed: its slot keeps counting.
+ */
+export interface NotificationsClearResponse {
+  clearedSlots: string[];
+}
+
 /** Lower sorts first — "needs you" at the top. Mirrors STATUS_RANK on the server. */
 export const STATUS_RANK = {
   blocked: 0,
@@ -2777,13 +2826,31 @@ export type WorktreePlanResponse =
       remembered?: { base: "default" | "current"; folder: "default" | "parent"; parent?: string };
       branchValid?: boolean;
       defaultTarget?: { path: string; exists: boolean; reason?: string };
+      /** Where `defaultTarget` comes from: this machine's "Worktree folder" setting, or Herdr's rule. */
+      defaultSource?: "setting" | "rule";
+      /** The setting fails the folder rule now, so there is no `defaultTarget` and a create would refuse. */
+      defaultRefusal?: { error: string; code?: ApiErrorCode; detail?: ApiErrorDetail };
       parentTarget?:
         | { ok: true; path: string }
         | { ok: false; error: string; code?: ApiErrorCode; detail?: ApiErrorDetail };
     }
   | { ok: false; error: string; code?: ApiErrorCode; detail?: ApiErrorDetail };
 
-/** Where a new branch's folder goes (ADR 0093): Herdr's own place, or a child of a parent folder. */
+/**
+ * GET /api/worktree/folder, and the answer to POST /api/worktree/folder/set: one machine's "Worktree
+ * folder" setting (ADR 0093 note). Mirrors `WorktreeFolderSettingResponse` in bridge/types.ts. `dir` is
+ * `null` when unset; `path` is its real path when it passes the folder rule now, `problem` the refusal
+ * when it does not; `fallback` is the folder the default uses while it is unset.
+ */
+export interface WorktreeFolderSettingResponse {
+  ok: true;
+  dir: string | null;
+  path?: string;
+  problem?: { error: string; code?: ApiErrorCode; detail?: ApiErrorDetail };
+  fallback: string;
+}
+
+/** Where a new branch's folder goes (ADR 0093): the machine's default place, or a child of a parent folder. */
 export type WorktreeFolderChoice = { kind: "default" } | { kind: "parent"; parent: string };
 
 /**
@@ -2811,22 +2878,32 @@ export type PaneProgress =
 
 
 
-/** A subscription window, by the label the phone draws for it. Mirrors `UsageWindow` in bridge/usage.ts. */
-export type UsageWindow = "5h" | "7d";
-
-/** One subscription window's reading. Mirrors `UsageLimit` in bridge/usage.ts. */
+/**
+ * One subscription window's reading. Mirrors `UsageLimit` in bridge/usage.ts. `window` is the
+ * harness's own key as an open string: `5h` and `7d` keep their meaning, `7d:<scope>` is a weekly
+ * window scoped to a model (its `label` names it), a length such as `30d` is a window of another
+ * length, and `spend` is a gateway spend limit. A key this build does not know is drawn by its label,
+ * else by the key itself.
+ */
 export interface UsageLimit {
-  window: UsageWindow;
+  window: string;
   /** Percent of the window used, 0 to 100. */
   used: number;
   /** When the window resets, epoch ms. */
   resetsAt?: number;
+  /** The harness's own name for a scoped window (`Opus`). Absent when it has none. */
+  label?: string;
 }
 
 /** A pane's usage numbers. Mirrors `PaneUsage` in bridge/usage.ts; every part absent when unreported. */
 export interface PaneUsage {
-  /** Percent of the context window used, 0 to 100. */
+  /** Percent of the context window used, 0 to 100. Only where the harness stated the window. */
   context?: number;
+  /**
+   * The tokens in the context (input, cache creation and cache read of the newest request). Drawn in
+   * place of {@link context} when that is absent, because no window was stated (components/model-tag.tsx).
+   */
+  contextTokens?: number;
   limits?: UsageLimit[];
   /**
    * The session's running cost in US dollars. Claude Code reports it through the wrapped status line;

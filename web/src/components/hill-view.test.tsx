@@ -4,7 +4,7 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 
 import { HILL_IDLE } from "@/hooks/use-hill-answer";
 import { ARM_DWELL_MS, ARM_MS } from "@/lib/arm";
-import { sortOpenDecisions, type HillDecision } from "@/lib/hill/wire";
+import { HILL_ANSWERED_IN_SESSION, sortOpenDecisions, type HillDecision } from "@/lib/hill/wire";
 import { withHeaderHost } from "@/test/header-host";
 import { HILL_T0, hillDecision, trickDecision } from "@/test/hill-fixtures";
 
@@ -98,6 +98,29 @@ describe("the Hill", () => {
     expect(lines).toEqual(["Answered · Yes, Edge first · typed to collie lead", "Expired"]);
   });
 
+  it("draws a card closed by the person's message in the session with its title, its summary and that line, not Withdrawn", () => {
+    const spoken = hillDecision({ title: "Ship it?", summary: "CI is green.", state: "withdrawn", closedReason: HILL_ANSWERED_IN_SESSION });
+    const taken = hillDecision({ title: "Post now?", summary: "Draft ready.", state: "withdrawn", closedReason: "by the poster" });
+    const { container } = renderView([], [spoken, taken]);
+    const rows = [...container.querySelectorAll<HTMLElement>('[data-slot="hill-closed-row"]')];
+    expect(rows.map((row) => row.querySelector('[data-slot="hill-closed-line"]')?.textContent)).toEqual(["You wrote in the session", "Withdrawn by the poster"]);
+    expect(rows[0]).toHaveTextContent("Ship it?");
+    expect(rows[0]!.querySelector('[data-slot="hill-closed-summary"]')).toHaveTextContent("CI is green.");
+    // Any other closed row keeps its title and line only.
+    expect(rows[1]!.querySelector('[data-slot="hill-closed-summary"]')).toBeNull();
+  });
+
+  it("says an answer may not have arrived only when its typed line was not confirmed", () => {
+    const answer = { rid: "r1", intent: "yes", label: "Yes", text: null, by: "phone", at: HILL_T0, trick: "none" } as const;
+    const lost = hillDecision({ state: "answered", answer: { ...answer, delivery: "unknown", unconfirmed: true } });
+    const inbox = hillDecision({ state: "answered", answer: { ...answer, delivery: "unknown" } });
+    const typed = hillDecision({ state: "answered", answer: { ...answer, delivery: "typed" } });
+    const held = hillDecision({ state: "answered", answer: { ...answer, delivery: "held" } });
+    const { container } = renderView([], [lost, inbox, typed, held]);
+    const lines = [...container.querySelectorAll('[data-slot="hill-closed-row"]')].map((row) => row.querySelector('[data-slot="hill-closed-unconfirmed"]')?.textContent ?? null);
+    expect(lines).toEqual(["Your answer may not have arrived. Check the session.", null, null, null]);
+  });
+
   it("puts a glyph for each closed state in front of its row, named by what it means", () => {
     const states = ["dismissed", "expired", "withdrawn", "superseded", "undeliverable"] as const;
     const { container } = renderView([], states.map((state) => hillDecision({ state })));
@@ -129,6 +152,32 @@ describe("the Hill", () => {
     const row = container.querySelector('[data-slot="hill-closed-row"]')!;
     expect(row).toHaveTextContent("Could not be delivered");
     expect(row.querySelector('[data-slot="decision-kept"]')).toHaveTextContent("Call it workshop-hc.");
+  });
+
+  it("keeps the words of a card that left the Hill on a row of their own, with its title and Copy (M96 spec 10)", () => {
+    const open = hillDecision({ title: "Still open" });
+    const served = hillDecision({ state: "expired", title: "Served" });
+    const kept = new Map([
+      ["dc_gone00000001", "my note"],
+      [served.id, "on its row"],
+      [open.id, "never twice"],
+    ]);
+    const { container } = render(
+      <HillView open={[open]} closed={[served]} kept={kept} keptTitles={new Map([["dc_gone00000001", "Ship it?"]])} renderCard={(d) => <DecisionCard key={d.id} decision={d} answer={HILL_IDLE} onSend={() => {}} />} />,
+    );
+    fireEvent.click(container.querySelector('[data-slot="hill-answered"] button[aria-expanded]')!);
+    const rows = [...container.querySelectorAll('[data-slot="hill-kept-row"]')];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent("Ship it?");
+    expect(rows[0]!.querySelector('[data-slot="decision-kept"]')).toHaveTextContent("Your answer, not delivered");
+    expect(rows[0]!.querySelector('[data-slot="decision-kept"]')).toHaveTextContent("my note");
+    expect(container.querySelector('[data-slot="hill-closed-row"] [data-slot="decision-kept"]')).toHaveTextContent("on its row");
+  });
+
+  it("shows Answered for kept words alone, when nothing closed is served", () => {
+    const { container } = renderView([], [], new Map([["dc_gone00000001", "my note"]]));
+    expect(container.querySelector('[data-slot="hill-answered"]')).not.toBeNull();
+    expect(container.querySelector('[data-slot="hill-kept-row"]')).toHaveTextContent("my note");
   });
 });
 

@@ -5,7 +5,7 @@
 // The cards wear the machine tints of a two-machine crew (lodge and workshop), as `LiveDecisionCard`
 // would hand them on one.
 //
-// Cards are numbered 1 to 64.
+// Cards are numbered 1 to 73.
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
@@ -16,6 +16,7 @@ import { DashboardTabBar } from "@/components/dashboard-tab-bar";
 import { HillCrewStateBar } from "@/components/hill-crew-state";
 import { HillHeader, HillOff, HillView } from "@/components/hill-view";
 import { HillSwitchCard } from "@/components/hill-switch-card";
+import { ChatApprovalCard } from "@/components/session-trick-card";
 import { TrickDashboardStrip } from "@/components/trick-place-items";
 import { HILL_IDLE, type HillAnswerState } from "@/hooks/use-hill-answer";
 import type { HillCrewState, HillDecision, HillReceipt } from "@/lib/hill/wire";
@@ -59,9 +60,14 @@ import {
   twoOptions,
   unattended,
   later,
+  proposalFromInit,
   proposalGroup,
+  proposalNeedsSettings,
+  proposalNotesChanged,
   rightsMoved,
   versionGroup,
+  chatProposal,
+  chatVersion,
   versionPlain,
   versionRights,
   versionRules,
@@ -92,6 +98,7 @@ const GROUP_MIDDLE = proposalGroup();
 const GROUP_UNOPENED = proposalGroup();
 const GROUP_OPENED = proposalGroup();
 const GROUP_LISTED = proposalGroup();
+const GROUP_CHAT = proposalGroup();
 
 /** The trick icon per trick id, as the tricks list would say it. */
 const TRICK_ICON: ReadonlyMap<string, string> = new Map([["look", "eye"]]);
@@ -160,6 +167,25 @@ function PagedCard({ decision, to }: { decision: HillDecision; to: number }) {
     <div ref={root}>
       <OneCard decision={decision} />
     </div>
+  );
+}
+
+/**
+ * A trick proposal as the session's chat draws it (session-trick-card.tsx): last in a phone-high thread that
+ * scrolls as one, never a box of its own. `open` taps "Read the code" once mounted, as a person does.
+ */
+function ChatCard({ decision, open = false }: { decision: HillDecision; open?: boolean }) {
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (open) root.current?.querySelector<HTMLButtonElement>('[data-slot="chat-approval-code-toggle"]')?.click();
+  }, [open]);
+  return (
+    <Phone height={640}>
+      <div ref={root} className="h-full overflow-y-auto px-3 py-4">
+        <p className="font-content mb-3 text-sm text-foreground">I wrote the trick and proposed it. Read it and switch it on when it looks right.</p>
+        <ChatApprovalCard decision={decision} answer={HILL_IDLE} onSend={noSend} onLater={noSend} mediaSource={playgroundMedia} />
+      </div>
+    </Phone>
   );
 }
 
@@ -369,12 +395,12 @@ function HillOffPhone() {
   );
 }
 
-/** The row in Settings → Alerts, in a 390px column, with a switch that flips in place. */
-function SwitchRow({ initial }: { initial: boolean }) {
+/** The row in Settings → Experiments, in a 390px column, with a switch that flips in place. `waiting`: open Decisions (any arms the first tap off). */
+function SwitchRow({ initial, waiting = 0 }: { initial: boolean; waiting?: number }) {
   const [on, setOn] = useState(initial);
   return (
     <div className="w-[390px] max-w-full bg-background p-4">
-      <HillSwitchCard on={on} disabled={false} onToggle={setOn} />
+      <HillSwitchCard on={on} disabled={false} waiting={waiting} onToggle={setOn} />
     </div>
   );
 }
@@ -436,10 +462,10 @@ const undeliverableId = closedRows.find((row) => row.state === "undeliverable")?
 const withImagesAndBody: HillDecision = { ...threeImages, body: "The new header keeps the count line in every state." };
 
 // ── The chosen look, on the option's own data (2026-11-10) ───────────────────────────────────────────
-// The owner picked B1, C1 and A5 from the "Hill look" section. These screens mount the REAL components
-// on that section's fixtures (`../hill-look/fixtures.ts`, cases a to d), so a shot of an option and a
+// The owner picked B1, C1 and A5 from the "Hill look" round (removed once built). These screens mount the
+// REAL components on that round's fixtures (`../hill-look/fixtures.ts`, cases a to d), so a shot of an option and a
 // shot of the build compare one to one: `?case=<case>&match=<B1|C1|A5>#hill` draws one over the whole
-// screen, as the look section's `solo` does.
+// screen.
 
 type MatchId = "B1" | "C1" | "A5";
 const MATCHES: readonly MatchId[] = ["B1", "C1", "A5"];
@@ -581,7 +607,7 @@ function MatchGroup() {
   const [caseId, setCaseId] = useState<CaseId>(isCaseId(asked) ? asked : "busy");
   return (
     <>
-      <div className="sticky top-0 z-40 -mx-4 bg-background/95 px-4 py-2 backdrop-blur-sm">
+      <div className="sticky top-[var(--pg-top,0px)] z-20 -mx-4 bg-background/95 px-4 py-2 backdrop-blur-sm lg:top-0">
         <Segmented name="Case" value={caseId} options={CASES} onChange={setCaseId} />
       </div>
       <Group title="The chosen look, on the option's data">
@@ -891,12 +917,16 @@ export function HillSection() {
 
       <Group title="The switch">
         <Card state="hill-switch-on" label="43: Settings row, on">
-          <CardHead n={43} title="Settings → Alerts: the Hill on" />
+          <CardHead n={43} title="Settings → Experiments: the Hill on" />
           <SwitchRow initial />
         </Card>
         <Card state="hill-switch-off" label="44: Settings row, off">
-          <CardHead n={44} title="Settings → Alerts: the Hill off" />
+          <CardHead n={44} title="Settings → Experiments: the Hill off (the default)" />
           <SwitchRow initial={false} />
+        </Card>
+        <Card state="hill-switch-armed" label="67: Settings row, 3 waiting">
+          <CardHead n={67} title="3 waiting: tap the switch once, it arms; tap again inside four seconds, it goes off" />
+          <SwitchRow initial waiting={3} />
         </Card>
         <Card state="hill-off" label="45: the Hill, switched off">
           <CardHead n={45} title="The Hill switched off: no Hill item in the bar" />
@@ -959,9 +989,36 @@ export function HillSection() {
           <CardHead n={57} title="A proposed new version on 2 cards" />
           <OneCard decision={versionGroup} />
         </Card>
+        <Card state="hill-group-init" label="68: a proposal init made, helper and notes named">
+          <CardHead n={68} title="Collie's helper and notes are named on card 1, shown on no card" />
+          <OneCard decision={proposalFromInit} />
+        </Card>
+        <Card state="hill-group-notes-changed" label="69: the notes changed, only the change shown">
+          <CardHead n={69} title="Notes changed from Collie's: card 2 shows only the change" />
+          <PagedCard decision={proposalNotesChanged} to={2} />
+        </Card>
+        <Card state="hill-group-needs-settings" label="70: a trick that needs its settings file">
+          <CardHead n={70} title="Its config.toml stays behind: card 1 says it may show nothing" />
+          <OneCard decision={proposalNeedsSettings} />
+        </Card>
         <Card state="hill-rights-moved" label="66: a trick stopped because its rights changed">
           <CardHead n={66} title="A trick changed its rights: Collie's card, OK alone" />
           <OneCard decision={rightsMoved} />
+        </Card>
+      </Group>
+
+      <Group title="In the session's chat">
+        <Card state="hill-chat-proposal" label="71: a proposal in its session's chat">
+          <CardHead n={71} title="A trick a session proposed, in that chat: one card, the code in a fold" />
+          <ChatCard decision={chatProposal} />
+        </Card>
+        <Card state="hill-chat-version" label="72: a proposed new version in its session's chat">
+          <CardHead n={72} title="A new version in the chat: what changed, Use the new version" />
+          <ChatCard decision={chatVersion} />
+        </Card>
+        <Card state="hill-chat-group" label="73: a proposal on 3 cards in the chat, the code open">
+          <CardHead n={73} title="A proposal on 3 cards in the chat: one card, its code cards stacked in the open fold" />
+          <ChatCard decision={GROUP_CHAT} open />
         </Card>
       </Group>
 

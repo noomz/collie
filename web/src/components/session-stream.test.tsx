@@ -2,7 +2,7 @@ import { act, createEvent, fireEvent, render, screen, within } from "@testing-li
 import userEvent from "@testing-library/user-event";
 import { createRef } from "react";
 
-import { SessionStream, type QueuedCardAction } from "./session-stream";
+import { SessionStream, type QueuedCardAction, type QueuedCardResult } from "./session-stream";
 import type { ChatFeed } from "@/hooks/use-chat-window";
 import type { ChatMessageListHandle } from "@/components/ui/chat/chat-message-list";
 import { EMPTY_CHAT_WINDOW, type ChatWindow } from "@/lib/chat-window";
@@ -142,10 +142,11 @@ describe("SessionStream", () => {
   });
 
   // #508: the bridge refused to guess between two Muse sessions in one folder. The empty Chat says
-  // why and how to fix it, on a new pane too, since nothing will appear on its own.
+  // why and how to fix it, on a new pane too, since nothing will appear on its own. The remedy names
+  // no resume command: pi's `--resume` is only a picker, and its flags are `--session`/`--session-id` (#780).
   it("names a shared folder and its remedy under the empty state, and only when the bridge says so", () => {
     const line =
-      "Two Muse sessions share this folder, so Collie cannot tell which one is this pane's. Start the agent with its resume command and session id, then Collie reads the right one.";
+      "Two Muse sessions share this folder, so Collie cannot tell which one is this pane's. Start the agent with the flag that names its session id, then Collie reads the right one.";
     for (const starting of [false, true]) {
       const r = renderStream(
         feedOf({ status: { kind: "unavailable", reason: "no-session", detail: "shared-folder" } }),
@@ -454,7 +455,7 @@ describe("SessionStream", () => {
           parts: [
             exec(1, "ls"),
             exec(2, "pwd"),
-            exec(3, 'collie walky send bluefin/w6:p3 "Merged."'),
+            exec(3, 'collie walky send lodge/w6:p3 "Merged."'),
             exec(4, "git status"),
             exec(5, "git log"),
           ],
@@ -706,7 +707,7 @@ describe("SessionStream — Send now", () => {
 // Rows from Collie's own receipts: still waiting (no button at all, one sentence), or given back to the
 // input box by a Stop (Send and Discard). The journal's own queue card is the "Send now" block above.
 describe("SessionStream — queued sends from the receipts", () => {
-  function renderReceipts(window: Partial<ChatWindow>, onReturned?: (requestId: string, action: QueuedCardAction) => Promise<boolean>) {
+  function renderReceipts(window: Partial<ChatWindow>, onReturned?: (requestId: string, action: QueuedCardAction, text: string) => Promise<QueuedCardResult>) {
     const listRef = createRef<ChatMessageListHandle>();
     return render(
       <SessionStream
@@ -753,7 +754,7 @@ describe("SessionStream — queued sends from the receipts", () => {
     expect(container.querySelector("[data-slot='stream-queued-receipts']")).toBeNull();
   });
 
-  it("an unconfirmed card says Collie cannot tell, and offers Discard alone, which asks to dismiss", async () => {
+  it("an unconfirmed card says Collie cannot tell, and offers Discard and Send again, Discard asking to dismiss", async () => {
     const onReturned = vi.fn(async () => true);
     const { container } = renderReceipts({ queuedSends: [LOST] }, onReturned);
     const card = container.querySelector("[data-slot='stream-unconfirmed']")!;
@@ -762,11 +763,40 @@ describe("SessionStream — queued sends from the receipts", () => {
       "Collie cannot tell where this message went. Check the agent.",
       "where did it go",
     ]);
-    expect(card.querySelectorAll("button")).toHaveLength(1);
+    // Discard first, Send again on its right, as on the "cannot tell" card.
+    expect([...card.querySelectorAll("button")].map((button) => button.textContent)).toEqual(["Discard", "Send again"]);
     const discard = screen.getByRole("button", { name: "Discard this card. Nothing is sent to the agent." });
     expect(discard).toHaveTextContent("Discard");
     await userEvent.click(discard);
-    expect(onReturned).toHaveBeenCalledWith("req-lost-00001", "dismiss");
+    expect(onReturned).toHaveBeenCalledWith("req-lost-00001", "dismiss", "where did it go");
+  });
+
+  it("cannot tell: an unconfirmed card's Send again hands the row's id and its own text over, once, and waits while it runs", async () => {
+    let finish: (done: QueuedCardResult) => void = () => undefined;
+    const onReturned = vi.fn(() => new Promise<QueuedCardResult>((resolve) => (finish = resolve)));
+    renderReceipts({ queuedSends: [LOST] }, onReturned);
+    const again = screen.getByRole("button", { name: "Send again" });
+    await userEvent.click(again);
+    expect(onReturned).toHaveBeenCalledWith("req-lost-00001", "sendAgain", "where did it go");
+    expect(again).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Discard this card. Nothing is sent to the agent." })).toBeDisabled();
+    await userEvent.click(again);
+    expect(onReturned).toHaveBeenCalledTimes(1);
+    await act(async () => finish(true));
+  });
+
+  it("cannot tell: a Send again that finds the card gone says nothing was sent again, and the buttons come back", async () => {
+    const onReturned = vi.fn(async (): Promise<QueuedCardResult> => "gone");
+    renderReceipts({ queuedSends: [LOST] }, onReturned);
+    await userEvent.click(screen.getByRole("button", { name: "Send again" }));
+    expect(await screen.findByText("This message is not waiting any more, so nothing was sent again.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send again" })).toBeEnabled();
+  });
+
+  it("cannot tell: a card whose text the bridge masked offers no Send again, because the dots are not the message", () => {
+    renderReceipts({ queuedSends: [{ requestId: "req-mask-00001", state: "unconfirmed", text: "use the key sk-o••••••••" }] }, vi.fn(async () => true));
+    expect(screen.getByRole("button", { name: "Discard this card. Nothing is sent to the agent." })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send again" })).toBeNull();
   });
 
   it("a merged card says the agent's log shows it merged or changed, and offers Discard alone, which asks to dismiss (ADR 0141)", async () => {
@@ -784,7 +814,7 @@ describe("SessionStream — queued sends from the receipts", () => {
     const discard = screen.getByRole("button", { name: "Discard this card. Nothing is sent to the agent." });
     expect(discard).toHaveTextContent("Discard");
     await userEvent.click(discard);
-    expect(onReturned).toHaveBeenCalledWith("req-merge-0001", "dismiss");
+    expect(onReturned).toHaveBeenCalledWith("req-merge-0001", "dismiss", "fold me in");
   });
 
   it("the Stop line follows the door: pi keeps take-back, opencode says it runs anyway, hermes gets none (SPEC V37)", () => {
@@ -818,7 +848,7 @@ describe("SessionStream — queued sends from the receipts", () => {
     expect(card.querySelectorAll("button")).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "Send this message from the agent's box" })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Discard this card. Nothing is sent to the agent." }));
-    expect(onReturned).toHaveBeenCalledWith("req-back-00001", "dismiss");
+    expect(onReturned).toHaveBeenCalledWith("req-back-00001", "dismiss", "second message");
   });
 
   it("a pi returned card is still back in the box, with Send and Discard (SPEC V37)", () => {
@@ -855,7 +885,7 @@ describe("SessionStream — queued sends from the receipts", () => {
     const send = screen.getByRole("button", { name: "Send this message from the agent's box" });
     const discard = screen.getByRole("button", { name: "Discard this message from the agent's box" });
     await userEvent.click(send);
-    expect(onReturned).toHaveBeenCalledWith("req-back-00001", "submit");
+    expect(onReturned).toHaveBeenCalledWith("req-back-00001", "submit", "second message");
     expect(send).toBeDisabled();
     expect(discard).toBeDisabled();
     await userEvent.click(discard);
@@ -864,7 +894,7 @@ describe("SessionStream — queued sends from the receipts", () => {
     await act(async () => finish(false));
     expect(send).not.toBeDisabled();
     await userEvent.click(discard);
-    expect(onReturned).toHaveBeenLastCalledWith("req-back-00001", "discard");
+    expect(onReturned).toHaveBeenLastCalledWith("req-back-00001", "discard", "second message");
   });
 
   it("draws nothing on a window that is not live", () => {

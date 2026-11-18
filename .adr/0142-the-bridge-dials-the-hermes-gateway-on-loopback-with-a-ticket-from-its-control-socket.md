@@ -2,7 +2,6 @@
 
 - **Status:** Proposed (2026-11-12), not built; for the maintainer to accept or turn down
 - **Date:** 2026-11-12, after the arena's leg C against Hermes v0.23.0 Ink and its gateway daemon
-- **Shipped in:** pending
 - **Trail:** spawning Hermes's own `ui-tui/scripts/gateway_bootstrap.py` to do the peer check ·
   reading the listener's uid through Bun FFI (`SO_PEERCRED` / `LOCAL_PEERCRED`) · one connection held
   open for every send · `client.capabilities {server_requests: true}` · a Hermes plugin calling

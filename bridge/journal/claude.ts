@@ -46,6 +46,8 @@ import {
   type RowReducer,
 } from "./reduce.ts";
 import { asRecord, asText, probeTail, tokenCount } from "./cache-probe.ts";
+import { newestOf, stringField } from "./name-probe.ts";
+import type { NameReading } from "../session-title.ts";
 import { choicesBeforeFirstTurn, claudeResets, effortChosenAfter, lastTwoTurns, modelChoiceAfter } from "./claude-resets.ts";
 // The shared guard on what an image block may become. It lives in pi's adapter because it also
 // resolves pi's `blob:sha256:` refs against pi's own store, and `bridge/server.ts` reaches for it
@@ -58,7 +60,8 @@ import {
   head,
   loadTail,
   readSinceFile,
-  rootList,
+  rootReader,
+  type RootSource,
   statFile,
   tailBytes,
 } from "./files.ts";
@@ -569,7 +572,10 @@ const MAX_QUEUED_CHARS = 200;
  * FOUR OPERATIONS, and the row shapes are measured over 19,000-odd `queue-operation` rows in the 570
  * newest sessions here (2026-10-08):
  *
- *   `enqueue`  `content` — the message. Every row carries one.
+ *   `enqueue`  `content` — the message. Every row carried one until 2026-11-14: a message queued
+ *              while a compaction runs is an `enqueue` with NO `content` (2.1.323, two of 209 rows in
+ *              one session). It takes its place like any other, with no words; {@link
+ *              QueueTracker.unnamed} counts it so the window can name it from Collie's receipt.
  *   `dequeue`  NO `content` at all. It says one came off, never which.
  *   `remove`   `content` and a `reason`: `absorbed_mid_turn`, `delivered_to_agent` or, once,
  *              `agent_stopped`. All mean it left the queue. 560 rows from older Claude Code carry
@@ -588,7 +594,8 @@ const MAX_QUEUED_CHARS = 200;
  *
  *  1. A `remove`, matched in three steps: the exact content; then the same {@link readQueueEntry} `id`,
  *     which survives Claude Code rewriting an envelope's attributes; then, for plumbing only, the
- *     OLDEST place of the same kind. The last step never takes the operator's words, and a `remove`
+ *     OLDEST place of the same kind. The operator's words that match nothing take the oldest place
+ *     with no words, when there is one (an `enqueue` with no content cannot be matched any other way). The last step never takes the operator's words, and a `remove`
  *     of the operator's words that matches nothing leaves the queue alone (the window opened after
  *     its enqueue, which is ordinary).
  *  2. THE DELIVERY ITSELF. Every message that leaves the queue shows up again as a row: a
@@ -611,12 +618,16 @@ interface QueueTracker {
   readonly delivered: (content: string) => void;
   /** A SNAPSHOT, so a later `push` cannot change what a caller is holding. */
   readonly queued: () => readonly string[];
+  /** How many places came from an `enqueue` with no content: a message waits, its words are not in the log. */
+  readonly unnamed: () => number;
 }
 
 /** One place in the queue: a {@link QueueEntry} and the raw key an exact `remove` names it by. */
 interface QueueSlot extends QueueEntry {
   /** The raw `content`, bounded so a huge envelope costs little. */
   readonly raw: string;
+  /** The `enqueue` carried no content: a place with no words (a message queued during a compaction). */
+  readonly blind: boolean;
 }
 
 /**
@@ -674,7 +685,7 @@ function createQueueTracker(): QueueTracker {
       const content = row.content;
       if (op === "enqueue") {
         const text = typeof content === "string" ? content : "";
-        queue.push({ ...readQueueEntry(text), raw: slotKey(text) });
+        queue.push({ ...readQueueEntry(text), raw: slotKey(text), blind: typeof content !== "string" });
         if (queue.length > QUEUE_SLOTS_MAX) queue.shift();
       } else if (op === "dequeue") {
         depart(queue.shift());
@@ -682,7 +693,16 @@ function createQueueTracker(): QueueTracker {
         // A `remove` with no content (older Claude Code) names nothing; its delivery row settles it.
         if (typeof content !== "string") return;
         const at = removeAt(content);
-        if (at !== -1) depart(queue.splice(at, 1)[0]);
+        if (at !== -1) {
+          depart(queue.splice(at, 1)[0]);
+          return;
+        }
+        // The operator's words that match no place: when a place with no words waits, it is that one
+        // (its enqueue named nothing to match), so it goes and never sits at the head for the next
+        // `dequeue` to take instead of the message really at the front. Plumbing never takes it.
+        if (readQueueEntry(content).kind !== null) return;
+        const blind = queue.findIndex((slot) => slot.blind);
+        if (blind !== -1) depart(queue.splice(blind, 1)[0]);
       } else if (op === "popAll") {
         queue = [];
         departed = [];
@@ -702,6 +722,7 @@ function createQueueTracker(): QueueTracker {
       if (at !== -1) queue.splice(at, 1);
     },
     queued: () => queue.flatMap((slot) => (slot.text === null ? [] : [slot.text])).slice(-QUEUE_MAX),
+    unnamed: () => queue.filter((slot) => slot.blind).length,
   };
 }
 
@@ -1020,7 +1041,7 @@ export function createClaudeReducer(opts: { includeSidechains?: boolean } = {}):
     return reduction(entries, changed);
   }
 
-  return { push, unknowns: unknown.tally, queued: queue.queued };
+  return { push, unknowns: unknown.tally, queued: queue.queued, unnamedQueued: queue.unnamed };
 }
 
 /**
@@ -1121,10 +1142,15 @@ export class ClaudeTranscriptSource implements TranscriptSource {
    */
   private readonly handOvers = new Map<string, { size: number; mtimeMs: number; next: string | null }>();
 
-  private readonly roots: string[];
+  private readonly rootsNow: () => string[];
 
-  constructor(roots: string | readonly string[]) {
-    this.roots = rootList(roots);
+  /** The roots now: fixed, or the live list an added account joins (M101). */
+  private get roots(): string[] {
+    return this.rootsNow();
+  }
+
+  constructor(roots: RootSource) {
+    this.rootsNow = rootReader(roots);
   }
 
   async resolve(ref: AgentSessionRef): Promise<string | null> {
@@ -1386,7 +1412,7 @@ export class ClaudeTranscriptSource implements TranscriptSource {
  * `roots` is one projects directory or several (one per `CLAUDE_CONFIG_DIR` profile), searched in
  * order.
  */
-export function claudeJournal(roots: string | readonly string[]): JournalAdapter {
+export function claudeJournal(roots: RootSource): JournalAdapter {
   const source = new ClaudeTranscriptSource(roots);
   return {
     agent: "claude",
@@ -1395,6 +1421,7 @@ export function claudeJournal(roots: string | readonly string[]): JournalAdapter
     reducer: () => createClaudeReducer(),
     cacheProbe: (ref) => claudeCacheProbe(source, ref),
     choiceProbe: (ref) => claudeChoiceProbe(source, ref),
+    nameProbe: (ref) => claudeNameProbe(source, ref),
     // Proven 2026-10-07 on a throwaway pane under Herdr 0.9.3: with two messages queued behind a
     // running tool, `ctrl+Enter` through `POST /api/pane/:id/keys` made Claude Code write a `remove`
     // row for BOTH (`absorbed_mid_turn`) and the "ctrl+enter to send now" hint went away. NOT on tmux
@@ -1469,6 +1496,35 @@ async function claudeChoiceProbe(source: ClaudeTranscriptSource, ref: AgentSessi
   }
   if (effort !== undefined) choices.effort = effort;
   return choices;
+}
+
+/**
+ * What Claude Code's log calls the session (JournalAdapter.nameProbe), off the cache probe's 128 KB tail.
+ *
+ * Three bookkeeping rows carry a name, and Claude Code writes them again every few turns, so the tail
+ * holds the newest of each (measured 2026-11-13 on 2.1.3xx: one set per turn in a 1,050-row log).
+ * `custom-title` (`customTitle`) is the `/rename` name and `agent-name` (`agentName`) repeats it: both are
+ * the person's. `ai-title` (`aiTitle`) is the title Claude Code wrote itself. An empty string clears
+ * one. A tail with neither row says nothing, and the tracker keeps the last name it knew.
+ */
+async function claudeNameProbe(source: ClaudeTranscriptSource, ref: AgentSessionRef): Promise<NameReading | null> {
+  const tail = await probeTail(source, ref);
+  if (tail === null) return null;
+  return claudeNamesOf(tail.lines);
+}
+
+/** The names in a window of Claude Code rows, newest wins (see {@link claudeNameProbe}). Pure. */
+export function claudeNamesOf(lines: readonly string[]): NameReading {
+  const reading: NameReading = {};
+  const person = newestOf(lines, (row) => {
+    if (row.type === "custom-title") return stringField(row, "customTitle");
+    if (row.type === "agent-name") return stringField(row, "agentName");
+    return undefined;
+  });
+  if (person !== undefined) reading.person = person.trim() === "" ? null : person;
+  const agent = newestOf(lines, (row) => (row.type === "ai-title" ? stringField(row, "aiTitle") : undefined));
+  if (agent !== undefined) reading.agent = agent.trim() === "" ? null : agent;
+  return reading;
 }
 
 /**

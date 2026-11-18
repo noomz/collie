@@ -402,6 +402,9 @@ export interface GeneralAction {
   /** Set for a control that toggles a mode — it becomes `aria-pressed`. */
   pressed?: boolean;
   disabled?: boolean;
+  /** Dimmed with `aria-disabled`, the tap kept (M102 spec 11): the handler says why it cannot act. A native
+   *  `disabled` takes the tap and says nothing. */
+  inert?: boolean;
   onSelect: () => void;
 }
 
@@ -530,6 +533,8 @@ export interface ActionsRowProps {
      *  Not `disabled`: a disabled button takes no `mousedown`, so a tap on it would blur the field
      *  and drop the keyboard. */
     inert?: boolean;
+    /** The words for a tap on the inert X (M102 spec 11): it says why it did nothing. */
+    onInert?: () => void;
   };
   /**
    * THE AGENTS MARK (Altan, from the lane, 2026-10-19: "it should be subtle and show up next to files
@@ -621,7 +626,31 @@ export function ActionsRow({ general, agent, mine, onRun, disabled, durable, sto
   // tied to `handle` alone.
   // The tricks' marks are not here: they scroll in the strip (see the marks prop), so they neither count
   // as pinned nor widen the block.
-  const pinnedCount = (agents ? 1 : 0) + (jobs ? 1 : 0) + (pins ? 1 : 0) + (clear ? 1 : 0) + (changes ? 1 : 0) + (zoom ? 1 : 0) + (handle ? 1 : 0);
+  // THE X LEAVES BY OPACITY AND KEEPS ITS ROOM (M104): when the box empties (a send at the tap, a delete), the X fades
+  // where it stands and its slot keeps its width until the next key press, so nothing beside it slides. That key
+  // press either brings the X back (a new character) or lets the slot close as it always did.
+  const clearMode = clear === undefined ? null : clear.mode;
+  const [seenClearMode, setSeenClearMode] = useState(clearMode);
+  const [ghostClear, setGhostClear] = useState<"clear" | "undo" | null>(null);
+  if (seenClearMode !== clearMode) {
+    setSeenClearMode(clearMode);
+    setGhostClear(clearMode === null ? seenClearMode : null);
+  }
+  useEffect(() => {
+    if (ghostClear === null) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // After the key's own input has landed, so a new character finds the X back in its slot.
+    const release = () => {
+      if (timer === null) timer = setTimeout(() => setGhostClear(null), 0);
+    };
+    document.addEventListener("keydown", release, true);
+    return () => {
+      document.removeEventListener("keydown", release, true);
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [ghostClear]);
+  const clearSlot = clear !== undefined || ghostClear !== null;
+  const pinnedCount = (agents ? 1 : 0) + (jobs ? 1 : 0) + (pins ? 1 : 0) + (clearSlot ? 1 : 0) + (changes ? 1 : 0) + (zoom ? 1 : 0) + (handle ? 1 : 0);
   const pinned = pinnedCount > 0;
   const switchBlock = useSwitchBlockWidth(pinned);
   const switchInset = switchBlock.width ?? switchPillInset(beltScale, pinnedCount);
@@ -775,11 +804,12 @@ export function ActionsRow({ general, agent, mine, onRun, disabled, durable, sto
                     variant="ghost"
                     size="sm"
                     disabled={action.disabled}
+                    aria-disabled={action.inert === true ? true : undefined}
                     aria-label={action.label}
                     aria-expanded={action.expanded}
                     aria-pressed={action.pressed}
                     onClick={action.onSelect}
-                    className={cn(`${STRIP_ROW_PILL} gap-1.5`, action.on === true ? ON : OFF, left && "[direction:ltr]")}
+                    className={cn(`${STRIP_ROW_PILL} gap-1.5`, action.on === true ? ON : OFF, action.inert === true && "opacity-50", left && "[direction:ltr]")}
                   >
                     <Icon name={action.icon} className={BELT_ICON} />
                     {action.word ?? action.label}
@@ -923,27 +953,34 @@ export function ActionsRow({ general, agent, mine, onRun, disabled, durable, sto
                 The Collapse's `open` is PRESENCE only, so a swap between X and Undo is a new child
                 inside an open box and runs no transition. `appear`, because this block mounts only
                 once something is pinned, and the X may be what brings it. */}
-            <Collapse axis="x" appear open={clear !== undefined} className="-mr-1.5">
-              {clear && (
-                <span className="flex items-center pr-1.5">
+            <Collapse axis="x" appear open={clearSlot} className="-mr-1.5">
+              {clearSlot && (
+                <span
+                  data-belt-clear-slot={clear === undefined ? "held" : undefined}
+                  aria-hidden={clear === undefined ? true : undefined}
+                  inert={clear === undefined}
+                  className={cn("flex items-center pr-1.5 transition-opacity duration-150 motion-reduce:transition-none", clear === undefined && "pointer-events-none opacity-0")}
+                >
                   <Button
                     type="button"
                     variant="ghost"
                     size="sm"
                     data-belt-clear=""
-                    aria-label={clear.label}
-                    aria-disabled={clear.inert === true ? true : undefined}
+                    aria-label={clear?.label}
+                    aria-disabled={clear?.inert === true ? true : undefined}
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => {
-                      if (clear.inert !== true) clear.onClick();
+                      if (clear === undefined) return;
+                      if (clear.inert === true) clear.onInert?.();
+                      else clear.onClick();
                     }}
                     className={cn(
                       `${STRIP_ROW_PILL} ${PINNED_PILL}`,
                       pinnedReach(true, !agents && !jobs && !pins && !changes && !zoom && !handle, hand),
-                      clear.inert === true && "opacity-50",
+                      clear?.inert === true && "opacity-50",
                     )}
                   >
-                    {clear.mode === "undo" ? (
+                    {(clear?.mode ?? ghostClear) === "undo" ? (
                       <Icon name="undo" className={cn(BELT_ICON, "text-primary")} />
                     ) : (
                       <Icon name="clear" className={cn(BELT_ICON, "text-primary")} />

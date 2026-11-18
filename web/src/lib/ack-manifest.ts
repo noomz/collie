@@ -92,6 +92,10 @@ export const ACK_MANIFEST = {
     channel: "inline",
     why: "The pane owner's Drop on a held walky talky message (M62 spec 03): the row's receipt turns to `dropped by the pane's owner` on the next read and the held mark goes; an `already typed` answer and a failed call land as a line under the row.",
   },
+  deliverWalky: {
+    channel: "inline",
+    why: "The pane owner's Deliver now on a message held for their draft (M99 spec 05): the button spins while the call runs, a delivery shows the note \"Message delivered. Your text stays here.\" over the box and the row's receipt reads delivered with the text kept; a refusal lands as a line on the mark or under the row, because the message still waits; a message that no longer waited at the tap (the bridge's 410) is no refusal, so one neutral line says so over the box or under the row and the list is read again.",
+  },
   setWalkyOff: {
     channel: "inline",
     why: "The walky talky switch in a pane's Messages sheet (M89 spec 04): the switch itself is the receipt, it holds the new place while the call runs and the pane row's flag then confirms it; a failed call puts the switch back and lands as a line under it, because the operator asked for something that did not happen.",
@@ -103,6 +107,10 @@ export const ACK_MANIFEST = {
   setHillSwitch: {
     channel: "inline",
     why: "The Hill's switch in Settings and on the Hill's own off state (M96): the switch itself is the receipt, it holds the new place while the call runs and the snapshot's `hillOff` then confirms it; a failed call puts the switch back and lands as a line under it, because the operator asked for something that did not happen.",
+  },
+  setTricksSwitch: {
+    channel: "inline",
+    why: "The switch for tricks as a whole, at the top of Settings, Tricks: the switch itself is the receipt, it holds the new place while the call runs and the snapshot's `tricksOff` then confirms it; a failed call puts the switch back and lands as a line under it, because the operator asked for something that did not happen.",
   },
   setHillCrewState: {
     channel: "inline",
@@ -123,6 +131,10 @@ export const ACK_MANIFEST = {
   cancelHeldSend: {
     channel: "silent",
     why: "Cancel or Dismiss on a held send's queued row (M56 spec 15): the row leaving the composer IS the receipt, so a success says nothing more; a Cancel that came too late, and a failed call, land as a status line.",
+  },
+  postArrived: {
+    channel: "silent",
+    why: "The person's \"It arrived\" on a send that ended unknown (M102 spec 01): the row taking the person's word beside its outcome IS the receipt, so a success says nothing more; the \"cannot tell\" card leaving and the belt's \"Undo clear\" appearing are what the person sees (M102 spec 04); a failed mark keeps the card and says so in the card's own line, `Collie could not record that. Try again, or clear the draft yourself.`",
   },
   postAskAnswer: {
     channel: "echo",
@@ -244,9 +256,21 @@ export const ACK_MANIFEST = {
     channel: "silent",
     why: "The new label replaces the old one in the row being edited once the bridge answers; a refusal publishes an error status through lib/mutate.ts and the row keeps its old label.",
   },
+  addAccount: {
+    channel: "inline",
+    why: "The new account appears in the list the person is looking at, so the list is the acceptance. A refusal names a field (a name taken, a folder the bridge cannot use) or a full list, and the person must still read it while they fix the form, so it sits in the add form or the name sheet itself and not on the status line (M101).",
+  },
+  removeAccount: {
+    channel: "silent",
+    why: "The account leaves the list under the thumb once the bridge answers; a refusal publishes an error status through lib/mutate.ts and the list is read again (M101).",
+  },
   starFolder: {
     channel: "silent",
     why: "The row moves between Favourites and Recent and its star fills or empties under the thumb, both on the page the operator is looking at, once the bridge answers with the new list; a refusal publishes an error status through lib/mutate.ts and the list is read again (lib/folders.ts).",
+  },
+  setWorktreeFolder: {
+    channel: "inline",
+    why: "The Worktree folder card shows the saved folder once the machine answers, and a refusal names the rule the folder broke. The person is typing that folder, so the sentence sits in the editor beside the field and not on a status line that fades (ADR 0093 note).",
   },
   createWorktreeAt: {
     channel: "status",
@@ -255,6 +279,10 @@ export const ACK_MANIFEST = {
   setSnooze: {
     channel: "echo",
     why: "The spinner in the card is the acceptance and the revalidated description line under the title is the outcome, both inside the control the thumb is still on.",
+  },
+  clearNotifications: {
+    channel: "inline",
+    why: "Settings mounts no floating status, and what it clears is not on the page (banners in the system tray, finished dots on the dashboard), so the card's own line says Clearing, Cleared, which half of this device's clear was refused, or why the bridge refused, and keeps saying it until the next tap (components/clear-notifications-control.tsx).",
   },
   setNotifyPrefs: {
     channel: "echo",
@@ -376,6 +404,10 @@ export const ACK_MANIFEST = {
     channel: "echo",
     why: "The trick's take-changes-without-asking switch flips on the spot and holds that position until the bridge's list agrees (components/tricks-settings-card.tsx); a refused or lost post puts it back and says so in the status line, because the reason is about that one trick.",
   },
+  setTrickValue: {
+    channel: "inline",
+    why: "A trick's setting (components/trick-settings-group.tsx) holds the value saved on its own row until the bridge's list agrees; a refused or lost post puts the old value back and says why under that row, because the reason is about that one field.",
+  },
   undoTrick: {
     channel: "silent",
     why: "Undo under a trick that took a change without asking (components/tricks-settings-card.tsx): the line itself goes once the bridge's list shows the earlier version, so the row is the receipt; a refused or lost post says so in the status line, because the reason is about that one trick.",
@@ -383,6 +415,14 @@ export const ACK_MANIFEST = {
   addOfficialTrick: {
     channel: "echo",
     why: "Add (or Update) on an official row in Settings → Tricks swaps its word for Collie's spinner on the spot and stays busy until the trick shows among the installed ones, off (components/tricks-settings-card.tsx); a refused or lost post says why in the status line (offline, a code mismatch, another add running), because the reason is about that one trick.",
+  },
+  listRepoTricks: {
+    channel: "inline",
+    why: "Read on the repository sheet (components/tricks-repo-sheet.tsx) swaps its word for Collie's spinner and the repository's list appears under the field, which is the receipt (it carries the request id and the commit read); a refused or lost read says why in the sheet's own alert line under the field, because the reason is about that link.",
+  },
+  addRepoTrick: {
+    channel: "inline",
+    why: "Add on one row of the repository sheet (components/tricks-repo-sheet.tsx) turns its word into the spinner and then into Added on that row, and the post carries a request id so a retry of the same tap writes once; a refused or lost add says why on that row, because the reason is about that one trick.",
   },
   tapTrick: {
     channel: "echo",

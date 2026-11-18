@@ -8,7 +8,7 @@
 // mounts the REAL components at 390 px over a store of its own, so a tap shows the busy state and the
 // receipt with no bridge.
 //
-// DEV-ONLY, unreachable from the app entry: see ../app.tsx and web/playground.html.
+// DEV-ONLY, unreachable from the app entry: see ../app.tsx and web/design.html.
 
 import { useEffect, useMemo, useRef, type ReactNode } from "react";
 
@@ -171,7 +171,7 @@ function Belt({ marks, toEnd = false }: { marks: readonly WireTrickPart[]; toEnd
   );
 }
 
-const USAGE = { context: 42, limits: [{ window: "5h" as const, used: 58 }, { window: "7d" as const, used: 81 }] };
+const USAGE = { context: 42, limits: [{ window: "5h", used: 58 }, { window: "7d", used: 81 }] };
 const LEGS_PANE_FOR_STATUS = trickPane("legs", LEGS_SESSION, { paneLabel: "Browser leg" });
 
 /** The usage row over a stand-in mirror, with the tricks' items after Collie's own. `width` is the mirror box's; `own` false leaves Collie's items out. */
@@ -304,7 +304,7 @@ export function TrickPlacesSection(): ReactNode {
             <TrickSpaceSection sessions={[LEGS_RED]} onOpen={IGNORE} />
           </Glass>
         </Card>
-        <Card state="trick-space-switch" label="10 · Switch session rows">
+        <Card state="trick-space-switch" label="10 · Switch space rows">
           <Glass>
             <TrickSessionRow pane={LEGS_PANE} variant="switch" active onOpen={IGNORE} />
             <TrickSessionRow pane={TRACKER_PANE} variant="switch" onOpen={IGNORE} />

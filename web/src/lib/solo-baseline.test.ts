@@ -75,6 +75,11 @@ const SNAPSHOT_KEYS = {
   trickViewsRev: true,
   // Not a crew dimension: the Hill's switch, present only while it is off, so no solo byte moved.
   hillOff: true,
+  // Not a crew dimension: the switch for tricks as a whole, present only while it is off, so no solo byte moved.
+  tricksOff: true,
+  // Not a crew dimension: with the Hill off, the hill's revision while it holds a card of Collie's own
+  // about a trick (M96 spec 14), absent otherwise, so no solo byte moved.
+  trickCardsRev: true,
 } satisfies Record<keyof SnapshotResponse, true>;
 
 const SESSION_SUMMARY_KEYS = {
@@ -178,6 +183,8 @@ const AGENT_VIEW_KEYS = {
   sendProtocol: true,
   // Not a crew dimension: whether a send may steer the pane's turn (M69). Rides with `sendProtocol` only.
   canSteer: true,
+  // Not a crew dimension: the ask route's mark (M102 spec 14). Rides with `sendProtocol` only.
+  askRoute: true,
   // Not a crew dimension: the pane's held sends (M56 spec 15), present only while a send waits for the turn to end.
   held: true,
   // Not a crew dimension: whether a Stop (M68) has a key to press on this pane. It rides with `surface` only,
@@ -189,12 +196,18 @@ const AGENT_VIEW_KEYS = {
   usage: true,
   // A session turned its walky talky off (M89). Present only while it is off, so a solo golden body carries no such key.
   walkyOff: true,
+  // The session is linked (M99 spec 15). Present only while a part of the pane declares what a send needs, so a solo golden body carries no such key.
+  linked: true,
   // How many pins the pane's session holds (M90). Present only above zero, so a solo golden body carries no such key.
   pins: true,
   // A trick session's part key (M94 slice 03). Present only on a pane of `kind: "trick"`, so a solo golden body carries no such key.
   view: true,
   // Whether the space's label is a name of its own (M98). Present only when the adapter's word differs from the default, so a solo golden body carries no such key.
   workspaceNamed: true,
+  // Not a crew dimension: the title the agent gave its session, from its journal (2026-11-13). Present only when the harness wrote one, so a solo golden body carries no such key.
+  agentTitle: true,
+  // The added account the session runs under (M101). Present only for an ADDED account, so a solo golden body carries no such key.
+  account: true,
 } satisfies Record<keyof AgentView, true>;
 
 const DEVICE_AUTH_KEYS = {
@@ -269,7 +282,9 @@ describe("solo zero-tax — the client's mirror types carry no crew dimension", 
       "sessions",
       "shellPanes",
       "tabs",
+      "trickCardsRev",
       "trickViewsRev",
+      "tricksOff",
       "tricksRev",
       "ts",
       "update",
@@ -298,8 +313,11 @@ describe("solo zero-tax — the client's mirror types carry no crew dimension", 
     // the golden object above pins — and this list is the tripwire against a quiet third.
     expect(AGENT_VIEW_KEYS.session).toBe(true);
     expect(Object.keys(AGENT_VIEW_KEYS).toSorted()).toEqual([
+      "account",
       "actions",
       "agent",
+      "agentTitle",
+      "askRoute",
       "asks",
       "badge",
       "cache",
@@ -320,6 +338,7 @@ describe("solo zero-tax — the client's mirror types carry no crew dimension", 
       "kind",
       "lastActiveAt",
       "lastSeenAt",
+      "linked",
       "model",
       "paneId",
       "paneLabel",

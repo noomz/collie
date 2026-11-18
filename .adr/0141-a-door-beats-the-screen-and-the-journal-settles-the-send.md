@@ -3,7 +3,6 @@
 - **Status:** Proposed (2026-11-10), not built; for the maintainer to accept or turn down
 - **Date:** 2026-11-10, after a throwaway PoC of pi 1.4.0 + `pi-sidebar-tui` 1.7.8, Hermes v0.23.0
   Ink, Herdr 0.9.5 and tmux 3.8 against a logging fake model
-- **Shipped in:** pending
 - **Trail:** the blind road, `herdr agent prompt` (herdr `src/app/api/agents.rs`) and the three phone
   relays resting on it, named in [ADR 0140](./0140-a-screen-collie-cannot-read-is-sent-to-by-the-probe-on-any-layout.md)
   · a Hermes plugin calling `ctx.inject_message`, proposed in the same arena and measured to fail

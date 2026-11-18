@@ -3,9 +3,10 @@ import { DECISION_VIEW_LIMITS, DIFF_LIMITS, TABLE_LIMITS, VIEW_LIMITS, type View
 import { looksBinary } from "../changes.ts";
 import { MANIFEST_FILE } from "./paths.ts";
 import { HELPER_FILE, shippedHelperVersion } from "./scan.ts";
+import { NOTES_FILE, NOTES_VERSION, shippedNotesTexts, shippedNotesVersion } from "./agents-notes.ts";
 import type { ProposedFile } from "./propose-wire.ts";
 import { bytesOf, cellPath, checked, countCell } from "./version-card.ts";
-import { readViewLine, VIEW_GAP_MAX, type ChangedFile, type VersionDiff } from "./version-diff.ts";
+import { noLineChange, readViewLine, VIEW_GAP_MAX, type ChangedFile, type VersionDiff, type ViewLineRead } from "./version-diff.ts";
 
 // A GROUP OF CARDS (crew slice 8): the code of a trick that does not fit one card, shown whole on up to
 // seven more. Card 1 is Collie's facts (proposal-card.ts, version-card.ts); this module lays out cards 2
@@ -37,23 +38,155 @@ import { readViewLine, VIEW_GAP_MAX, type ChangedFile, type VersionDiff } from "
 // The group caps live in web/src/lib/tricks/limits.ts, which the tricks catalogue reads too.
 export { GROUP_CARD_CODE_BYTES, GROUP_CODE_BYTES, GROUP_CODE_CARDS, GROUP_FILES_MAX };
 
-/** Card 1's words for Collie's own helper, in the Card column and below the file count. */
-export function helperCell(version: number): string {
-  return `Collie's helper v${String(version)}`;
-}
-export function helperNote(version: number): string {
-  return `${HELPER_FILE} is the helper Collie ships (v${String(version)}), byte for byte, so no card shows it.`;
+/**
+ * A file Collie ships, byte for byte: the helper `trick.ts`, or the notes `AGENTS.md` that `collie trick
+ * init` writes (the first full trick run, 2026-11-16, decision 10), with the version shipped.
+ */
+export interface ShippedFile {
+  what: "helper" | "notes";
+  version: number;
 }
 
-/** The files of a proposal that are a helper this Collie ships, by path, with the helper's version. */
-export function shippedHelpers(files: readonly Pick<ProposedFile, "rel" | "bytes">[]): Map<string, number> {
-  const out = new Map<string, number>();
+const SHIPPED_FILES = { helper: HELPER_FILE, notes: NOTES_FILE } as const satisfies Record<ShippedFile["what"], string>;
+
+/** Card 1's words for a file Collie ships, in the Card column and below the file count. */
+export function helperCell({ what, version }: ShippedFile): string {
+  return `Collie's ${what} v${String(version)}`;
+}
+export function helperNote({ what, version }: ShippedFile): string {
+  return `${SHIPPED_FILES[what]} is the ${what} Collie ships (v${String(version)}), byte for byte, so no card shows it.`;
+}
+/** Card 1's words for notes changed from the ones Collie ships: the cards show only the change. */
+export function notesChangedNote(): string {
+  return `${NOTES_FILE} shows only how it differs from the notes Collie ships (v${String(NOTES_VERSION)}).`;
+}
+
+const decode = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
+
+/**
+ * The files of a proposal that Collie ships byte for byte, by path: the helper with its version, and the
+ * notes `init` writes for the trick `id` (any form, draft or not).
+ */
+export function shippedHelpers(files: readonly Pick<ProposedFile, "rel" | "bytes">[], id?: string): Map<string, ShippedFile> {
+  const out = new Map<string, ShippedFile>();
   for (const file of files) {
-    if (file.rel !== HELPER_FILE) continue;
-    const version = shippedHelperVersion(new TextDecoder().decode(file.bytes));
-    if (version !== null) out.set(file.rel, version);
+    if (file.rel === HELPER_FILE) {
+      const version = shippedHelperVersion(decode(file.bytes));
+      if (version !== null) out.set(file.rel, { what: "helper", version });
+    }
+    // Any version a Collie shipped, named as that version (an older draft keeps being named, not shown).
+    const notes = file.rel === NOTES_FILE && id !== undefined ? shippedNotesVersion(id, decode(file.bytes)) : null;
+    if (notes !== null) out.set(file.rel, { what: "notes", version: notes });
   }
   return out;
+}
+
+/** Each text's lines, without the last empty one a final newline leaves. */
+function linesOf(text: string): string[] {
+  const lines = text.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
+/** The edit script of two line lists (longest common subsequence): " ", "-" or "+" and the line. */
+function editScript(old: readonly string[], now: readonly string[]): [" " | "-" | "+", string][] {
+  const n = old.length;
+  const m = now.length;
+  // keep[i][j]: the longest common run of old[i..] and now[j..].
+  const keep = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i -= 1) {
+    for (let j = m - 1; j >= 0; j -= 1) keep[i]![j] = old[i] === now[j] ? keep[i + 1]![j + 1]! + 1 : Math.max(keep[i + 1]![j]!, keep[i]![j + 1]!);
+  }
+  const out: [" " | "-" | "+", string][] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && old[i] === now[j]) {
+      out.push([" ", old[i]!]);
+      i += 1;
+      j += 1;
+    } else if (j < m && (i === n || keep[i]![j + 1]! >= keep[i + 1]![j]!)) {
+      out.push(["+", now[j]!]);
+      j += 1;
+    } else {
+      out.push(["-", old[i]!]);
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * Notes with more than this many times the shipped text's lines are no edit of it: they show whole, and
+ * the diff's (n+1) x (m+1) table is never built for them.
+ */
+export const NOTES_DIFF_LINES_FACTOR = 4;
+
+/** Lines of context around a change in {@link shippedNotesDiff}. */
+const NOTES_CONTEXT = 2;
+
+/**
+ * Notes changed from the ones Collie ships, as a diff against the closest shipped text: hunks with
+ * {@link NOTES_CONTEXT} lines around each change, masked as the diff masks. Null when they are not the
+ * notes (`rel`), when they are not text, or when the diff would be longer than the file shown whole.
+ */
+export function shippedNotesDiff(file: Pick<ProposedFile, "rel" | "bytes">, id: string): ChangedFile | null {
+  if (file.rel !== NOTES_FILE || looksBinary(file.bytes)) return null;
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(file.bytes);
+  } catch {
+    return null;
+  }
+  const now = linesOf(text);
+  const shippedTexts = shippedNotesTexts(id).map(linesOf);
+  if (now.length > NOTES_DIFF_LINES_FACTOR * Math.max(...shippedTexts.map((lines) => lines.length))) return null;
+  let best: [" " | "-" | "+", string][] | null = null;
+  let bestCost = Number.POSITIVE_INFINITY;
+  for (const shipped of shippedTexts) {
+    const script = editScript(shipped, now);
+    const cost = script.filter(([op]) => op !== " ").length;
+    if (cost < bestCost) [best, bestCost] = [script, cost];
+  }
+  if (best === null || bestCost === 0 || bestCost >= now.length) return null;
+  const script = best;
+  // The rows to show: each change with its context, ranges that touch merged into one hunk.
+  const ranges: [number, number][] = [];
+  script.forEach(([op], at) => {
+    if (op === " ") return;
+    const from = Math.max(0, at - NOTES_CONTEXT);
+    const to = Math.min(script.length, at + NOTES_CONTEXT + 1);
+    const last = ranges.at(-1);
+    if (last !== undefined && from <= last[1]) last[1] = Math.max(last[1], to);
+    else ranges.push([from, to]);
+  });
+  const hunk: string[] = [];
+  for (const [from, to] of ranges) {
+    const before = script.slice(0, from);
+    const rows = script.slice(from, to);
+    const start = (skip: " " | "-" | "+"): number => before.filter(([op]) => op !== skip).length + 1;
+    const count = (skip: " " | "-" | "+"): string => String(rows.filter(([op]) => op !== skip).length);
+    hunk.push(`@@ -${String(start("+"))},${count("+")} +${String(start("-"))},${count("-")} @@`, ...rows.map(([op, line]) => `${op}${readViewLine(line).line}`));
+  }
+  const plus = best.filter(([op]) => op === "+").length;
+  const minus = best.filter(([op]) => op === "-").length;
+  const changed: ChangedFile = { rel: file.rel, change: "changed", plus, minus, hunk };
+  // Held to the rule of any code (A5): a line of the notes the mask changes (a key, a hidden character as `?`)
+  // marks the file cut, so a proposal is refused as it is for code. Every line of the notes counts: a line the
+  // diff leaves out is a line of the shipped notes, which reads as it is anyway.
+  markRead(changed, now.map((line) => readViewLine(line)));
+  return changed;
+}
+
+/** Mark a file whose lines the mask changed (`cut`, `masked`, `strayCr`) or that holds a wide gap, as the diff does. */
+function markRead(file: ChangedFile, read: readonly ViewLineRead[]): void {
+  const masked = read.filter((line) => line.masked);
+  if (masked.length > 0) {
+    file.cut = true;
+    file.masked = masked.length;
+  }
+  if (masked.length > 0 && masked.every((line) => line.strayCr)) file.strayCr = true;
+  if (read.some((line) => line.gap)) file.gap = true;
 }
 
 /** The words at a file's seam between two cards. */
@@ -116,15 +249,11 @@ export function addedFile(file: Pick<ProposedFile, "rel" | "bytes">): ChangedFil
   const lines = text.split("\n");
   if (lines.at(-1) === "") lines.pop();
   const read = lines.map((line) => readViewLine(line));
+  // An empty file has no line: one says so, so its card has code to show (2026-11-17).
+  if (read.length === 0) return { rel: file.rel, change: "added", plus: 0, minus: 0, hunk: [noLineChange(file.rel, "added")] };
   const hunk = [`@@ -0,0 +1,${String(read.length)} @@`, ...read.map((line) => `+${line.line}`)];
   const changed: ChangedFile = { rel: file.rel, change: "added", plus: read.length, minus: 0, hunk };
-  const masked = read.filter((line) => line.masked);
-  if (masked.length > 0) {
-    changed.cut = true;
-    changed.masked = masked.length;
-  }
-  if (masked.length > 0 && masked.every((line) => line.strayCr)) changed.strayCr = true;
-  if (read.some((line) => line.gap)) changed.gap = true;
+  markRead(changed, read);
   return changed;
 }
 
@@ -248,7 +377,7 @@ export function sizeWords(bytes: number): string {
 }
 
 /** The file tables of card 1: File, a size or change column or two, and Card; 12 rows a table. */
-export function placesTables(rows: readonly { rel: string; cells: readonly string[] }[], heads: readonly string[], places: GroupPlaces, helpers: ReadonlyMap<string, number> = new Map()): ViewNode[] {
+export function placesTables(rows: readonly { rel: string; cells: readonly string[] }[], heads: readonly string[], places: GroupPlaces, helpers: ReadonlyMap<string, ShippedFile> = new Map()): ViewNode[] {
   const tables: ViewNode[] = [];
   for (let at = 0; at < rows.length; at += TABLE_LIMITS.rows.max) {
     const kids: ViewNode[] = [{ kind: "col", text: "File" }, ...heads.map((head): ViewNode => ({ kind: "col", text: head })), { kind: "col", text: "Card" }];
@@ -290,14 +419,15 @@ export interface GroupRefusal {
  * "refuse" for a proposal (a masked line is not the code as it is), "show" for a version the person
  * made by hand, whose cards then say so. `helpers`: the files that are Collie's own helper, left off.
  */
-export function codeGroup(files: readonly ChangedFile[], run: string | null, masked: "refuse" | "show", helpers: ReadonlyMap<string, number> = new Map(), lead: readonly string[] = []): ({ ok: true } & Extract<GroupCode, { ok: true }>) | ({ ok: false } & GroupRefusal) {
+export function codeGroup(files: readonly ChangedFile[], run: string | null, masked: "refuse" | "show", helpers: ReadonlyMap<string, ShippedFile> = new Map(), lead: readonly string[] = []): ({ ok: true } & Extract<GroupCode, { ok: true }>) | ({ ok: false } & GroupRefusal) {
   if (files.length > GROUP_FILES_MAX) return { ok: false, code: "too_large", error: GROUP_TOO_LARGE };
   // Collie's own helper is named on card 1, never laid out.
   const ordered = groupOrder(files, run, lead).filter((file) => !helpers.has(file.rel));
   const read: GroupFile[] = [];
   for (const file of ordered) {
     const one = groupFile(file);
-    if (one === null) return { ok: false, code: "cannot_show", error: GROUP_NOT_TEXT };
+    // A text file too large for git to count is too large, not a file that is no text (A5).
+    if (one === null) return file.big === true ? { ok: false, code: "too_large", error: GROUP_TOO_LARGE } : { ok: false, code: "cannot_show", error: GROUP_NOT_TEXT };
     read.push(one);
   }
   // Too large first: a cut git output is far past the capacity, and is no masked line.

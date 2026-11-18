@@ -56,6 +56,33 @@ function claimedByADialog(lines: StyledLine[]): boolean {
   );
 }
 
+/** Claude Code 2.1.325's sign-in field, `/login` and the first run, empty, typed and pasted (fixtures README). */
+const SIGN_IN = [
+  "claude--v2325-login-console-url--w61.txt",
+  "claude--v2325-login-console-url-pasted--w61.txt",
+  "claude--v2325-login-url--w61.txt",
+  // `/login` opened inside a running conversation, in a wide pane (2026-11-16): transcript rows above the panel.
+  "claude--v2325-login-url-in-session--w220.txt",
+  "claude--v2325-login-url-typed--w120.txt",
+  "claude--v2325-login-url-typed--w61.txt",
+  // The first run (an empty config folder): the same field with no rule, no title and no footer,
+  // a long text wrapped under its label (profiles/claude.json, `secret.wrap`).
+  "claude--v2325-first-run-console-url--w61.txt",
+  "claude--v2325-first-run-url--w120.txt",
+  "claude--v2325-first-run-url--w40.txt",
+  "claude--v2325-first-run-url--w61.txt",
+  // A bridge-made account folder in fullscreen mode: a hint row between the address and the field.
+  "claude--v2325-first-run-url-fullscreen--w120.txt",
+  "claude--v2325-first-run-url-fullscreen--w200.txt",
+  "claude--v2325-first-run-url-fullscreen--w219.txt",
+  "claude--v2325-first-run-url-fullscreen--w61.txt",
+  "claude--v2325-first-run-url-fullscreen--w80.txt",
+  "claude--v2325-first-run-url-pasted--w120.txt",
+  "claude--v2325-first-run-url-pasted--w61.txt",
+  "claude--v2325-first-run-url-typed--w40.txt",
+  "claude--v2325-first-run-url-typed--w61.txt",
+];
+
 describe("parity with the old walk on the real corpus", () => {
   // Measured against the walk this replaced, on every Claude capture: the same 17 screens have a box,
   // the rest are refused. The one addition is the hand-built clipped-popup screen, the bug itself.
@@ -129,6 +156,9 @@ describe("parity with the old walk on the real corpus", () => {
     "claude--v2301-lab-agents-panel-more.txt",
     "claude--v2301-lab-agents-panel-tasks-pill.txt",
     "claude--v2301-lab-agents-panel-focused.txt",
+    "claude--v2322-macos-agents-panel-idle--w80.txt",
+    "claude--v2322-macos-agents-panel-focused--w80.txt",
+    "claude--v2322-macos-agents-panel-working--w80.txt",
     "claude--v2301-idle.txt",
     "claude--v2301-done-shell-running--w100.txt",
     "claude--v2301-idle-after-turn--w100.txt",
@@ -195,8 +225,23 @@ describe("parity with the old walk on the real corpus", () => {
     "claude--v2310-auth-refresh-before-output-spinner--w52.txt",
     "claude--v2310-auth-refresh-output-spinner--w52.txt",
     "claude--v2310-auth-refresh-output-spinner-timer--w52.txt",
+    // Remote Control on, 2.1.319: the lone `/rc` row is the last statusline row, and the box stands.
+    "claude--v2319-rc-footer-idle--w100.txt",
+    // Claude Code 2.1.323 with Remote Control on (lab 2026-11-13): the pill `/rc active` right-aligned on the mode
+    // row or on a row of its own, and the box stands. Also the same idle box with Remote Control off, and the
+    // whole slash list under the box, as on the herdr-core capture of 2.1.314.
+    "claude--v2323-rc-off-idle--w100.txt",
+    "claude--v2323-rc-on-draft--w100.txt",
+    "claude--v2323-rc-on-idle-joined--w100.txt",
+    "claude--v2323-rc-on-idle-notice--w100.txt",
+    "claude--v2323-rc-on-idle-usage--w100.txt",
+    "claude--v2323-rc-on-running--w100.txt",
+    "claude--v2323-rc-on-slash-list--w100.txt",
     "claude--working-esc-to-interrupt.txt",
     "claude--working.txt",
+    // Claude Code 2.1.325 `/login` (2026-11-15): the sign-in field is a box of its own layout
+    // (profiles/claude.json, `secret`), from the panel's rule to the end of the screen.
+    ...SIGN_IN,
   ]);
 
   it.each(CLAUDE_FIXTURES)("%s", (name) => {
@@ -437,15 +482,18 @@ describe("invariant: rows appended below a box never change the box or its draft
   const POINTER_TAILS = {
     "claude--footer-pointed-agent.txt": true,
     "claude--v2301-lab-agents-panel-focused.txt": true,
+    "claude--v2322-macos-agents-panel-focused--w80.txt": true,
     "claude--v2302-slash-model-list--w119.txt": true,
     "claude--v2302-slash-effort-list--w120--h40.txt": true,
     "claude--v2302-slash-model-list--w120--h40.txt": true,
     "claude--v2302-slash-model-list-padded--w120--h36.txt": true,
     // 2.1.314's whole slash list on herdr-core (M78 spec 04): `  ❯ /add-dir` stands in the tail.
     "claude--v21314-core-slash-list--w120.txt": true,
+    // 2.1.323's whole slash list with Remote Control on, the same shape.
+    "claude--v2323-rc-on-slash-list--w100.txt": true,
   } satisfies Record<string, true>;
 
-  it.each(BOX_FIXTURES.filter((name) => !Object.hasOwn(POINTER_TAILS, name)))("%s", (name) => {
+  it.each(BOX_FIXTURES.filter((name) => !Object.hasOwn(POINTER_TAILS, name) && !SIGN_IN.includes(name)))("%s", (name) => {
     const base = textRows(load(name));
     const draft = extractInputDraft(fromTexts(base));
     for (const n of [1, 3, 8, 9, 20]) {
@@ -453,6 +501,15 @@ describe("invariant: rows appended below a box never change the box or its draft
       expect(hasInputBox(lines), `${n} rows`).toBe(true);
       expect(extractInputDraft(lines), `${n} rows`).toBe(draft);
     }
+  });
+
+  // The other class, also by design: the sign-in field runs to the end of the screen, since Claude draws
+  // nothing under its `Esc to cancel` (`/login`) or its field (the first run). A row under it is not that
+  // screen, and no box is the safe read.
+  it.each(SIGN_IN)("%s: a row under the sign-in field leaves no box", (name) => {
+    const base = textRows(load(name));
+    expect(hasInputBox(fromTexts(base))).toBe(true);
+    for (const n of [1, 3, 8]) expect(hasInputBox(fromTexts([...base, ...neutral(n)])), `${n} rows`).toBe(false);
   });
 
   it("the pointed-footer tail holds inside the footer bound, and refuses past it", () => {

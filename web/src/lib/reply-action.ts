@@ -46,6 +46,13 @@ export interface ReplyArgs {
    * view's key for typed text, plus the screen's rev and the control for a tap. The bridge builds the line.
    */
   readonly view?: SendRequestBody["view"];
+  /** The text goes into a sign-in field (the Surface's `field: "secret"`): the bridge keeps no line of it. */
+  readonly secret?: boolean;
+  /**
+   * The person's commit tap on a screen Collie could not read (M102 spec 01): true on that commit and no other.
+   * The bridge refuses it on a sign-in field's send, so a secret send never carries it.
+   */
+  readonly override?: boolean;
 }
 
 export type ReplyOutcome =
@@ -89,14 +96,19 @@ export async function sendText(args: ReplyArgs): Promise<ReplyOutcome> {
   const mode = args.mode ?? modeFor(args.text);
   const rowsHash = args.rowsHash ?? null;
   const capAck = args.capAck === true;
+  const override = args.override === true && rowsHash !== null && args.secret !== true;
   // The extra confirm is its own intent: it must not replay the commit the cap refused.
   const resendOf = args.resendOf;
   const viewKey = args.view === undefined ? "" : JSON.stringify(args.view);
-  const intent = requestIdFor(args.held, `${mode}\u0000${rowsHash ?? ""}\u0000${capAck ? "cap" : ""}\u0000${resendOf ?? ""}\u0000${args.when ?? ""}\u0000${viewKey}\u0000${args.text}`, args.mint ?? mintRequestId);
+  // A sign-in code never enters the intent's key: the composer keeps a code's lost intent in memory for the next tap,
+  // and the code itself is kept nowhere but its field. The composer drops that intent whenever the field's text
+  // changes, so the text is bound there, not here (the M102 review 2, D).
+  const textKey = args.secret === true ? "\u0001secret" : args.text;
+  const intent = requestIdFor(args.held, `${mode}\u0000${rowsHash ?? ""}\u0000${capAck ? "cap" : ""}\u0000${override ? "override" : ""}\u0000${resendOf ?? ""}\u0000${args.when ?? ""}\u0000${viewKey}\u0000${textKey}`, args.mint ?? mintRequestId);
   const body: SendRequestBody = args.view === undefined ? { id: intent.requestId, pane: args.paneId, text: args.text, mode } : { id: intent.requestId, pane: args.paneId, text: args.text, mode, view: args.view };
   try {
-    const reply = await postSend({ ...body, rowsHash: rowsHash ?? undefined, capAck: capAck ? true : undefined, resendOf, when: args.when }, args.scope);
-    return { status: "answered", reply, reading: readSend(reply), requestId: intent.requestId };
+    const reply = await postSend({ ...body, rowsHash: rowsHash ?? undefined, capAck: capAck ? true : undefined, resendOf, when: args.when, secret: args.secret === true ? true : undefined, override: override ? true : undefined }, args.scope);
+    return { status: "answered", reply, reading: readSend(reply, mode), requestId: intent.requestId };
   } catch (e) {
     // A view send the bridge refused before the Send Protocol answers 409 with `{ error, code, view: true }`.
     // It is an answer, not a lost one: never retried under the same id.

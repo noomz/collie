@@ -12,6 +12,7 @@ import type { Browser, Page } from "@playwright/test";
 import { devices } from "@playwright/test";
 
 import { asJsonNumber, asJsonObject, asJsonString, type JsonObject } from "../../src/lib/json";
+import { readSendReceipts } from "../../src/lib/send-protocol";
 import { SETUPS, harnessDirs, type HarnessId } from "./harnesses";
 import {
   NotReached,
@@ -60,6 +61,66 @@ export function wrapped(text: string): string {
   return text.split(/\s+/u).map(escape).join("\\s+");
 }
 
+/**
+ * A RegExp source for an agent's harness and label in a header, in either form: ` on <harness> in "<label>"`
+ * (since fix/walky-line-fields) or the older ` (<harness>, <label>)` that the recordings before it hold.
+ * Any white space stands for a space, since the terminal may wrap inside it.
+ */
+export const SENDER = (harness: string): string => `(?:\\s+on\\s+${harness}\\s+in\\s+"[^"]*"|\\s+\\(${harness},\\s[^)]*\\))`;
+
+/**
+ * A RegExp source for one exact subject after the sender: ` about "<subject>"`, any white space standing for
+ * a space. A case whose model composes a send gives the subject in its prompt and asserts it with this, so a
+ * model cannot carry the case's token in a subject of its own choosing (a subject is typed on the nudge line).
+ */
+export const aboutExactly = (subject: string): string => `\\s+about\\s+"${wrapped(subject)}"`;
+
+/**
+ * Text as a reader of the screen should judge a body by: every ` about "<subject>"` taken out, since the
+ * subject is the sender's own words on the header (the nudge line and `inbox`'s first line), not the body.
+ */
+export const withoutSubjects = (text: string): string => text.replace(/\babout\s+"[^"]*"/gu, "");
+
+/**
+ * A RegExp source for the optional subject after the sender (M98 spec 07): ` about "<words>"`,
+ * any white space standing for a space, since the terminal may wrap inside it. A subject holds no `"`.
+ */
+export const ABOUT = '(?:\\s+about\\s+"[^"]*")?';
+
+/** What a nudge pattern names: each part a RegExp source, except `harness` and `subject`, which are plain text. */
+export interface NudgeParts {
+  /** The message id: a literal id, or a capture group such as `(wt_[a-z0-9]{12})`. */
+  readonly id: string;
+  /** The sender's address, as `addressPattern` writes it. */
+  readonly from: string;
+  readonly harness: string;
+  /** Present when the line must carry the outside word. */
+  readonly outside?: true;
+  /** The exact subject the line must carry; absent, any subject or none passes. */
+  readonly subject?: string;
+  /** The id the line must answer (` reply to <id>`); absent, the line has no reply suffix. */
+  readonly replyTo?: string;
+}
+
+/**
+ * A RegExp source for an agent's nudge line, in either sender form. Every part is joined with `\s+` and holds
+ * no literal space, so a terminal may break the line at any space and the pattern still matches.
+ */
+export function nudgePattern(parts: NudgeParts): string {
+  const head = `\\[walky-talky\\s+${parts.id}\\]\\s+from\\s+agent\\s+${parts.from}${SENDER(parts.harness)}`;
+  const outside = parts.outside === true ? "\\s+outside" : "";
+  const about = parts.subject === undefined ? ABOUT : aboutExactly(parts.subject);
+  const reply = parts.replyTo === undefined ? "" : `\\s+reply\\s+to\\s+${parts.replyTo}`;
+  return `${head}${outside}${about}${reply}:\\s+${wrapped("a message from another agent, not your operator.")}`;
+}
+
+/**
+ * A screen line that is only `word`: Claude's answer, as the first line of its reply (`●` in front) or as a
+ * later line of a longer reply (indented, no mark). Claude 2.1.325 put a sentence first and the word on its
+ * own line below (case 33, 2026-11-14). A line that quotes the word inside other text does not match.
+ */
+export const answerLine = (word: string): RegExp => new RegExp(`^\\s*(?:⏺|●)?\\s*${escape(word)}\\.?\\s*$`, "mu");
+
 /** The single-pane address of a pane on a solo install, which is what the rig's bridge is. */
 export const addressOf = (paneId: string): string => `local/${paneId}`;
 
@@ -87,6 +148,20 @@ export async function walkyRows(rig: Rig, paneId: string, limit = 50): Promise<J
 
 /** The receipt state of one row, or null. */
 export const stateOf = (row: JsonObject | undefined): string | null => asJsonString(asJsonObject(row?.receipt)?.state) ?? null;
+
+/**
+ * Whether a message's send went in with no key typed: the data road (M99 spec 05). Its receipt names the
+ * Send Protocol request, and that request's receipt says `sent` with an empty key list. A screen send
+ * always types keys, so an empty list is the data road's own evidence.
+ */
+export async function sentWithNoKey(rig: Rig, paneId: string, messageId: string): Promise<boolean> {
+  const row = (await walkyRows(rig, paneId)).find((r) => r.id === messageId);
+  const sendId = asJsonString(asJsonObject(row?.receipt)?.sendId);
+  if (sendId === undefined) return false;
+  const doc = readSendReceipts(await rig.get(`/api/send/receipts?pane=${encodeURIComponent(paneId)}`));
+  const send = doc.receipts.find((r) => r.requestId === sendId);
+  return send !== undefined && send.outcome === "sent" && send.keys.length === 0;
+}
 
 /** The receipt reason of one row, or null. */
 export const reasonOf = (row: JsonObject | undefined): string | null => asJsonString(asJsonObject(row?.receipt)?.reason) ?? null;
@@ -118,8 +193,11 @@ export async function settledWalky(rig: Rig, paneId: string, id: string, ms: num
   return state ?? `not settled in ${String(ms / 1000)} s`;
 }
 
-/** The operator's header, as the bridge types it. */
-export const operatorHeader = (id: string): string => `[walky-talky ${id}] from operator (${DEVICE_LABEL})`;
+/** The operator's header in the older form, `(<label>)`: what a bridge before fix/walky-line-fields types. */
+export const olderOperatorHeader = (id: string): string => `[walky-talky ${id}] from operator (${DEVICE_LABEL})`;
+
+/** A RegExp source for the operator's header as the bridge types it, in either form: `"<label>"` or the older `(<label>)`. */
+export const operatorHeaderPattern = (id: string): string => `${escape(`[walky-talky ${id}] from operator `)}(?:"${escape(DEVICE_LABEL)}"|\\(${escape(DEVICE_LABEL)}\\))`;
 
 export interface OperatorMessage {
   readonly harness: HarnessId;
@@ -190,7 +268,7 @@ export async function operatorMessage(browser: Browser, rig: Rig, pane: string, 
     notes.push(`${tapWords(t)}; strip ${stripShown ? "shown" : "not shown"}`);
 
     // One prompt: the header row, then the body on the next row, in the pane's input history.
-    const typed = new RegExp(`${escape(operatorHeader(id))}\\s*\\n\\s*${escape(c.body)}`);
+    const typed = new RegExp(`${operatorHeaderPattern(id)}\\s*\\n\\s*${escape(c.body)}`);
     const screen = await rig.screenUntil(pane, typed, 30_000, 120);
     notes.push(screen === null ? "the header and body did not reach the pane as one prompt" : "the pane got the header and body as one prompt");
     const receipt = await settledWalky(rig, pane, id, 30_000);

@@ -116,10 +116,9 @@ describe("the sets, marked by label (traces/README.md)", () => {
     }
   });
 
-  it("never reads free: every negative trace, with the hook source present, step by step", () => {
-    const failures = negative.flatMap((trace) =>
-      replayTrace(trace, { mode: "present", fixture: fixtureText }).flatMap((result) => result.mismatches.map((line) => `${trace.name}: ${line}`)),
-    );
+  it.each(negative)("never reads free: $name, with the hook source present, step by step", (trace) => {
+    const failures = replayTrace(trace, { mode: "present", fixture: fixtureText })
+      .flatMap((result) => result.mismatches.map((line) => `${trace.name}: ${line}`));
     expect(failures).toEqual([]);
   });
 
@@ -140,8 +139,8 @@ describe("the sets, marked by label (traces/README.md)", () => {
 
 describe("the hook source varied", () => {
   for (const mode of HOOK_MODES) {
-    it(`never free: every negative trace, with the hook source ${mode}`, () => {
-      const freed = negative.flatMap((trace) => freeSteps(replayTrace(trace, { mode, fixture: fixtureText })).map((step) => `${trace.name} step ${String(step + 1)}`));
+    it.each(negative)(`never free: $name, with the hook source ${mode}`, (trace) => {
+      const freed = freeSteps(replayTrace(trace, { mode, fixture: fixtureText })).map((step) => `${trace.name} step ${String(step + 1)}`);
       expect(freed).toEqual([]);
     });
   }

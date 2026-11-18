@@ -14,6 +14,9 @@ import { collieBinary as collieBinaryOf, HOST, surfacePlatform } from "./host.ts
 import { ActivityLedger } from "./activity.ts";
 import { trackActivity } from "./activity-tracking.ts";
 import { CacheTracker } from "./cache/tracker.ts";
+import { ARGV_NAMED_AGENT } from "./harness-name-sources.ts";
+import { SessionTitleTracker } from "./session-titles.ts";
+import { SessionTitleStore } from "./session-titles-store.ts";
 import { CacheWarden } from "./cache/warden.ts";
 import { CacheWatchStore } from "./cache/watch.ts";
 import { MachineAlertStore } from "./machine-alerts.ts";
@@ -26,6 +29,9 @@ import { museSessionNameReader } from "./journal/muse.ts";
 import { buildJournalRegistry } from "./journal/registry.ts";
 import { createCacheRulesReader } from "./operator-cache-rules.ts";
 import { AuditLog, fileAuditAppender } from "./audit.ts";
+import { statusRunner } from "./account-identity.ts";
+import { createLoginPath } from "./login-path.ts";
+import { findTool } from "./tools.ts";
 import { beaconReader, fileEdgeSpool, fileSourceStore, hooksInstalledProbe, procBeaconLiveness, registerHookTarget, type HookTargetRegistration } from "./beacon-io.ts";
 import { withAgentBeacons } from "./beacon/decorate.ts";
 import { withAgentHints } from "./beacon/hint.ts";
@@ -43,7 +49,7 @@ import {
   privateRoot,
   type PrivateRoot,
 } from "./owner-only.ts";
-import type { AgentView, CrewMode, CrewStatusResponse, Launcher } from "./types.ts";
+import type { AgentView, CrewMode, CrewStatusResponse, Launcher, MachineRow } from "./types.ts";
 import { EventPoker } from "./event-poker.ts";
 import { durableLogDir, moveFlatLogs, sourceLogDir } from "./durable/log.ts";
 import { GitHeads, nodeGitHeadDisk } from "./git-head.ts";
@@ -82,7 +88,7 @@ import { spaceFolders } from "./space-view.ts";
 import { WorktreeReceiptStore } from "./worktree-receipts.ts";
 import { LaunchReceiptStore } from "./launch-receipts.ts";
 import { LaunchWindow, foregroundHarnessOf } from "./launch-window.ts";
-import { createPaneProfile, createPaneVersion, procProbe, sharedForegroundRead } from "./pane-binary.ts";
+import { createPaneForeground, createPaneHarness, createPaneProfile, createPaneVersion, procProbe, profileBinaries, sharedForegroundRead } from "./pane-binary.ts";
 import { StarterReceiptStore } from "./starter-launch.ts";
 import { AnswerReceiptStore } from "./durable/answer.ts";
 import { ControlReceiptStore } from "./durable/control.ts";
@@ -93,6 +99,7 @@ import { AddedLauncherStore, addedFileIo } from "./launchers-added.ts";
 import { RecentRunStore, recentRunFileIo } from "./recent-runs.ts";
 import { SentStore, sentFileIo, sentRecorder } from "./sent.ts";
 import { WorktreeChoiceStore } from "./worktree-choices.ts";
+import { WorktreeFolderSettingStore } from "./worktree-folder-setting.ts";
 import { filePairingIo, type PairedRegistry, PairingStore } from "./pairing.ts";
 import {
   LOCAL_SECRET_FILENAME,
@@ -115,6 +122,7 @@ import {
   type DeposedState,
 } from "./crew/deposed.ts";
 import { LeadContact } from "./crew/lead-contact.ts";
+import { forwardAuditDetail } from "./crew/forward.ts";
 import { deputyAnchorOf, dialTls, peerListenerTls } from "./crew/transport.ts";
 import { commitCrewChange, CREW_PROTOCOL_VERSION } from "./crew/enrollment.ts";
 import { CrewLead } from "./crew/lead.ts";
@@ -198,6 +206,7 @@ import { adoptAtBoot, carriedSeen, holdCopies, holdForTap, readAdoptMarker, writ
 import { TricksCopySync } from "./crew/carry-sync.ts";
 import { tricksStartingAtTap } from "./crew/carry-adopt.ts";
 import { answerCarried, postCarryNotices } from "./crew/carry-notices.ts";
+import { realAgentPanes } from "./tricks/panes.ts";
 import { answerRights, RightsCards } from "./tricks/rights-card.ts";
 import {
   adoptLeadership,
@@ -223,7 +232,7 @@ import { currentWarrant, discardForeignWarrant, refreshWarrant, type WarrantPush
 import { CLEAR_BURST_MS, Push } from "./push.ts";
 import { currentNotesReader } from "./release-notes.ts";
 import { pluginRoot } from "./root.ts";
-import { agentPaneFilesRoot, buildId, filesPrivateFolders, sendRoute, startServer } from "./server.ts";
+import { agentPaneFilesRoot, buildId, filesPrivateFolders, sendRoute, paneReadHint, recentRead, startServer } from "./server.ts";
 import { answerAgentPrompt } from "./agent-prompt.ts";
 import {
   DEFAULT_SESSION_NAME,
@@ -239,7 +248,12 @@ import { StateEngine } from "./state-engine.ts";
 import { SubagentTracker } from "./subagents.ts";
 import { TodoTracker } from "./todos.ts";
 import { diskUsageFiles, usageDir, UsageTracker } from "./usage.ts";
+import { UsageSeen, usageSeenIo } from "./usage-seen.ts";
 import { AccountWindows, defaultAccountSources, diskCredentialSeams, isTurnEnd } from "./account-windows.ts";
+import { realLinkDisk } from "./account-links.ts";
+import { Accounts, ownJournalRoots, seenReading } from "./accounts-routes.ts";
+import { AccountStore, accountsFileIo } from "./accounts-store.ts";
+import { createHarnessProbe } from "./harness-launch.ts";
 import {
   bridgeStampSync,
   compareSemver,
@@ -298,13 +312,28 @@ import { hermesBinder } from "./door/hermes-bind.ts";
 import { HERMES_DOOR } from "./door/hermes.ts";
 import { doorsFor } from "./door/registry.ts";
 import { RowRing, SEND_READ_LINES, SendProtocol, SessionLocks, type PaneProfileMatch } from "./surface/protocol.ts";
+import { openPaneLock, paneLockDir, type PaneLockFiles } from "./surface/pane-lock.ts";
 import { ProgramDriver, type ProgramPort } from "./surface/durable-driver.ts";
 import { RequestStore } from "./surface/requests.ts";
 import { HoldStore } from "./surface/holds.ts";
 import { SurfaceLedger } from "./surface/counters.ts";
 import { deliverEdge, EdgeRouter, type EdgeTarget } from "./surface/edges.ts";
-import { counterWordOf, HoldBook, HoldServer, takeHold, type HoldTarget } from "./surface/hold.ts";
+import { counterWordOf, HoldBook, HoldServer, takeHold, type Held, type HoldConn, type HoldTarget } from "./surface/hold.ts";
+import { holdAuditEntry } from "./refusal.ts";
+import type { HoldRequest } from "../web/src/lib/surface/hold.ts";
 import { holdSocketPath, inboxDir, opencodeInboxDir } from "./beacon/paths.ts";
+import { PartAsks, type PartAskSession } from "./inside/asks.ts";
+import { insideGate, insideWanted, INTERVAL_TIMER, linkReader, watchLink } from "./inside/gate.ts";
+import { linkedHarnesses, partsRoot } from "./inside/links.ts";
+import { ownerHold } from "./inside/owner.ts";
+import { applyWake, releasesHeld, type WakeSink } from "./inside/wake.ts";
+import { paneLinkedReader } from "./surface/path.ts";
+import { InsideHub } from "./inside/hub.ts";
+import { placeHello } from "./inside/place.ts";
+import { CommandQueue } from "./inside/queue.ts";
+import { PartRegistry } from "./inside/registry.ts";
+import { InsideServer, insideSocketPath } from "./inside/server.ts";
+import { WIRE_VERSION } from "./inside/wire.ts";
 import { VersionCache } from "./surface/binary-version.ts";
 import { findProfile, loadProfiles, type Profile } from "../web/src/lib/surface/profile.ts";
 import { crewFactsWorld, FACTS_CAPS, factsWorldOf, NO_FACTS_CAPS, type FactsWorld } from "./tricks/facts.ts";
@@ -312,11 +341,16 @@ import { answerInputsRequest, INPUT_ANSWER_BODY_MAX_BYTES, readPaneInputs, Trick
 import { isOwnId, resolveBridgeId } from "./bridge-id.ts";
 import { carriedMapRecords, scopeKeyAddress, TrickHill } from "./tricks/hill.ts";
 import { OfficialTricks } from "./tricks/official-install.ts";
+import { FetchSlot } from "./tricks/fetch.ts";
+import { RepoIndexTricks } from "./tricks/repo-index.ts";
+import { RepoFacts } from "./tricks/repo-facts.ts";
 import type { TricksRunsOn } from "../web/src/lib/tricks/schema.ts";
 import { TricksService } from "./tricks/service.ts";
+import { TricksFeatureSwitch } from "./tricks/feature-switch.ts";
 import { VersionCards } from "./tricks/version-card.ts";
 import { createSessionFolders, createSessionLabels } from "./operator-space-labels.ts";
-import { labelOf, LOCAL_MEMBER, parseAddress } from "./walky/address.ts";
+import { INSTANCE_TOKEN, labelOf, LOCAL_MEMBER, parseAddress } from "./walky/address.ts";
+import { namesOfPane, withNames } from "./walky/names.ts";
 import {
   crewSkipped,
   crewTargets,
@@ -335,6 +369,8 @@ import {
 } from "./walky/crew.ts";
 import { isResting, type RouteRemote, type SendResult, type WalkyHost, type WalkyPane } from "./walky/deliver.ts";
 import { INSTANCE_TICK_MS, WalkyInstances } from "./walky/instances.ts";
+import { EventBus } from "./events/bus.ts";
+import { attachSessionSource } from "./events/sources.ts";
 import { WalkyLog } from "./walky/log.ts";
 import { PinStore } from "./pins/store.ts";
 import { WalkyOff } from "./walky/off.ts";
@@ -344,6 +380,10 @@ import { WalkySeen } from "./walky/seen.ts";
 import { WalkyService } from "./walky/service.ts";
 import { siblingDirsOf, SiblingLogs } from "./walky/siblings.ts";
 import { walkySocketPath, WalkyServer } from "./walky/socket.ts";
+import { ApiSocket, apiSocketPath, type RunTokenHolder } from "./api/socket.ts";
+import { LOCAL_TIER_RIGHTS } from "./api/operations.ts";
+import { apiListedPane } from "./api/listed.ts";
+import { apiTable, buildApiWorld } from "./api/world.ts";
 import { deniedFoldersSync, HillMediaStore } from "./hill/media.ts";
 import { HillPush } from "./hill/push.ts";
 import { HillReceiptStore } from "./hill/receipts.ts";
@@ -357,8 +397,9 @@ import { TrickProposals } from "./tricks/proposals.ts";
 import { ProposeDoor } from "./tricks/propose-door.ts";
 import { hillDir, HillStore } from "./hill/store.ts";
 import { HillSwitch } from "./hill/switch.ts";
+import { bridgeSkillFollower } from "./hill/skill-follow.ts";
 import { HillCrewStateFile } from "./hill/crew-state.ts";
-import { hillSessionName, OneLook, walkyPlace, walkySend } from "./hill/walky.ts";
+import { hillCensus, hillLeftTheCrew, hillRosterIds, hillSessionName, OneLook, walkyPlace, walkySend, type HillCensusMember } from "./hill/walky.ts";
 
 // How often the registry rescans the filesystem for sessions that appeared/disappeared after boot.
 const SESSION_REFRESH_MS = 15_000;
@@ -883,8 +924,23 @@ await activity.load();
 // once, and handed to both the tracker and the server, so the probe and the history route share the
 // adapters' memoised path caches. Null when `COLLIE_TRANSCRIPT` is off: no journal means no probe, and
 // every pane then reads exactly as it did before this feature existed.
+// The accounts added on this machine (M101, bridge/accounts-store.ts). Read once here so the journal
+// roots below know the own folders from the first poll; nothing is written until the first add.
+const accountStore = new AccountStore(accountsFileIo(cfg.stateDir));
+await accountStore.list();
+// The journal roots grow with the added `own` accounts, with no restart (README decision 17): each
+// lookup asks the store's memory, and a hand edit of the file is seen at most ten seconds later.
+let accountRootsLookedAt = 0;
+const accountJournalRoots = (agent: string): readonly string[] => {
+  const now = Date.now();
+  if (now - accountRootsLookedAt > 10_000) {
+    accountRootsLookedAt = now;
+    void accountStore.list().catch(() => undefined);
+  }
+  return ownJournalRoots(accountStore, agent);
+};
 const journals = cfg.transcript
-  ? buildJournalRegistry({ ...cfg.journalRoots, durable: [durableLogDir(cfg.stateDir)] }, cfg.modelCatalogs)
+  ? buildJournalRegistry({ ...cfg.journalRoots, durable: [durableLogDir(cfg.stateDir)] }, cfg.modelCatalogs, accountJournalRoots)
   : null;
 // The name the operator gave a Muse session, for the engines' pane naming (journal/muse.ts).
 // It reads the same logs the journal does, so it lives and dies with the same switch: with
@@ -894,6 +950,13 @@ const journals = cfg.transcript
 // The Hermes home whose gateway Hermes's door dials (ADR 0142): `$HERMES_HOME` read the way Hermes reads it.
 const hermesDoorHome = hermesHome(process.env.HERMES_HOME, homedir());
 const museNames = cfg.transcript ? museSessionNameReader(cfg.journalRoots.muse) : undefined;
+// What each harness session is called in its own journal (bridge/session-titles.ts): a name the person
+// set in the harness, and the agent's own title. One tracker for the whole bridge, keyed by session id,
+// read by every engine from memory and refreshed on each session's poll. Null with transcripts off, and
+// every pane then keeps the screen read and its fallbacks exactly as before. The last names outlive a
+// restart in the state folder (bridge/session-titles-store.ts), loaded once here before any poll.
+const sessionTitles = journals === null ? null : new SessionTitleTracker(journals, () => Date.now(), { store: new SessionTitleStore(cfg) });
+await sessionTitles?.restore();
 const cacheRulesReader = createCacheRulesReader(cfg.cacheRulesFile);
 const paneCache =
   journals === null
@@ -918,7 +981,42 @@ const accountWindows = new AccountWindows({
 // wrapper and the beacon write, joined with the account windows above. The pane's session id is the
 // key. A harness whose hooks write no file takes its context from the cache probe's reading of its
 // journal (.adr/0115, amended 2026-10-25); with transcripts off there is none.
-const usage = new UsageTracker(usageDir(cfg.stateDir), diskUsageFiles, Date.now, accountWindows, paneCache ?? undefined);
+// The last reading of each account's windows (bridge/usage-seen.ts), kept for an account with no live session.
+const usageSeen = new UsageSeen(usageSeenIo(cfg.stateDir));
+// A pane started with an added account counts under that account's folder until its agent reports
+// one (or always, for an agent that never does), so its windows and last reading are the account's.
+// `accounts` is built below; the seam is first called on a poll, after it exists.
+const usage = new UsageTracker(usageDir(cfg.stateDir), diskUsageFiles, Date.now, accountWindows, paneCache ?? undefined, usageSeen, (pane, scope) =>
+  accounts.folderOf(scope, pane),
+);
+
+// The agents the New sheet starts, probed on this machine (ADR 0091), shared by the server and the
+// accounts below so both read one found list.
+const harnessProbe = createHarnessProbe();
+// Accounts (M101, ADR 0141): the list in Settings, the start line, and a pane's tag. Each row's windows
+// are the live or last-seen reading the usage tracker recorded for that harness and folder (usage-seen.ts).
+// Who is signed in on each account (spec 04): the agent's own status command, its binary found the way
+// the probe finds it (the login PATH), run with fixed words and no shell (bridge/account-identity.ts).
+const statusPath = createLoginPath();
+const accounts = new Accounts({
+  store: accountStore,
+  status: statusRunner({ locate: async (binary) => findTool(binary, { ...process.env, PATH: await statusPath() }, homedir()) }),
+  harnesses: harnessProbe,
+  home: homedir(),
+  env: process.env,
+  platform: HOST.platform,
+  disk: realLinkDisk,
+  reading: seenReading(usageSeen, Date.now),
+  reported: usage,
+  panes: () => registry.ordered().flatMap((rt) => rt.engine.current().agents.map((pane) => ({ session: rt.name, pane }))),
+  readText: (path) => {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      return null;
+    }
+  },
+});
 
 // Which branch each pane's folder is on (bridge/git-head.ts). One for the whole bridge: every
 // session's poll feeds it its folders, and the server reads it from memory at serialise time.
@@ -955,10 +1053,12 @@ const launchReceipts = new LaunchReceiptStore(cfg.stateDir);
 // Send Protocol reads them with that agent's profile and types nothing until its box is on screen.
 const launchWindow = new LaunchWindow(undefined, (harness) => findProfile(loadProfiles(), harness)?.id ?? harness);
 /** Each profile's binary (lower case) to its harness id: what a foreground process is matched against. */
-let profileBinaries: ReadonlyMap<string, string> | null = null;
-const harnessBinaries = (): ReadonlyMap<string, string> =>
-  (profileBinaries ??= new Map([...loadProfiles().values()].map((profile) => [profile.identity.binary.toLowerCase(), profile.id])));
+const harnessBinaries = profileBinaries;
 await launchReceipts.load();
+// A launch that was pending when the last run stopped and is older than the launch budget can no longer
+// settle: it reads `unknown`, and nothing is closed or adopted on a guess (M100 spec 04).
+const unsettledLaunches = await launchReceipts.expirePending();
+if (unsettledLaunches > 0) console.log(`[launch] ${String(unsettledLaunches)} launch(es) left pending by the last run now read unknown`);
 
 // One receipt per starter run (ADR 0102, bridge/starter-launch.ts). Loading writes nothing.
 const starterReceipts = new StarterReceiptStore(cfg.stateDir);
@@ -985,6 +1085,8 @@ const askPush = new AskPush(askGuard);
 // Loading writes nothing: the file appears on the first branch create that works.
 const worktreeChoices = new WorktreeChoiceStore(cfg.stateDir);
 await worktreeChoices.load();
+const worktreeFolderSetting = new WorktreeFolderSettingStore(cfg.stateDir);
+await worktreeFolderSetting.load();
 
 // The launcher rows phones added on this machine (ADR 0094, bridge/launchers-added.ts). Read by mtime
 // on each use, because `collie devices revoke` edits it from another process. Nothing is written until
@@ -1480,6 +1582,9 @@ const telemetry = createTelemetry({
   line: () => readUpdateLineSync(cfg.stateDir).line,
   // Read at ping time. A peer (a member, or a deputy that is not the lead) is a member in the ping.
   crewMode: () => crew.mode,
+  // A trouble signal names a local pane; its row is `linked` when the pane read would say `linked: true`
+  // (`paneIsLinked`, bridge/surface/path.ts: the one reader for the ping and the pane read).
+  linked: (where) => paneIsLinked(where.session ?? registry.get()?.name ?? "", where.paneId),
   now: Date.now,
   fetch: (url, init) => fetch(url, init),
   os: HOST.platform,
@@ -1694,6 +1799,18 @@ function programAdapter(source: DurableSource): BuiltAdapter {
   return { adapter: program, target, probe: { phase: () => program.phase(), hostName: () => program.hostName(), versionRefusal: () => program.versionRefusal() }, structured: program };
 }
 
+// The machine-wide pane locks (M102 spec 16): one folder for every bridge of this user (pane-lock.ts
+// `paneLockDir`), one lock object per multiplexer scope in this process. No folder: each session keeps
+// its in-memory lock alone, and the start says so once.
+const paneLockFolder = paneLockDir();
+const paneLocks = new Map<string, PaneLockFiles | null>();
+function sharedPaneLock(scope: string): PaneLockFiles | null {
+  if (paneLockFolder === null) return null;
+  if (!paneLocks.has(scope)) paneLocks.set(scope, openPaneLock({ dir: paneLockFolder, scope, log: (line) => console.log(line) }));
+  return paneLocks.get(scope) ?? null;
+}
+if (paneLockFolder === null) console.log("[pane-lock] no runtime folder: each bridge keeps its own pane lock only");
+
 // The Send Protocol's request store (M56 spec 05), one for the bridge, under the state directory.
 // Created only with the flag on, so an instance without it touches no new file. On start every request
 // a previous run left unsettled ends `unknown` (a crash), and settled ones past a week are dropped.
@@ -1747,6 +1864,9 @@ const edgeRouter =
         },
         // A dropped edge counts under its own harness, with no version: no pane named one.
         onDrop: (record) => surfaceLedger.edge({ harness: record?.harness ?? "-", version: "-", profileId: "-", status: "-" }, "dropped"),
+        // Another agent process writes this pane's edges (a background session whose viewer holds the
+        // pane): the pane's part may not be the process that runs the agent, so its sends take the screen.
+        onForeign: (pane, pid, ended) => insideHub?.noteForeignEdge(pane, pid, ended),
       });
 // Hook-held permissions (M56 spec 12): the harness's permission hook connects to this bridge's local
 // socket (`<stateDir>/hold/sock`, 0600 in a 0700 directory) and waits for a tap. Built with the edges
@@ -1759,11 +1879,64 @@ const holdServer =
         socketPath: holdSocketPath(cfg.stateDir),
         host: HOST,
         liveness: procBeaconLiveness(),
+        // One audit line per hook request this bridge receives (M102 spec 14): placed, or dropped and why.
+        record: (record) => audit.record(holdAuditEntry(record)),
         targets: () => {
           const live = new Set(registry.ordered().map((runtime) => runtime.name));
           return [...edgeTargets].filter(([name]) => live.has(name)).map(([, target]) => target);
         },
       });
+// The inside wire (M99 spec 01, bridge/inside/WIRE.md): parts inside an agent program (a Claude Code
+// mod, a pi extension) dial `<stateDir>/inside/sock` and bind to their pane through the same placement
+// as a hook edge. Built with the edges, since it places on the same targets. Opt-in: the socket opens
+// only while a harness is linked (`collie harness link`, M99 spec 09), or when `COLLIE_INSIDE=on` says so;
+// `COLLIE_INSIDE=off` is the kill switch (`bridge/inside/gate.ts`). Closed, no part can bind and every
+// send, ask and WalkyTalky message keeps the screen path. A link made while the bridge runs opens the
+// socket at the next read of the link records; an unlink turns the data road off at the next read.
+const insideLinked = linkReader(() => linkedHarnesses(process.env, homedir(), realFiles).length > 0);
+/** Whether the inside wire is on now: the override, else a link. */
+const insideOn = (): boolean => insideWanted(cfg.inside, insideLinked());
+const insideGateState = insideGate({ setting: cfg.inside, linked: insideLinked(), edges: edgeRouter !== null, platform: HOST.platform });
+const insideHub =
+  (insideGateState !== "open" && insideGateState !== "unlinked") || edgeRouter === null
+    ? null
+    : new InsideHub({
+        registry: new PartRegistry(),
+        queue: new CommandQueue(),
+        place: (hello) => {
+          const live = new Set(registry.ordered().map((runtime) => runtime.name));
+          return placeHello(hello, [...edgeTargets].filter(([name]) => live.has(name)).map(([, target]) => target), procBeaconLiveness());
+        },
+      });
+/** Whether a pane is linked: the pane read, the install ping's trouble rows and its tally all read this one function. */
+const paneIsLinked = paneLinkedReader({ enabled: insideOn, hub: insideHub });
+const insideServer = insideHub === null ? null : new InsideServer({ socketPath: insideSocketPath(cfg.stateDir), hub: insideHub });
+/** What the inside hub reaches of each session, set by `makeSession` (M99 specs 03 and 04). */
+interface InsideSession extends PartAskSession {
+  readonly wake: WakeSink;
+  readonly send: SendProtocol | undefined;
+}
+const insideSessions = new Map<string, InsideSession>();
+const partAsks = insideHub === null ? null : new PartAsks({ sessionOf: (session) => insideSessions.get(session), enqueue: (address, command) => insideHub.enqueue(address, command) });
+insideHub?.listen({
+  // A permission of a part is today's hold (spec 04), while the wire is on.
+  ask: (part, ask) => (insideOn() ? partAsks?.ask(part, ask) : { wait: false }),
+  gone: (part) => partAsks?.gone(part.partId),
+  // An answer command ended: its hold settles from the part's own word (spec 04, review item 5).
+  command: (entry) => partAsks?.command(entry),
+  event: (part, event) => {
+    const session = insideSessions.get(part.address.session);
+    if (event.kind === "ask.close") partAsks?.closed(part.partId, event.ask);
+    // Wake and state, never an item (spec 04).
+    if (session !== undefined && insideOn()) applyWake(session.wake, part.address.paneId, event, Date.now());
+    // The part's turn end releases the pane's oldest held send now; the poll's own rules stay (spec 03).
+    // So does its word that the box holds no draft any more: a WalkyTalky message held over the draft
+    // goes now, once, and its run asks the draft state again before anything (spec 05, 2026-11-13).
+    if (releasesHeld(event, insideHub?.turnOf(part.address, { anyAge: true }) ?? null)) void session?.send?.releaseOnTurnEnd(part.address.session, part.address.paneId);
+  },
+});
+
+
 const sendVersions = new VersionCache();
 /** The platform the harness profiles pick their keys by: `process.platform`, or `wsl` under WSL. Decided once, here. */
 const SURFACE_PLATFORM = surfacePlatform({
@@ -1784,8 +1957,16 @@ const SURFACE_PLATFORM = surfacePlatform({
  * send, the shadow, the report and the trouble count, and both keep one last answer per pane.
  * `sendProfile` is the send path's profile at that version.
  */
-const paneVersion = createPaneVersion({ versions: sendVersions, binaries: harnessBinaries, probe: procProbe() });
-const sendProfile = createPaneProfile({ versions: sendVersions, binaries: harnessBinaries, platform: SURFACE_PLATFORM, paneVersion });
+const paneProbe = procProbe();
+const paneVersion = createPaneVersion({ versions: sendVersions, binaries: harnessBinaries, probe: paneProbe });
+// The probe also reads the pane's agent environment: under WSL it narrows SURFACE_PLATFORM per pane.
+const sendProfile = createPaneProfile({ versions: sendVersions, binaries: harnessBinaries, probe: paneProbe, platform: SURFACE_PLATFORM, paneVersion });
+
+// The event bus (M105 spec 03): one per bridge. Every session's state engine feeds it below; the local
+// API and the trick runner are its listeners (later parts). `bridgeId` and `walkyInstances` are declared
+// further down and read only when a transition fires, after the first poll; a transition in the window
+// before they exist is skipped by the source, never published with an invented id.
+const eventBus = new EventBus({ machine: () => bridgeId.id });
 
 const makeSession: SessionFactory = (name, endpoint, isPrimary) => {
   const built = endpoint.kind === "program" ? programAdapter(endpoint.source) : terminalAdapter(endpoint.socketPath);
@@ -1795,7 +1976,38 @@ const makeSession: SessionFactory = (name, endpoint, isPrimary) => {
   // The worktree capability sits just inside it, outside the beacon and hint wrappers: it reads their
   // declaration and lifts `createWorktree` from `createSpace` plus git (bridge/worktree-capability.ts).
   const herdr = withRepoFacts(withWorktreeCapability(withBeaconsIfBlind(built.adapter, target), { git: worktreeGit }), { facts: (folder) => repoFactsOf(folder, nodeGitHeadDisk, homedir()) });
-  const engine = new StateEngine(herdr, cfg.pollMs, { museSessionName: museNames });
+  const engine = new StateEngine(herdr, cfg.pollMs, {
+    argvNames: museNames === undefined ? {} : { [ARGV_NAMED_AGENT]: museNames },
+    titles: sessionTitles === null ? undefined : (pane) => sessionTitles.forPane(pane),
+  });
+  // Bus events from this session's transitions. The engine stops with its session, and so does this feed.
+  attachSessionSource({
+    engine,
+    muxSession: name,
+    machine: () => bridgeId.id,
+    // Peek, never mint (security read 1, item 4): a pane with no token yet publishes nothing. Walky's own
+    // tick (`walkyInstanceTimer`, every INSTANCE_TICK_MS) and the snapshot mint every pane's token.
+    instanceOf: (session, paneId) => walkyInstances.peek(session, paneId),
+    // Only for panes the local API's `sessions` lists (security read 2, item 4): the one predicate
+    // reads.ts lists by, so no event names a shell pane or a trick session.
+    listed: apiListedPane,
+    publish: (input) => {
+      eventBus.publish(input);
+    },
+    onError: (message) => console.warn(`[events] a transition in session "${name}" was not published: ${message}`),
+  });
+  // The install ping's usage tally (ping v3): which agent and multiplexer pairs ran in this session, and
+  // whether a pane of the pair had a part bound (the data link). The ping keeps the pairs and drops the
+  // panes again; it throttles itself and never throws into the poll.
+  const usageMux = endpoint.kind === "program" ? DURABLE_MUX : cfg.mux;
+  engine.onUpdate((s) =>
+    telemetry.sessions({
+      scope: name,
+      mux: usageMux,
+      panes: realAgentPanes(s.agents),
+      linked: (paneId) => paneIsLinked(name, paneId),
+    }),
+  );
 
   // Event-poked polling: a long-lived watch on the multiplexer pokes an immediate re-poll on any
   // herd change, and while it's healthy the interval relaxes to the safety-net cadence. Events are
@@ -1848,6 +2060,11 @@ const makeSession: SessionFactory = (name, endpoint, isPrimary) => {
     };
     engine.onUpdate((s) => void probeThenWarn(s.agents));
   }
+  // The session names ride the same poll, fired and not awaited; the engine reads them from memory on
+  // the next one (bridge/session-titles.ts). `refresh` never throws.
+  if (sessionTitles !== null) {
+    engine.onUpdate((s) => void sessionTitles.refresh(s.agents, { session: name }));
+  }
   if (todos !== null) {
     engine.onUpdate((s) => void todos.refresh(s.agents, { session: name }).catch(() => {}));
   }
@@ -1856,7 +2073,8 @@ const makeSession: SessionFactory = (name, endpoint, isPrimary) => {
   }
   engine.onUpdate((s) => void usage.refresh(s.agents, name).catch(() => {}));
   // The account windows ride the same poll (first reading, then every five minutes while a pane of the
-  // harness is here) and a turn's end (at most once a minute per harness). Neither waits on the ask.
+  // harness is here) and a turn's end (an ask starts at most once in five minutes per harness).
+  // Neither waits on the ask.
   engine.onUpdate((s) => accountWindows.observe(s.agents, name));
   engine.onTransition((agent, from, to) => {
     if (isTurnEnd(from, to)) accountWindows.poke(agent.agent);
@@ -1989,7 +2207,11 @@ const makeSession: SessionFactory = (name, endpoint, isPrimary) => {
   // One protocol per terminal session: its own locks, the adapter's one key gate, the bridge's one
   // request store. The ask answerer shares the locks, the gate and the store, so a send and an answer
   // never run on one pane at once and every key leaves through the one gate.
-  const locks = new SessionLocks();
+  // The machine-wide pane lock (M102 spec 16), for a session with a screen: every bridge on this machine
+  // that drives the same multiplexer socket shares it, so two lanes never type into one pane at once.
+  const paneLock = endpoint.kind === "terminal" ? sharedPaneLock(`${cfg.mux}\u0000${target.endpoint}`) : null;
+  const locks = new SessionLocks(paneLock ?? undefined);
+  if (paneLock !== null) gateFor(herdr).share(paneLock);
   const ring = new RowRing();
   const foregroundHarness = foregroundHarnessOf(foregroundRead, harnessBinaries);
   const paneProfile = (harness: string, paneId?: string): Promise<PaneProfileMatch | null> => sendProfile(harness, paneId, foregroundRead);
@@ -2006,6 +2228,10 @@ const makeSession: SessionFactory = (name, endpoint, isPrimary) => {
           ring,
           ledger: surfaceLedger ?? undefined,
           profile: paneProfile,
+          // A pane the multiplexer names no agent on is named by the program in its foreground (#793).
+          paneHarness: foregroundRead === undefined ? undefined : createPaneHarness({ read: foregroundRead, binaries: harnessBinaries, probe: paneProbe }),
+          // The blind road's menu sign by what stands in the foreground (M102 spec 12); no read: unknown.
+          paneForeground: foregroundRead === undefined ? undefined : createPaneForeground(foregroundRead),
           starting: (paneId, named) => launchWindow.starting(name, paneId, named, foregroundHarness?.(paneId)),
           framed: (paneId, harness) => launchWindow.framed(name, paneId, harness),
           deaf: (paneId, harness, typedAt) => launchWindow.deaf(name, paneId, harness, typedAt),
@@ -2056,8 +2282,12 @@ const makeSession: SessionFactory = (name, endpoint, isPrimary) => {
                     sessionOf: (paneId) => engine.current().agents.find((agent) => agent.paneId === paneId)?.agentSession,
                   },
           }),
+          // The data road (M99 spec 03): only with the inside socket open, and read again per send.
+          data: insideHub === null ? undefined : { enabled: insideOn, door: insideHub },
         })
       : undefined;
+  // The session's inside record is rebuilt with its holds below (M99 specs 03 and 04).
+  insideSessions.delete(name);
   // Each poll tells the launch window which panes the multiplexer names an agent on now: a newly named
   // one opens a window, a gone one is forgotten, and one it reports `idle` or `working` ends its window
   //. The poll's Surface ends a window above.
@@ -2123,27 +2353,53 @@ const makeSession: SessionFactory = (name, endpoint, isPrimary) => {
           edge,
         ),
     };
+    /** The session's hand-off of one placed hold request, from the settings hook or from a part. */
+    const takePaneHold = (book: HoldBook, paneId: string, request: HoldRequest, conn: HoldConn, onClose: (listener: (how: "closed" | "elsewhere") => void) => void): Held | null =>
+      takeHold(
+        {
+          book,
+          generation: generationOf,
+          profile: (harness) => loadProfiles().get(harness)?.hold,
+          reread: (pane) => surface.edge(pane, "dialog", Date.now()),
+          log: (line) => console.log(line),
+        },
+        paneId,
+        request,
+        conn,
+        onClose,
+      );
     const holdTarget: HoldTarget =
       holdBook === undefined
         ? edgeTarget
         : {
             ...edgeTarget,
-            hold: (paneId, request, conn, onClose) => {
-              takeHold(
-                {
-                  book: holdBook,
-                  generation: generationOf,
-                  profile: (harness) => loadProfiles().get(harness)?.hold,
-                  reread: (pane) => surface.edge(pane, "dialog", Date.now()),
-                  log: (line) => console.log(line),
-                },
-                paneId,
-                request,
-                conn,
-                onClose,
-              );
-            },
+            // One owner per ask kind (M99 spec 04): a part that owns the pane's permissions gives the
+            // one card; the settings hook is let go at once, with no decision.
+            hold: ownerHold(
+              (paneId, request) => partAsks?.ownsDialog(name, paneId, request) === true,
+              (paneId, request, conn, onClose) => {
+                takePaneHold(holdBook, paneId, request, conn, onClose);
+              },
+              (line) => console.log(line),
+            ),
           };
+    // What the inside hub reaches of this session: the holds (spec 04), the wake (spec 04), the send (spec 03).
+    insideSessions.set(name, {
+      harnessOf: (paneId) => {
+        const agent = engine.current().agents.find((pane) => pane.paneId === paneId);
+        return agent === undefined || agent.kind === "shell" ? null : agent.agent;
+      },
+      // A session with no hold book holds nothing: a part's permission stays with the desk and the screen.
+      holdProfile: (harness) => (holdBook === undefined ? undefined : loadProfiles().get(harness)?.hold),
+      takeHold: (paneId, request, conn, onClose) => (holdBook === undefined ? null : takePaneHold(holdBook, paneId, request, conn, onClose)),
+      settle: (held, outcome) => {
+        if (holdBook === undefined) return;
+        if (outcome === "void") holdBook.end(held, "void");
+        else holdBook.settle(held, outcome);
+      },
+      wake: { edge: (pane, kind, at) => surface.edge(pane, kind, at), poke: () => engine.pokeNow() },
+      send,
+    });
     edgeTargets.set(name, foreground === undefined ? holdTarget : { ...holdTarget, foreground });
   } else {
     edgeTargets.delete(name);
@@ -2225,10 +2481,40 @@ edgeRouter?.start();
 // registry finds the socket listening. A bridge that cannot own the socket (another bridge holds it,
 // or the path is not safe) runs with no holds: every permission stays a screen ask.
 if (holdServer !== null && (await holdServer.start())) console.log(`[surface] hold socket at ${holdSocketPath(cfg.stateDir)}`);
+// And the inside socket (M99 spec 01), also before the target file, which names it in its `inside` field.
+let insideStarted = insideServer !== null && insideGateState === "open" && (await insideServer.start());
+if (insideStarted) console.log(`[inside] socket at ${insideSocketPath(cfg.stateDir)}`);
+else if (insideGateState !== "off") console.log(`[inside] socket closed: ${insideGateState === "platform" ? "not on this platform" : insideGateState === "no-edges" ? "no hook edges" : insideGateState === "unlinked" ? "no harness is linked" : "did not start"}`);
 // The target file also says which multiplexer this bridge drives, under which instance, on which port,
 // so `collie mux list` reads the live bridges without dialling them (M76 spec 02).
-hookTarget =
-  edgeRouter === null ? null : registerHookTarget(cfg.stateDir, undefined, undefined, { mux: cfg.mux, instance: collieInstance, port: cfg.port });
+/** The hook target file's fields; `inside` names the socket once it listens. */
+const hookTargetFields = (inside: boolean) => ({
+  mux: cfg.mux,
+  instance: collieInstance,
+  port: cfg.port,
+  inside: inside ? { wire: WIRE_VERSION, socket: insideSocketPath(cfg.stateDir) } : undefined,
+  // The parts folder this bridge reads the link records from; `collie doctor` compares it with its own.
+  parts: partsRoot(process.env, homedir()),
+});
+hookTarget = edgeRouter === null ? null : registerHookTarget(cfg.stateDir, undefined, undefined, hookTargetFields(insideStarted));
+// A link made while the bridge runs (`collie harness link`, M99 spec 09) opens the socket at the next read of
+// the link records (`watchLink`, one folder listing per read) and names it in the hook target file so
+// a part finds it. A start that fails is tried again at the read after; the timer stops once the
+// socket listens, or when the bridge stops.
+const stopInsideWatch =
+  insideServer === null || insideStarted || insideGateState !== "unlinked"
+    ? null
+    : watchLink({
+        ...INTERVAL_TIMER,
+        on: insideOn,
+        start: () => insideServer.start(),
+        opened: () => {
+          insideStarted = true;
+          console.log(`[inside] a harness is linked: socket at ${insideSocketPath(cfg.stateDir)}`);
+          // The write is a rename over the same file: no moment with no target file.
+          if (edgeRouter !== null) hookTarget = registerHookTarget(cfg.stateDir, undefined, undefined, hookTargetFields(true));
+        },
+      });
 
 // Walky talky (M62): messages between agent sessions. The log is `<stateDir>/walky/`, the local
 // socket `<stateDir>/walky/sock` (0600). A message is logged first, then typed through the pane's
@@ -2255,7 +2541,9 @@ const walkyRawPanes = (): Omit<WalkyPane, "instance" | "off">[] =>
       // The last status change comes from the activity ledger: the engine's views carry no time (it rides the wire at serialise time).
       const activeAt = activity.get(rt.name, view.paneId)?.activeAt ?? null;
       const space = spaceOfPane(walkyMemberId ?? LOCAL_MEMBER, view);
-      return { session: rt.name, paneId: view.paneId, agent, harness: agent ? view.agent : null, label: labelOf(facts, !cfg.redact), state: view.status, activeAt, terminal: rt.send !== undefined, space };
+      const row = { session: rt.name, paneId: view.paneId, agent, harness: agent ? view.agent : null, label: labelOf(facts, !cfg.redact), state: view.status, activeAt, terminal: rt.send !== undefined, space };
+      // The session's names ride for `who` (walky/names.ts): the person's name and the agent's own title.
+      return withNames(row, namesOfPane(view, !cfg.redact));
     };
     const out = agents.map((view) => of(view, true));
     for (const view of shellPanes) out.push(of(view, false));
@@ -2273,7 +2561,7 @@ const walkyHost: WalkyHost = {
   send: async (pane, sendId, text, hold): Promise<SendResult> => {
     const protocol = registry.get(pane.session)?.send;
     if (protocol === undefined) return { outcome: "refused", reason: "no terminal" };
-    const request = hold === undefined ? { id: sendId, text, mode: "send" as const } : { id: sendId, text, mode: "send" as const, draftHolds: true, holdUntil: hold.holdUntil };
+    const request = hold === undefined ? { id: sendId, text, mode: "send" as const } : { id: sendId, text, mode: "send" as const, draftHolds: true, holdUntil: hold.holdUntil, walky: hold.walky };
     const answer = await protocol.handle(request, { session: pane.session, paneId: pane.paneId, harness: pane.harness ?? "" });
     const receipt = answer.receipt;
     if (receipt === undefined) return { outcome: "unknown" };
@@ -2289,6 +2577,12 @@ const walkyHost: WalkyHost = {
   },
   cancelHeld: (session, paneId, sendId) => {
     registry.get(session)?.send?.cancelHeld(session, paneId, sendId);
+  },
+  // Deliver now (M99 spec 05): the pane's Send Protocol runs the held send once, by data only.
+  deliverOverDraft: async (session, paneId, sendId) => {
+    const protocol = registry.get(session)?.send;
+    if (protocol === undefined) return "not-linked";
+    return (await protocol.deliverOverDraft(session, paneId, sendId)).result;
   },
 };
 const walkyMemberId = crew.mode === "solo" ? null : (trustStore.current()?.self.memberId ?? null);
@@ -2365,6 +2659,9 @@ const walky = new WalkyService({
   // (M98, README decision 9b and 9c). A lead knows each member's reported version; a member knows its
   // lead's stated release, and takes its lead's word for any other member's message: the lead refused
   // such a message before routing it unless it knew that member to be older. Unknown is not older.
+  // A member whose lead is known to be below 1.29.0 signs a message that may leave this machine without its
+  // subject (M98 spec 07): that lead cannot verify the subject line, and a subject must never cost a send.
+  leadOlderThanSubject: crew.mode === "peer" ? () => olderThanSpace(heardLeadRelease, crewVersion, compareSemver) : undefined,
   signerOlderThanSpace: (signer) => {
     if (signer === null || signer === walkyMemberId) return false;
     if (crew.mode === "lead") return olderThanSpace(walkyMemberVersion(signer), crewVersion, compareSemver);
@@ -2406,6 +2703,11 @@ const tricksConfigRoot = cfg.tricksDir === undefined ? null : dirname(cfg.tricks
 const hillCopyStore = bootTrust !== null ? new StandbyHillStore(cfg.stateDir) : null;
 await hillCopyStore?.load();
 
+// The WalkyTalky skill follows the Hill's switch (M96 spec 12, hill/skill-follow.ts): a real change, from the
+// phone's route or the takeover's adopt below, spawns this build's own `collie skill sync --json` and does
+// not wait for it. A bridge start writes no switch, so it syncs nothing.
+const hillSkillFollower = bridgeSkillFollower({ stateDir: cfg.stateDir, env: process.env, log: (line) => console.log(line) });
+
 // §25: the person's tap (the takeover commit, or `collie promote` here) left a marker naming the lead it
 // took over from. This boot leads now, so it adopts both copies here, before the Hill and the tricks are
 // built: neither has a list in memory yet that a later write could put back over the merge.
@@ -2422,6 +2724,7 @@ if (tricksCopyStore !== null && hillCopyStore !== null) {
       now: Date.now,
       audit: (entry) => audit.record(entry),
       log: (line) => console.log(line),
+      followSkill: hillSkillFollower,
     });
   } catch (err) {
     console.warn(`[crew] could not adopt the copies the takeover left: ${err instanceof Error ? err.message : String(err)}`);
@@ -2444,12 +2747,21 @@ const hillPlace = walkyPlace({ who: hillWho.read }, walkyMemberId);
 // On a lead (CREW_PROTOCOL §22): the crew machine an address is on when it is not answering now, read
 // off the sweep's ledger. Assigned where the lead runtime is built, after this.
 let hillOffline: (address: string) => string | null = () => null;
+// On a lead: every member as the sweep holds it, for the Hill's census (M96 spec 10). Assigned with the
+// lead runtime; until then no member's census is known, so no card for a session there closes.
+let hillMembers: () => readonly HillCensusMember[] = () => [];
 // The "new version" card of a trick (crew slice 3): built after the Hill, which it posts into; the Hill
 // hands it the answer to one of its cards. An answer only ever comes after boot.
 let versionCards: VersionCards | undefined;
 // The trick proposals (crew slice 8, tricks/proposals.ts): kept on a lead or a solo bridge, inert until the
 // person's yes on the Hill. Built after the Hill, like the version card.
 let trickProposals: TrickProposals | undefined;
+// The switch for tricks as a whole (tricks/feature-switch.ts): an experiment, off by default, one file
+// `<stateDir>/tricks/feature.json` that the phone and `collie tricks on|off` write. Read behind a stat check,
+// so a switch needs no restart. Built before the Hill, which holds a trick's Decisions back while it is off,
+// and handed to the tricks runner, whose every door asks it. The local API asks `tricks.switchedOn()` and
+// listens with `tricks.onSwitchChange()`.
+const tricksFeature = new TricksFeatureSwitch(cfg.stateDir);
 const hill = new HillService({
   store: new HillStore(hillDir(cfg.stateDir), Date.now, undefined, (ids) => {
     for (const id of ids) hillMedia.remove(id);
@@ -2468,8 +2780,22 @@ const hill = new HillService({
     redact: cfg.redact,
   }),
   look: (fn) => hillWho.within(() => hillViews.within(fn)),
-  // The sweep closes a decision whose target ended only once the bridge lists sessions at all.
-  sessionsKnown: () => walky.who().length > 0,
+  // The sweep closes a decision whose target ended only on a census read with success (M96 spec 10): every
+  // multiplexer here answered its last read since the start, or the member's own reads did. An empty list
+  // from a good read is a fact; a failed read, or no read yet, is unknown and closes nothing.
+  censusKnown: hillCensus({
+    memberId: walkyMemberId,
+    local: () => registry.ordered().map((rt) => ({ reachable: rt.engine.current().bridge === "connected" })),
+    members: () => hillMembers(),
+  }),
+  // A card whose answer would go to a machine the roster no longer lists closes (M96 spec 10): the roster
+  // is the trust store as this bridge read it (a `leave` the lead's router takes updates it live, and
+  // `crew remove` restarts the bridge). No store, or one that did not read, removes nobody.
+  removed: hillLeftTheCrew({
+    memberId: walkyMemberId,
+    ownIds: [bridgeId.id, bridgeId.previous],
+    roster: () => hillRosterIds(trustStore.current()),
+  }),
   crewMode: () => crew.mode,
   // §25: a deposed lead's Hill is nobody's; the crown and its Decisions moved to the deputy. So is the
   // Hill of a lead whose store already names a new lead (after approve-promote, before its restart).
@@ -2496,9 +2822,13 @@ const hill = new HillService({
     ready: () => push.enabled && notifyPrefs.current().decisions && !snooze.isMuted() && crew.mode !== "peer",
     send: (message) => void push.send(message),
   }),
-  // The Hill's switch (hill/switch.ts): on by default, `<stateDir>/hill/switch.json` once the phone or
-  // `collie hill on|off` moved it. Read behind a stat check, so a switch needs no restart.
-  hillSwitch: new HillSwitch(cfg.stateDir),
+  // The Hill's switch (hill/switch.ts): an experiment, off by default. `<stateDir>/hill/switch.json` exists
+  // once the phone or `collie hill on|off` moved it; with no file a crew member follows its lead. Read
+  // behind a stat check, so a switch needs no restart. This is the one production wiring of the switch; a real
+  // change from the phone lets the skill follow (`hillSkillFollower`).
+  hillSwitch: new HillSwitch(cfg.stateDir, hillSkillFollower),
+  // A trick's own Decisions wait, unserved and unanswerable, while tricks as a whole are off (feature-switch.ts).
+  tricksOn: () => tricksFeature.on(),
   // The crew state (hill/crew-state.ts, 1.29.0): `here` by default, `<stateDir>/hill/state.json` once the
   // phone or `collie hill state` set it. Read behind a stat check, so a change needs no restart.
   crewState: new HillCrewStateFile(cfg.stateDir),
@@ -2587,6 +2917,7 @@ trickProposals =
         hill,
         tricks: () => tricks ?? null,
         crew: () => crew.mode === "lead",
+        self: { memberId: bridgeId.id, machine: hostname() },
         audit: (entry) => audit.record({ action: entry.action, detail: entry.detail }),
       });
 // At start: the proposals whose card closed while the bridge was down, and copies nothing names, go.
@@ -3227,6 +3558,7 @@ if (crewLead !== undefined && walkyMemberId !== null) {
     if (member === undefined) return null;
     return member.state.health === "reachable" ? null : member.name;
   };
+  hillMembers = () => lead.contributions().map((c) => ({ memberId: c.state.memberId, reachable: c.state.health === "reachable", sessions: c.body?.sessions ?? null }));
   walkyLeadHalf = {
     route: leadRouteRemote({
       self: walkyMemberId,
@@ -3254,7 +3586,7 @@ if (crewLead !== undefined && walkyMemberId !== null) {
         const req = new Request(url, { method: "POST", headers: { "content-type": "application/json" }, body: payload });
         const res = await lead.forward(req, url, resolved, {
           device: null,
-          audit: (entry) => audit.record({ action: entry.action, host: entry.host, device: null, detail: { forwarded: entry.outcome } }),
+          audit: (entry) => audit.record({ action: entry.action, host: entry.host, device: null, detail: forwardAuditDetail(entry) }),
         });
         const body = await res.json().catch(() => null);
         // SAFETY: `Response.json()` output IS a JsonValue by construction; only `code` and `error` are read here.
@@ -3855,6 +4187,96 @@ const tricksRunsOn = (): TricksRunsOn | null => {
   return lead === undefined || lead === null ? {} : { lead };
 };
 const tricksLabels = createSessionLabels(cfg.spacesFile ?? null);
+// A trick's repository facts for its About sheet (bridge/tricks/repo-facts.ts): stars and the last commit of a
+// github.com repository, read lazily when a phone lists tricks, cached 6 h (1 h after a failed read) in memory
+// and in the state folder, one read per repository at a time, at most 20 reads an hour for the whole bridge.
+// No timer reads; a read that lands moves the tricks rev once, so the next list carries it.
+let onRepoFacts = (): void => {};
+const repoFacts =
+  cfg.tricksDir === undefined
+    ? undefined
+    : new RepoFacts({
+        stateDir: cfg.stateDir,
+        fetch: (url, init) => fetch(url, init),
+        onChange: () => onRepoFacts(),
+        warn: (line) => console.warn(`[tricks] ${line}`),
+      });
+// The local API (M105 spec 03): a read-only Unix socket at `<stateDir>/api/sock`, open only while tricks
+// are switched on AND tricks run on this bridge (TricksService tells it: never on a crew peer, a deputy, a
+// deposed lead or Windows). No tricks folder, no socket ever. Every operation sees the
+// bridge through `ApiWorld` (bridge/api/world.ts) alone: reads only.
+// THE ONE CONDITION of the socket (decision 14, as Altan changed it on 2026-11-17): every start and stop
+// of the local API goes through this function and nothing else decides it. "The local API is on while
+// tricks are switched on, on a bridge where tricks run", with or without a trick on: the TricksService
+// tells it (`onLocalApi`, from `TricksService.localApiWanted`: `switchedOn()` and `deps.active`) when it
+// moves, on a scan and on every tick, so a switch written by the terminal closes the socket within a second.
+const localApiWanted = (wanted: boolean): boolean => wanted;
+const localApi =
+  cfg.tricksDir === undefined
+    ? undefined
+    : new ApiSocket({
+        socketPath: apiSocketPath(cfg.stateDir),
+        // The run tokens (M105 spec 05): a connection is answered only after its `hello` names the token of a
+        // trick's live run. The table is the trick runner's; the socket sees it through this one function.
+        tokens: {
+          resolve: (token: string): RunTokenHolder | null => tricks?.resolveRunToken(token) ?? null,
+          alive: (key: string): boolean => tricks?.runTokenAlive(key) ?? false,
+        },
+        // Exactly the API's world (bridge/api/world.ts `buildApiWorld`): the real services by narrow types;
+        // the builder holds the one literal, `satisfies ApiWorld`, then `narrowWorld`.
+        table: apiTable(
+          buildApiWorld({
+            version: () => collieVersion(rootDir),
+            machine: () => bridgeId.id,
+            // The one filter for real panes (review row 30): no trick session reaches an operation.
+            panes: () => registry.all().flatMap((rt) => realAgentPanes(rt.engine.current().agents).map((pane) => ({ muxSession: rt.name, pane }))),
+            instances: walkyInstances,
+            bus: eventBus,
+            accounts,
+            inside: insideHub,
+            // The phone's own read of a pane (server.ts `readPane`): same request shape, same hint.
+            readScreen: async (muxSession, paneId, lines) => {
+              const rt = registry.all().find((candidate) => candidate.name === muxSession);
+              if (rt === undefined) return { ok: false };
+              const grid = await rt.herdr.readGrid(paneId, recentRead(lines, paneReadHint(rt.engine, paneId)));
+              return grid.ok ? { ok: true, text: grid.value.text, truncated: grid.value.truncated } : { ok: false };
+            },
+            hill,
+            // `machines` (spec 04, decision 6): the Machines page's rows and the crew overview, from memory.
+            machineWatch: machineWatch ?? null,
+            crewStatus: () => crewStatus?.() ?? null,
+            // A crew peer keeps no watch: its own row, from the sampler it serves its lead from.
+            selfMachine: () => {
+              const self = machineRoster().find((entry) => entry.isLead) ?? { id: bridgeId.id, name: hostname() };
+              const row: MachineRow = { id: self.id, name: self.name, isLead: true, health: "reachable", alerts: {}, firing: [] };
+              const sample = machineSampler.latest();
+              if (sample !== null) row.sample = sample;
+              return row;
+            },
+            defaultLines: cfg.readLines,
+          }),
+        ),
+        granted: LOCAL_TIER_RIGHTS,
+        platform: HOST.platform,
+      });
+// A trick's decisions go into the hill (M94, M96); `<stateDir>/hill/tricks.json` keeps the map.
+const trickHill =
+  cfg.tricksDir === undefined
+    ? undefined
+    : new TrickHill({
+        stateDir: cfg.stateDir,
+        // With the Hill switched off (`hill.isOn()`) a trick's Decisions are not posted, and the map stays.
+        hill,
+        // A key of another member resolves only when the run's own facts listed it (M99 slice 5), through
+        // the lead's pane list, so a program cannot name a machine outside the crew.
+        addressOf: (scopeKey, listed) => scopeKeyAddress(scopeKey, (memberId) => isOwnId(bridgeId, memberId), walkyMemberId ?? LOCAL_MEMBER, hillPlace, listed),
+      });
+// A trick added under the id of an earlier one starts with none of that one's agent views or Hill keys
+// (approved.ts `forgetLeftovers`): the official list, the repository index and a proposal's yes call it.
+const forgetTrick = (id: string): void => {
+  views?.forgetTrick(id);
+  trickHill?.forget({ id, name: id, memberId: bridgeId.id });
+};
 const tricks =
   cfg.tricksDir === undefined
     ? undefined
@@ -3865,14 +4287,8 @@ const tricks =
         previousId: bridgeId.previous,
         keepId: bridgeId.keep,
         // A trick's decisions go into the hill (M94, M96); `<stateDir>/hill/tricks.json` keeps the map.
-        decisions: new TrickHill({
-          stateDir: cfg.stateDir,
-          // With the Hill switched off (`hill.isOn()`) a trick's Decisions are not posted, and the map stays.
-          hill,
-          // A key of another member resolves only when the run's own facts listed it (M99 slice 5), through
-          // the lead's pane list, so a program cannot name a machine outside the crew.
-          addressOf: (scopeKey, listed) => scopeKeyAddress(scopeKey, (memberId) => isOwnId(bridgeId, memberId), walkyMemberId ?? LOCAL_MEMBER, hillPlace, listed),
-        }),
+        decisions: trickHill,
+        forgetTrick,
         inputs: tricksInputs,
         crewWide: () => crewLead !== undefined,
         world: (memberId, opts) => {
@@ -3908,6 +4324,35 @@ const tricks =
           if (merged.sessionsOmitted !== undefined) out.sessionsOmitted = merged.sessionsOmitted;
           return out;
         },
+        // Contract 2, bound parts (bound.ts): the walky instance token of a facts session's pane, the one the
+        // phone's snapshot shows for it. This machine's own pane from the instance registry; a crew member's
+        // from the lead's last sweep of it, kept only as the four characters the merge keeps; none fails closed.
+        instanceOf: (sessionId) => {
+          const colon = sessionId.indexOf(":");
+          if (colon <= 0) return null;
+          const memberId = sessionId.slice(0, colon);
+          const paneId = sessionId.slice(colon + 1);
+          if (isOwnId(bridgeId, memberId)) {
+            const rt = registry.all().find((candidate) => candidate.engine.current().agents.some((view) => view.paneId === paneId));
+            return rt === undefined ? null : walkyInstances.tokenOf(rt.name, paneId);
+          }
+          const body = crewLead?.contributions().find((c) => c.state.memberId === memberId)?.body ?? null;
+          const instance = body?.agents.find((pane) => pane.paneId === paneId)?.instance;
+          return instance !== undefined && INSTANCE_TOKEN.test(instance) ? instance : null;
+        },
+        // The binding generation (bound.ts): this machine's own pane's agent and the agent session it names,
+        // the Send Protocol's generation. A crew member's pane has none on the wire: its binding is checked by
+        // its token alone. A pane not among the agents now (gone, or a shell between two agents) reads null.
+        generationOf: (sessionId) => {
+          const colon = sessionId.indexOf(":");
+          if (colon <= 0 || !isOwnId(bridgeId, sessionId.slice(0, colon))) return null;
+          const paneId = sessionId.slice(colon + 1);
+          for (const rt of registry.all()) {
+            const view = rt.engine.current().agents.find((candidate) => candidate.paneId === paneId);
+            if (view !== undefined) return `${view.agent}:${view.agentSession?.value ?? "-"}`;
+          }
+          return null;
+        },
         env: process.env,
         // The shell of a run line, and the Windows gate (service.ts `gated`): on Windows no trick runs yet.
         platform: HOST.platform,
@@ -3922,26 +4367,68 @@ const tricks =
         versions: versionCards,
         // Fault B: a trick stopped for its rights says so on the Hill too, once per trick and mismatch.
         rights: new RightsCards({ hill, warn: (line) => console.warn(`[tricks] ${line}`) }),
+        repoFacts,
+        // The switch for tricks as a whole: off, no program runs and no part draws (service.ts `switchedOff`).
+        feature: tricksFeature,
+        // The local API stands while `localApiWanted` says so (the tricks switch on, tricks run here); start and
+        // stop run one at a time, and the rows are told after each so a trick's "the local API is off" note follows.
+        onLocalApi: (wanted) => void Promise.resolve(localApiWanted(wanted) ? localApi?.start() : localApi?.stop()).finally(() => tricks?.apiMoved()),
+        // A trick that declares `access` gets the socket's path in its facts while the socket stands (M105 spec 04).
+        localApi: () => (localApi?.running() === true ? apiSocketPath(cfg.stateDir) : null),
+        // A run token that dies ends every local API connection bound to it at once (M105 spec 05): an `events`
+        // wait gives its slot back with the run, not 25 seconds later.
+        runTokenEnded: (key) => localApi?.endToken(key),
+        // A trick that lists `on` runs on the bus's events (bridge/tricks/triggers.ts).
+        bus: eventBus,
       });
+onRepoFacts = () => tricks?.repoFactsMoved();
 tricks?.start();
+// One scan at start, where a trick is on and tricks run here, so reacting tricks and the local API stand
+// without a phone's look (TricksService.boot). It never throws.
+void tricks?.boot();
 
 // The official list (bridge/tricks/official-install.ts): what this release can add with a tap, and the
 // add itself, in the runner's lane. Nothing is fetched until the person taps Add.
+// One fetch at a time on this bridge, from the official list or from a repository's index.
+const trickFetchSlot = new FetchSlot();
 const officialTricks =
   tricks === undefined || cfg.tricksDir === undefined
     ? undefined
     : new OfficialTricks({
+        slot: trickFetchSlot,
         configDir: dirname(cfg.tricksDir),
         stateDir: cfg.stateDir,
         env: process.env,
         runsOn: tricksRunsOn,
         // The Windows gate lives in the tricks service; the list asks it before anything is fetched.
         gate: () => tricks.gateLine(),
+        // Tricks switched off as a whole: the list stays readable, an add or an update is refused.
+        offLine: () => tricks.offLine(),
         lane: (work) => tricks.officialLane(work),
         audit: (entry) => audit.record({ action: entry.action, detail: entry.detail }),
+        forgetTrick,
+        repoFacts,
+      });
+// A repository's index (bridge/tricks/repo-index.ts): Settings, Tricks, "Add from a repository". Nothing is
+// fetched until the person taps; github.com, gitlab.com and codeberg.org only; the fetch slot is shared.
+const repoTricks =
+  tricks === undefined || cfg.tricksDir === undefined
+    ? undefined
+    : new RepoIndexTricks({
+        configDir: dirname(cfg.tricksDir),
+        stateDir: cfg.stateDir,
+        env: process.env,
+        slot: trickFetchSlot,
+        runsOn: tricksRunsOn,
+        gate: () => tricks.gateLine(),
+        offLine: () => tricks.offLine(),
+        lane: (work) => tricks.officialLane(work),
+        audit: (entry) => audit.record({ action: entry.action, detail: entry.detail }),
+        forgetTrick,
       });
 // A fetch a stopped bridge left behind under <stateDir>/tricks/ goes now, before anyone can tap Add.
 void officialTricks?.sweep();
+void repoTricks?.sweep();
 
 const server = listenOrExit("front door", cfg.host, cfg.port, () => startServer({
   cfg,
@@ -3981,6 +4468,8 @@ const server = listenOrExit("front door", cfg.host, cfg.port, () => startServer(
   usage,
   gitHeads,
   walkyInstance: (session, paneId) => walkyInstances.tokenOf(session, paneId),
+  // The pane read's `linked` (M99 spec 15): the session half of the send pick, one function.
+  paneLinked: paneIsLinked,
   walkyPaneOff: (session, paneId) => {
     const instance = walkyInstances.peek(session, paneId);
     return instance !== null && walkyOff.isOff({ session, paneId, instance });
@@ -3999,6 +4488,9 @@ const server = listenOrExit("front door", cfg.host, cfg.port, () => startServer(
   answerReceipts,
   controlReceipts,
   worktreeChoices,
+  worktreeFolderSetting,
+  harnesses: harnessProbe,
+  accounts,
   addedLaunchers,
   recentRuns,
   sent: sentStore,
@@ -4011,6 +4503,7 @@ const server = listenOrExit("front door", cfg.host, cfg.port, () => startServer(
   machines: machineWatch,
   tricks,
   officialTricks,
+  repoTricks,
   crew,
   pairing,
   launcherCopy: launcherCopySeam,
@@ -4059,7 +4552,9 @@ const server = listenOrExit("front door", cfg.host, cfg.port, () => startServer(
                         privateFolders: filesPrivateFolders(cfg),
                         redact: cfg.redact,
                         // The Windows gate (tricks/service.ts `gated`): a Windows member reads no file for a trick.
-                        allowed: () => crew.trickReads && tricks?.gated() !== true,
+                        // A member whose own switch for tricks as a whole says off reads none either; with no file
+                        // it follows its lead, as a member with no Hill file does (feature-switch.ts).
+                        allowed: () => crew.trickReads && tricks?.gated() !== true && tricksFeature.reading() !== "off",
                         audit: (detail) => audit.record({ action: "tricks.inputs", detail: { trick: detail.trick, files: detail.files, bytes: detail.bytes } }),
                       }),
                   }
@@ -4168,7 +4663,12 @@ const shutdown = async () => {
   edgeRouter?.stop();
   hookTarget?.remove();
   holdServer?.stop();
+  stopInsideWatch?.();
+  insideServer?.stop();
   walkyServer.stop();
+  // Closes the trick runner's file watches and its bus subscription.
+  tricks?.stop();
+  await localApi?.stop();
   registry.disposeAll();
   // The codex speech-to-text provider owns a `codex app-server` child (bridge/stt/codex-auth.ts).
   // A no-op when speech-to-text is off, or configured to a provider that holds nothing open.

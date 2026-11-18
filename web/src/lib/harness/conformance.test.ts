@@ -1,12 +1,18 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { parseAnsi } from "../ansi";
-import { splitLines } from "../blocks";
+import { splitLines, type Block } from "../blocks";
 import { claudeAdapter } from "./claude";
-import { describeAdapterConformance, isValidHerdrKey } from "./conformance";
-import { registeredAgents } from "./registry";
+import {
+  UNPRINTED_KEY_EXCEPTIONS,
+  describeAdapterConformance,
+  isValidHerdrKey,
+  printedKeys,
+  unprintedKeys,
+} from "./conformance";
+import { adapterFor, registeredAgents } from "./registry";
 import { WALK_GAPS, WALK_PAIRS } from "./walk-pairs";
 
 // The Claude adapter is the reference implementation the conformance suite gates. The fixture
@@ -60,6 +66,18 @@ const NEUTRAL = new Set([
   // The same footer with Claude Code 2.1.293's active-agent pointer (`❯ ◯ …`) on its last row — still
   // composer chrome below a live box, never a dialog.
   "claude--footer-pointed-agent.txt",
+  // Claude Code 2.1.319 with Remote Control on: a lone `/rc` row under the statusline, the mode row and
+  // the update notice. A status row under a live box, never a slash-command list or a dialog.
+  "claude--v2319-rc-footer-idle--w100.txt",
+  // Claude Code 2.1.323 with Remote Control on, as the lab captured it: the pill `/rc active` right-aligned under
+  // the box, on the mode row or on a row of its own. An idle box, a draft and a running turn, and the idle box
+  // with Remote Control off: composer chrome, never a dialog.
+  "claude--v2323-rc-off-idle--w100.txt",
+  "claude--v2323-rc-on-draft--w100.txt",
+  "claude--v2323-rc-on-idle-joined--w100.txt",
+  "claude--v2323-rc-on-idle-notice--w100.txt",
+  "claude--v2323-rc-on-idle-usage--w100.txt",
+  "claude--v2323-rc-on-running--w100.txt",
   // The /model picker DISMISSED: the input box is back, so this is an ordinary idle screen. It is the
   // negative control for the generic menu grammar — its statusline is `·`-separated like a key-hint
   // footer, and the input-box gate is the only thing that keeps it raw.
@@ -185,6 +203,20 @@ const NEUTRAL = new Set([
   "claude--v2301-lab-agents-panel-more.txt",
   "claude--v2301-lab-agents-panel-tasks-pill.txt",
   "claude--v2301-lab-agents-panel-focused.txt",
+  // Stock Claude Code 2.1.322 on macOS draws `⏺ main` (U+23FA) instead of Linux's `● main` (U+25CF).
+  "claude--v2322-macos-agents-panel-idle--w80.txt",
+  "claude--v2322-macos-agents-panel-focused--w80.txt",
+  "claude--v2322-macos-agents-panel-working--w80.txt",
+  // `/login` after a refused code (2.1.325): an error and `Press Enter to retry. Esc to cancel`, no
+  // grammar. The unread-dialog card carries the way out (unread-dialog.test.ts).
+  "claude--v2325-login-bad-code--w61.txt",
+  // The first run's third-party list (2.1.325, an empty config folder), which asks no question and
+  // draws a row under its options. Not lifted; it shows the unread-dialog card (unread-dialog.test.ts).
+  // The first run's theme step lifts as a pointed list (first-run-theme.ts). `/theme` in a session:
+  // the same list, no grammar, the card.
+  "claude--v2325-first-run-thirdparty-methods--w61.txt",
+  "claude--v2325-theme-command--w40.txt",
+  "claude--v2325-theme-command--w61.txt",
 ]);
 
 const allClaudeFixtures = readdirSync(PANES_DIR)
@@ -207,8 +239,20 @@ const allOpencodeFixtures = readdirSync(PANES_DIR)
 const ownFixtures = allClaudeFixtures.filter((f) => !NEUTRAL.has(f));
 const neutralFixtures = allClaudeFixtures.filter((f) => NEUTRAL.has(f));
 
+// Open unprinted-key findings (ADR 0151 rule 2, M102 spec 03): a key the screen did not print and no
+// entry of UNPRINTED_KEY_EXCEPTIONS names. Not exceptions: each waits for a decision, and goes red here
+// the day it is printed, named or no longer sent.
+const FIRST_RUN_THEME_ENTER =
+  "the first-run theme list commits its walked row with an Enter no footer prints (measured live 2026-11-16, harness/claude/first-run-theme.ts); not one of a to g";
+const UNPRINTED_KEY_FINDINGS = {
+  "claude--v2325-first-run-theme--w40.txt": FIRST_RUN_THEME_ENTER,
+  "claude--v2325-first-run-theme--w61.txt": FIRST_RUN_THEME_ENTER,
+  "claude--v2325-first-run-theme-moved--w61.txt": FIRST_RUN_THEME_ENTER,
+} satisfies Readonly<Record<string, string>>;
+
 describeAdapterConformance(claudeAdapter, {
   ownFixtures,
+  unprintedKeyFindings: UNPRINTED_KEY_FINDINGS,
   foreignFixtures: [...allOmpFixtures, ...allCodexFixtures, ...allGrokFixtures, ...allOpencodeFixtures], // the other adapters' captures — cross-adapter fail-closed
   neutralFixtures,
 });
@@ -367,5 +411,82 @@ describe("the walk-pair table", () => {
         "opencode | permission | This will allow edit until OpenCode is restarted.",
       ].toSorted(),
     );
+  });
+});
+
+// ADR 0151 rule 3: the named exceptions are a CLOSED list of seven. A new exception changes the list,
+// this test and ADR 0151 in one commit, and cannot ship unnamed.
+describe("the unprinted key exceptions (ADR 0151 rule 3)", () => {
+  const REPO = join(import.meta.dirname, "..", "..", "..", "..");
+
+  it("pins the unprinted key list at seven entries, letters a to g, in order", () => {
+    expect(UNPRINTED_KEY_EXCEPTIONS.map((e) => e.letter)).toEqual(["a", "b", "c", "d", "e", "f", "g"]);
+  });
+
+  it("gives every unprinted key exception a dialog, a step, keys and files that exist", () => {
+    for (const entry of UNPRINTED_KEY_EXCEPTIONS) {
+      expect(entry.dialog.length, entry.letter).toBeGreaterThan(10);
+      expect(entry.steps.length, entry.letter).toBeGreaterThan(0);
+      expect(entry.keys.length, entry.letter).toBeGreaterThan(0);
+      for (const key of entry.keys) expect(isValidHerdrKey(key), `${entry.letter}: ${key}`).toBe(true);
+      for (const file of entry.files) expect(existsSync(join(REPO, file)), `${entry.letter}: ${file}`).toBe(true);
+      for (const probe of entry.probes ?? []) {
+        expect(existsSync(join(REPO, probe.record)), `${entry.letter}: ${probe.record}`).toBe(true);
+      }
+    }
+  });
+
+  it("names only registered agents in the unprinted key exceptions", () => {
+    const agents = registeredAgents();
+    for (const entry of UNPRINTED_KEY_EXCEPTIONS) {
+      for (const harness of entry.harnesses) expect(agents, `${entry.letter}: ${harness}`).toContain(harness);
+    }
+  });
+
+  it("unprinted key entry f is exactly the adapters that declare a cancel key, with their keys", () => {
+    const f = UNPRINTED_KEY_EXCEPTIONS.find((e) => e.letter === "f")!;
+    const declaring = registeredAgents().filter((agent) => adapterFor(agent)?.cancelKey !== undefined);
+    expect([...f.harnesses].toSorted()).toEqual(declaring.toSorted());
+    const keys = new Set(declaring.map((agent) => adapterFor(agent)!.cancelKey!));
+    expect([...f.keys].toSorted()).toEqual([...keys].toSorted());
+  });
+});
+
+describe("printedKeys and unprintedKeys (what an unprinted key is)", () => {
+  const row = (text: string) => ({ segments: [{ text, style: {}, muted: false }] });
+  const unread = (key: string, text: string): Block => ({
+    kind: "unread-dialog",
+    cancel: { key, agent: "test", signature: text },
+    lines: [row(text)],
+  });
+
+  it("reads the keys a hint, a keycap or a row prints", () => {
+    const keys = printedKeys([
+      "Enter to set as default · s to use this session only · Esc to cancel",
+      "› 1. Yes, proceed (y)",
+      "│ ↑/↓ navigate  ⏎ select  ⎋ cancel",
+      "Tab:next answer  │  Shift+x:dismiss  │  ctrl+t to disable",
+    ]);
+    for (const key of ["enter", "s", "escape", "1", "y", "up", "down", "tab", "ctrl+t"]) {
+      expect(keys.has(key), key).toBe(true);
+    }
+  });
+
+  it("does not read a key out of plain prose", () => {
+    const keys = printedKeys(["Switch between a model and another one, for the session"]);
+    for (const key of ["a", "enter", "escape", "1"]) expect(keys.has(key), key).toBe(false);
+  });
+
+  it("reports an unprinted key no exception names, and passes a printed one", () => {
+    expect(unprintedKeys("nobody", [unread("ctrl+c", "Esc cancels")])).toEqual([
+      { kind: "unread-dialog", title: "", step: "cancel", key: "ctrl+c" },
+    ]);
+    expect(unprintedKeys("nobody", [unread("Escape", "Esc cancels")])).toEqual([]);
+  });
+
+  it("passes an unprinted key only on the harness and the step its exception names", () => {
+    // Entry f names hermes and the `cancel` step: the same key on another harness is reported.
+    expect(unprintedKeys("hermes", [unread("ctrl+c", "Esc cancels")])).toEqual([]);
+    expect(unprintedKeys("nobody", [unread("ctrl+c", "Esc cancels")])).toHaveLength(1);
   });
 });

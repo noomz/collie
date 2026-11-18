@@ -882,7 +882,7 @@ function legsRows(from: number, to: number): string {
 }
 
 const PROPOSAL_FACTS: View = [
-  { kind: "para", text: "An agent session (crew-08#propose) on workshop proposes it." },
+  { kind: "para", text: "A session on workshop proposes it." },
   { kind: "bar", attrs: { label: "It asks for" }, kids: [{ kind: "chip", text: "the belt" }, { kind: "chip", text: "the Dashboard" }] },
   { kind: "para", text: "This trick reaches the network." },
   { kind: "line", text: "3 files, on cards 2 to 3.", attrs: { role: "note" } },
@@ -930,13 +930,13 @@ const PROPOSAL_CODE_3: View = [
 export function proposalGroup(): HillDecision {
   return decision({
     title: "Switch on the trick legs?",
-    summary: "An agent session (crew-08#propose) on workshop proposes it. It has 3 files. It asks for the belt and the Dashboard, and reaches the network. It shows on 3 cards.",
+    summary: "A session on workshop proposes it. It has 3 files. It asks for the belt and the Dashboard, and reaches the network. It shows on 3 cards.",
     ago: 1,
     from: { kind: "collie", address: null, trickId: null, trickKey: null, memberId: null, harness: null, label: "Collie", host: "lodge", trickHost: null, ref: { type: "proposal", id: "legs", hash: "5d".repeat(32) } },
     target: null,
     text: "none",
     options: [
-      { intent: "on", label: "Switch it on", confirm: "Yes, switch on" },
+      { intent: "on", label: "Switch it on" },
       { intent: "later", label: "Not now" },
     ],
     group: {
@@ -950,6 +950,65 @@ export function proposalGroup(): HillDecision {
     },
   });
 }
+
+/**
+ * 68 and 69: a proposal of a folder `collie trick init` made (the first full trick run, 2026-11-16,
+ * decision 10). The helper and the notes Collie ships are named on card 1 and shown on no card; notes the
+ * agent changed show only their change against the shipped text.
+ */
+function initProposal(notesChanged: boolean, settingsLeft = false): HillDecision {
+  const notesRow: View = ["AGENTS.md", notesChanged ? "11.8 KB" : "11.7 KB", notesChanged ? "2" : "Collie's notes v1"].map((text) => ({ kind: "cell", text }));
+  const facts: View = [
+    { kind: "para", text: "A session on workshop proposes it." },
+    { kind: "bar", attrs: { label: "It asks for" }, kids: [{ kind: "chip", text: "the status line" }] },
+    ...(settingsLeft ? [{ kind: "para", text: "This trick has a settings file that does not come along. It may show nothing until you add it on the machine." } as const] : []),
+    { kind: "line", text: notesChanged ? "3 files, on card 2." : "2 files, on card 2.", attrs: { role: "note" } },
+    { kind: "para", text: "trick.ts is the helper Collie ships (v5), byte for byte, so no card shows it." },
+    ...(notesChanged ? [{ kind: "para", text: "AGENTS.md shows only how it differs from the notes Collie ships (v1)." } as const] : [{ kind: "para", text: "AGENTS.md is the notes Collie ships (v1), byte for byte, so no card shows it." } as const]),
+    {
+      kind: "table",
+      kids: [
+        { kind: "col", text: "File" },
+        { kind: "col", text: "Size" },
+        { kind: "col", text: "Card" },
+        { kind: "cell", text: "trick.toml" },
+        { kind: "cell", text: "301 B" },
+        { kind: "cell", text: "2" },
+        { kind: "cell", text: "program.ts" },
+        { kind: "cell", text: "612 B" },
+        { kind: "cell", text: "2" },
+        ...notesRow,
+        { kind: "cell", text: "trick.ts" },
+        { kind: "cell", text: "42.6 KB" },
+        { kind: "cell", text: "Collie's helper v5" },
+      ],
+    },
+  ];
+  const code: View = [
+    { kind: "diff", attrs: { file: "trick.toml" }, text: ["@@ -0,0 +1,5 @@", '+id = "git-branch"', '+name = "Git branch"', '+run = "program.ts"', '+places = ["status"]', "+contract = 1"].join("\n") },
+    { kind: "diff", attrs: { file: "program.ts" }, text: ["@@ -0,0 +1,4 @@", '+import { run } from "./trick.ts";', "+run(async (t) => {", '+  t.status({ text: "main", icon: "plug" });', "+});"].join("\n") },
+    ...(notesChanged
+      ? [{ kind: "diff", attrs: { file: "AGENTS.md" }, text: ["@@ -14,4 +14,6 @@", " ## Switching on approves this code", " ", "+Read TODO.md first.", "+", " The trick runs with the full rights of the user who runs Collie: it can read and change any file that", " user can, the Collie config folder too. Switching it on, on the phone or with `collie trick on`, is"].join("\n") } as const]
+      : []),
+  ];
+  return decision({
+    title: "Switch on the trick git-branch?",
+    summary: `A session on workshop proposes it. It has 4 files. It asks for the status line. It shows on 2 cards.`,
+    ago: 1,
+    from: { kind: "collie", address: null, trickId: null, trickKey: null, memberId: null, harness: null, label: "Collie", host: "lodge", trickHost: null, ref: { type: "proposal", id: "git-branch", hash: (settingsLeft ? "6f" : notesChanged ? "6e" : "6d").repeat(32) } },
+    target: null,
+    text: "none",
+    options: [
+      { intent: "on", label: "Switch it on" },
+      { intent: "later", label: "Not now" },
+    ],
+    group: { digest: (settingsLeft ? "c3" : notesChanged ? "c2" : "c1").repeat(32), decline: "later", parts: [{ view: facts, sha256: "21".repeat(32) }, { view: code, sha256: "22".repeat(32) }] },
+  });
+}
+export const proposalFromInit = initProposal(false);
+export const proposalNotesChanged = initProposal(true);
+/** 70: a trick that drew nothing without the config.toml it leaves behind (decision 7): card 1 says so. */
+export const proposalNeedsSettings = initProposal(false, true);
 
 /** 66: a trick stopped because its rights changed since the person's yes (fault B), OK alone. */
 export const rightsMoved = decision({
@@ -965,13 +1024,13 @@ export const rightsMoved = decision({
 /** 57: a proposed new version on two cards: the facts and new rights, then the diff by file. */
 export const versionGroup = decision({
   title: "Use the new version of legs?",
-  summary: "An agent session (crew-08#propose) on workshop proposes it. 3 files changed. It now also reaches the network. It shows on 2 cards.",
+  summary: "A session on workshop proposes it. 3 files changed. It now also reaches the network. It shows on 2 cards.",
   ago: 2,
   from: { kind: "collie", address: null, trickId: null, trickKey: null, memberId: null, harness: null, label: "Collie", host: "lodge", trickHost: null, ref: { type: "proposal", id: "legs", hash: "6e".repeat(32) } },
   target: null,
   text: "none",
   options: [
-    { intent: "on", label: "Use the new version", confirm: "Yes, use it" },
+    { intent: "on", label: "Use the new version" },
     { intent: "later", label: "Keep the old version" },
   ],
   group: {
@@ -980,7 +1039,7 @@ export const versionGroup = decision({
     parts: [
       {
         view: [
-          { kind: "para", text: "An agent session (crew-08#propose) on workshop proposes it." },
+          { kind: "para", text: "A session on workshop proposes it." },
           { kind: "para", text: "This trick reaches the network." },
           { kind: "line", text: "3 files, on card 2.", attrs: { role: "note" } },
           {
@@ -1055,5 +1114,62 @@ export const linkBody = decision({
   options: [
     { intent: "open", label: "Open the run" },
     { intent: "later", label: "Later" },
+  ],
+});
+
+/** Collie's own sender on a trick a session proposed: the proposal's ref, the trick and the code's hash. */
+function proposedBy(trickId: string, hash: string): HillDecision["from"] {
+  return { kind: "collie", address: null, trickId: null, trickKey: null, memberId: null, harness: null, label: "Collie", host: "lodge", trickHost: null, ref: { type: "proposal", id: trickId, hash } };
+}
+
+/** 71: a trick a session proposed, on one card, as the chat draws it: the facts open, the code in the fold. */
+export const chatProposal = decision({
+  title: "Switch on the trick git-branch?",
+  summary: "A session on workshop proposes it. It has 2 files. It asks for the status line and GITHUB_TOKEN, and reaches the network.",
+  ago: 1,
+  from: proposedBy("git-branch", "7a".repeat(32)),
+  target: null,
+  text: "none",
+  options: [
+    { intent: "on", label: "Switch it on" },
+    { intent: "later", label: "Not now" },
+  ],
+  view: [
+    { kind: "para", text: "It runs as you: it can read and change any file you can, and use your logins." },
+    { kind: "bar", attrs: { label: "It asks for" }, kids: [{ kind: "chip", text: "GITHUB_TOKEN" }, { kind: "chip", text: "the status line" }] },
+    { kind: "line", text: "It reaches the network.", attrs: { role: "note" } },
+    { kind: "para", text: "Asks you for: Repository" },
+    { kind: "diff", attrs: { file: "trick.toml" }, text: ["@@ -0,0 +1,6 @@", '+id = "git-branch"', '+name = "Git branch"', '+run = "program.ts"', '+places = ["status"]', '+env = ["GITHUB_TOKEN"]', "+contract = 3"].join("\n") },
+    { kind: "diff", attrs: { file: "program.ts" }, text: ["@@ -0,0 +1,6 @@", '+import { run } from "./trick.ts";', "+run(async (t) => {", '+  const res = await fetch(`https://api.github.com/repos/${t.field("repo")}/branches`, { headers: { authorization: `token ${t.env.GITHUB_TOKEN}` } });', "+  const branches = await res.json();", '+  t.status({ text: `${String(branches.length)} branches`, icon: "plug" });', "+});"].join("\n") },
+  ],
+});
+
+/** 72: a new version a session proposed, as the chat draws it: what changed, the new rights, the changed code in the fold. */
+export const chatVersion = decision({
+  title: "Use the new version of git-branch?",
+  summary: "A session on workshop proposes it. 1 file changed. It now also asks for the Dashboard.",
+  ago: 1,
+  from: proposedBy("git-branch", "7b".repeat(32)),
+  target: null,
+  text: "none",
+  options: [
+    { intent: "on", label: "Use the new version" },
+    { intent: "later", label: "Keep the old version" },
+  ],
+  view: [
+    { kind: "para", text: "It runs as you: it can read and change any file you can, and use your logins." },
+    { kind: "bar", attrs: { label: "New rights" }, kids: [{ kind: "chip", text: "the Dashboard" }] },
+    {
+      kind: "table",
+      kids: [
+        { kind: "col", text: "File" },
+        { kind: "col", text: "Change" },
+        { kind: "col", text: "Lines" },
+        { kind: "cell", text: "trick.toml" },
+        { kind: "cell", text: "changed" },
+        { kind: "cell", text: "+1 −1" },
+      ],
+    },
+    { kind: "diff", attrs: { file: "trick.toml" }, text: ["@@ -4,1 +4,1 @@", '-places = ["status"]', '+places = ["status", "dashboard"]'].join("\n") },
   ],
 });

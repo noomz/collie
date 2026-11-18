@@ -4,8 +4,22 @@ import { PROPOSE_LIMITS } from "../bridge/tricks/propose-wire.ts";
 import { PROPOSALS_MACHINE_HOUR_MAX, PROPOSALS_SENDER_HOUR_MAX, PROPOSALS_SENDER_OPEN_MAX, PROPOSAL_EXPIRY_MS } from "../bridge/tricks/proposals.ts";
 import { RUN_TIMEOUT_MS, STDOUT_CAP_BYTES } from "../bridge/tricks/run.ts";
 import { MANIFEST, PLACES, type ManifestEntry } from "../web/src/lib/tricks/catalogue.ts";
-import { TRICK_CONTRACT, TRICK_CONTRACT_DEFAULT } from "../web/src/lib/tricks/contract.ts";
-import { AGENT_VIEW_CONTRACT, AGENT_VIEW_PLACE, PLACE_KINDS, MANIFEST_KEYS, RULES_BLANK_LINES_MAX, RULES_LINE_MAX, RULES_MAX_BYTES, RULES_SPACES_MAX, type PlaceKind } from "../web/src/lib/tricks/schema.ts";
+import { TRICK_CONTRACT_DEFAULT } from "../web/src/lib/tricks/contract.ts";
+import {
+  AGENT_VIEW_CONTRACT,
+  AGENT_VIEW_PLACE,
+  BOUND_SESSIONS_MAX,
+  MENU_CONTRACT,
+  MENU_LABEL_MAX,
+  MENU_ROWS_MAX,
+  PLACE_KINDS,
+  MANIFEST_KEYS,
+  RULES_BLANK_LINES_MAX,
+  RULES_LINE_MAX,
+  RULES_MAX_BYTES,
+  RULES_SPACES_MAX,
+  type PlaceKind,
+} from "../web/src/lib/tricks/schema.ts";
 
 // `collie trick guide` (crew slice 8): how to write a trick and hand it to the person, as plain text an
 // agent reads once. It needs no bridge. Its numbers and lists come from the constants the bridge checks
@@ -54,6 +68,7 @@ export function trickGuide(): string[] {
     "  media/        PNG, JPEG or WebP pictures the view shows. Optional. Your person adds them.",
     "  AGENTS.md     the full contract, written by collie trick init. Read it.",
     "Start with: collie trick init <id>",
+    "In your pane it makes ./<id>/ in your current folder: your draft, outside this machine's tricks. --dir <folder> picks another place.",
     "",
     "THE MANIFEST, trick.toml",
     "These are all the keys. Any other key is refused.",
@@ -66,13 +81,23 @@ export function trickGuide(): string[] {
     "THE KEYS OF A PART",
     "Write only the keys and attributes a part, a node and a button take. collie trick dev lists them.",
     `With contract ${String(TRICK_CONTRACT_DEFAULT)}, Collie ignores a key it does not know, and the part still draws.`,
-    `With contract ${String(TRICK_CONTRACT)}, a key Collie does not know, at any depth of a part, leaves that part out.`,
-    "The other parts still draw, and the trick's row says which key it was.",
+    // One line with the next: `[[field]]` (contract 3) took a line in the manifest list, and the guide stays within 140.
+    "With contract 2, a key Collie does not know, at any depth of a part, leaves that part out. The other parts still draw, and the trick's row says which key it was.",
     "",
     "A TAP",
     "A tap tells your program which part, which control and, when the phone was on one, which session (from.session).",
     "Collie checks that the part and the control are ones you drew and that the session is open, nothing more.",
     "from.session is not proof of who tapped or where the part was drawn. Do not let it decide who may do what.",
+    "",
+    "SESSION SETTINGS ROWS",
+    `With contract ${String(MENU_CONTRACT)}, list "menu" in places and print a menu part: 1 to ${String(MENU_ROWS_MAX)} rows in a session's settings sheet.`,
+    `A row is a button or a switch, with an id, a label of at most ${String(MENU_LABEL_MAX)} characters, an intent and an optional icon.`,
+    "A switch carries on, your state. The phone never flips it: it waits for your next document. A button may carry confirm.",
+    "A label that reads like one of Collie's own rows is refused, never cut.",
+    "A tap names its session in from.session. Collie gives your trick no way to type into that session.",
+    `A belt mark or a menu part may name sessions: 1 to ${String(BOUND_SESSIONS_MAX)} session ids from the facts. It then shows only there.`,
+    "Collie binds each id to the pane open now. A pane id that goes to a new session shows nothing and taps nothing.",
+    "An unbound menu part shows on this machine's sessions only. Name the sessions to reach a crew member's.",
     "",
     "AGENT VIEWS",
     `A trick may add a view of a session that the session's own agent draws: list "${AGENT_VIEW_PLACE}" in places.`,
@@ -81,8 +106,7 @@ export function trickGuide(): string[] {
     "The rules file is one .md file at the top of the folder, a regular file, not a link.",
     `It holds plain ASCII and line breaks only: no tab, no other character, at most ${String(RULES_MAX_BYTES / 1024)} KiB, a line break at the end.`,
     `No line over ${String(RULES_LINE_MAX)} characters, no space at a line's end, no run of more than ${String(RULES_SPACES_MAX)} spaces, no more than ${String(RULES_BLANK_LINES_MAX)} blank lines in a row.`,
-    "The person reads the rules whole before they switch the trick on, and again on every change.",
-    "A trick with rules never takes a new version without asking.",
+    "The person reads the rules whole before they switch the trick on, and again on every change. A trick with rules never takes a new version without asking.",
     "An agent cannot propose a trick with an agent view or rules. Ask your person to add it on the machine.",
     "The person switches the view on per session, on the phone. Only then does the session read your rules:",
     "  collie trick view <id> help --session <address>",
@@ -94,7 +118,8 @@ export function trickGuide(): string[] {
     "  t.facts        the sessions, the spaces, memberId and the trigger.",
     "  t.config       config.toml, parsed.",
     "  t.tap          the tap that started this run, or null.",
-    "  t.belt, t.status, t.dashboard, t.tabbar   one part in each place.",
+    "  t.belt, t.status, t.dashboard, t.tabbar   one part in each place. A status text is 12 characters at most.",
+    "  t.menu         rows in a session's settings. t.menu(rows, { sessions }) and t.belt({ ..., sessions }) bind to sessions.",
     "  t.session      the trick's Page (the place session): a row on the Dashboard and a screen.",
     "  v.row, v.para, v.chip and the rest of v   one builder per view node.",
     "  t.decide       ask the person a question on the Hill. The answer comes back as a tap.",
@@ -124,10 +149,10 @@ export function trickGuide(): string[] {
     "",
     "HAND IT TO THE PERSON",
     "  collie trick propose <folder>",
-    "It sends the folder to the lead of your crew, or to this Collie when it has no crew.",
+    "It sends the folder, your draft ./<id>, to the lead of your crew, or to this Collie when it has no crew.",
     "Dot files, node_modules, logs, inputs/, media/, captures/ and config.toml stay behind.",
     "A proposal cannot carry a config.toml: the program reads it, so your person writes it.",
-    "The person sees a card on the Hill with your code. Nothing runs before their yes.",
+    "The person sees a card with your code in this session on the phone, and in Settings, Tricks (on the Hill too, while it is on). One tap on its Switch it on approves the code and switches the trick on. Nothing runs before their yes. Nothing is added to this machine's tricks before it.",
     `Code that does not fit one card shows on a group of up to ${String(GROUP_CODE_CARDS + 1)} cards, every line of it.`,
     `Card 1 holds the facts. ${String(GROUP_CODE_CARDS)} cards hold the code, about ${String(GROUP_CARD_CODE_BYTES / 1024)} KB each (${String(GROUP_CODE_BYTES / 1024)} KB in all).`,
     "The yes waits until the person opened every card. collie trick check says how many.",

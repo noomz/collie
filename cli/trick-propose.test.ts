@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +16,7 @@ import { PROPOSE_LINE_PREFIX, WALKY_LINE_MAX } from "../bridge/walky/parse.ts";
 import { WalkyService } from "../bridge/walky/service.ts";
 import { spaceOf } from "../bridge/walky/space.ts";
 import { PROPOSE_LINE_MS, PROPOSE_LINES_MAX, walkySocketPath, WalkyServer, type PlaceTarget } from "../bridge/walky/socket.ts";
-import { MANIFEST_KEYS, PLACE_KINDS } from "../web/src/lib/tricks/schema.ts";
+import { MANIFEST_KEYS, PLACE_KINDS, TRICKS_OFF_LINE } from "../web/src/lib/tricks/schema.ts";
 import { asJsonObject, parseJsonObject } from "../web/src/lib/json.ts";
 import { capture, context } from "./fakes.ts";
 import type { HillDeps } from "./hill.ts";
@@ -25,7 +25,8 @@ import { realFiles } from "./sys.ts";
 import { cmdTrickGuide, trickGuide } from "./trick-guide.ts";
 import { GROUP_MASKED, GROUP_TOO_LARGE, groupLineEnds } from "../bridge/tricks/card-group.ts";
 import { TRICK_HELPER } from "../bridge/tricks/scan.ts";
-import { cmdTrickPropose, PROPOSE_UNKNOWN, proposeExit, readTrickFolder } from "./trick-propose.ts";
+import { cmdTrickPropose, PROPOSE_ADDED_HERE_HINT, PROPOSE_NEEDS_CONFIG, PROPOSE_UNKNOWN, PROPOSE_WHERE, proposeExit, proposeWhere, readTrickFolder } from "./trick-propose.ts";
+import { cmdTrickInit } from "./trick.ts";
 import { askSocket } from "./walky.ts";
 
 // `collie trick guide` and `collie trick propose` (crew slice 8). The guide is checked against the schema;
@@ -45,6 +46,29 @@ function tempDir(prefix: string): string {
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
+
+describe("where the person finds a proposal (M96 spec 14)", () => {
+  test("the guide and the propose output name the Hill and Settings, Tricks, and never ask for the Hill to be switched on", () => {
+    expect(PROPOSE_WHERE).toBe("on the Hill, or in Settings, Tricks, while the Hill is off");
+    const guide = trickGuide().join("\n");
+    expect(guide).toContain("in this session on the phone, and in Settings, Tricks (on the Hill too, while it is on)");
+    for (const text of [guide, PROPOSE_WHERE]) {
+      expect(text).not.toMatch(/switch(es)? the Hill on/iu);
+      expect(text).not.toContain("Experiments");
+    }
+  });
+});
+
+describe("where the card is, from the bridge's answer (package I)", () => {
+  test("the session first while the card is tied to it, the Hill only while it is on, Settings, Tricks always; no answer of where keeps the old words", () => {
+    expect(proposeWhere({ session: true, hill: false })).toBe("in this session on the phone, and in Settings, Tricks");
+    expect(proposeWhere({ session: true, hill: true })).toBe("in this session on the phone, on the Hill, and in Settings, Tricks");
+    expect(proposeWhere({ session: false, hill: true })).toBe("on the Hill, and in Settings, Tricks");
+    expect(proposeWhere({ session: false, hill: false })).toBe("in Settings, Tricks, on the phone");
+    expect(proposeWhere(undefined)).toBe(PROPOSE_WHERE);
+    for (const where of [{ session: true, hill: false }, { session: false, hill: false }]) expect(proposeWhere(where)).not.toContain("Hill");
+  });
+});
 
 describe("collie trick guide", () => {
   test("names every manifest key and every place, from the schema", () => {
@@ -239,6 +263,35 @@ function rawAsk(path: string, line: string): Promise<JsonObject | undefined> {
 }
 
 describe("collie trick propose, over the walky socket", () => {
+  socketTest("decision 7: a trick that draws nothing without its config.toml is proposed with a warning, and the line says so", async () => {
+    const b = await bridge();
+    const d = deps([walkySocketPath(b.stateDir)], { ...inPane("%1"), PATH: process.env.PATH ?? "/usr/bin:/bin" });
+    // Without config.toml the program prints no part: the person would see nothing until they add it.
+    const program = 'import { readFileSync } from "node:fs";\nlet parts = [];\ntry { readFileSync("config.toml"); parts = [{ at: "belt", id: "belt", mark: { icon: "plug", label: "ok" } }]; } catch {}\nconsole.log(JSON.stringify({ v: 1, parts }));\n';
+    expect(await cmdTrickPropose(d, [trickFolder({ "program.ts": program, "config.toml": 'repo = "x"\n' })])).toBe(EXIT.OK);
+    expect(d.io.stderr).toContain(PROPOSE_NEEDS_CONFIG);
+    expect(b.calls[0]?.fields.settings).toBe(true);
+  });
+
+  socketTest("decision 7: a trick that draws without its config.toml carries no such line", async () => {
+    const b = await bridge();
+    const d = deps([walkySocketPath(b.stateDir)], { ...inPane("%1"), PATH: process.env.PATH ?? "/usr/bin:/bin" });
+    const program = 'console.log(JSON.stringify({ v: 1, parts: [{ at: "belt", id: "belt", mark: { icon: "plug", label: "ok" } }] }));\n';
+    expect(await cmdTrickPropose(d, [trickFolder({ "program.ts": program, "config.toml": 'repo = "x"\n' })])).toBe(EXIT.OK);
+    expect(d.io.stderr).not.toContain(PROPOSE_NEEDS_CONFIG);
+    expect(b.calls[0]?.fields.settings).toBeUndefined();
+  });
+
+  socketTest("decision 11: a scan warning prints with one prefix, warning:", async () => {
+    const b = await bridge();
+    const d = deps([walkySocketPath(b.stateDir)]);
+    expect(await cmdTrickPropose(d, [trickFolder({ "program.ts": 'await fetch("https://example.invalid/x");\nconsole.log(JSON.stringify({ v: 1, parts: [] }));\n' })])).toBe(EXIT.OK);
+    const warned = d.io.stderr.filter((line) => line.includes("program.ts:1"));
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toStartWith("warning: program.ts:1 ");
+    expect(warned[0]).not.toContain("warn: ");
+  });
+
   socketTest("from an agent's pane: the line opens with the op, the session proposes, the answer is printed", async () => {
     const b = await bridge();
     const d = deps([walkySocketPath(b.stateDir)]);
@@ -252,9 +305,39 @@ describe("collie trick propose, over the walky socket", () => {
     expect(Array.isArray(files) ? files.map((f) => asJsonObject(f)?.rel) : []).toEqual(["program.ts", "trick.toml"]);
     expect(d.io.stdout).toEqual([
       "Sent 2 files. Left behind: 1 (dot files, node_modules, logs, inputs/, media/, captures/, config.toml).",
-      "Proposed legs. Your person sees it on the Hill as dc_k3m9x2p7q1ab. Nothing runs before their yes.",
+      "Proposed legs. Your person sees it as dc_k3m9x2p7q1ab on the Hill, or in Settings, Tricks, while the Hill is off. Nothing runs before their yes.",
       "Read the answer with: collie hill status dc_k3m9x2p7q1ab",
     ]);
+    // A draft that init made in an agent's work folder proposes with nothing registered for its id.
+    const work = tempDir("propose-work-");
+    const root = tempDir("propose-config-");
+    const out = capture();
+    const init = {
+      ctx: context(inPane("%1"), { configDir: join(root, "config"), stateDir: join(root, "state") }),
+      io: out,
+      files: realFiles,
+      fetch: async () => new Response("{}"),
+      now: () => 1000,
+      paneKind: async () => "agent" as const,
+      cwd: work,
+    };
+    expect(await cmdTrickInit(init, ["draft-one"])).toBe(EXIT.OK);
+    const draft = join(work, "draft-one");
+    // Nothing was written to the tricks folder, so the bridge has no entry for the id.
+    expect(existsSync(join(root, "config", "tricks"))).toBe(false);
+    const e = deps([walkySocketPath(b.stateDir)]);
+    expect(await cmdTrickPropose(e, [draft])).toBe(EXIT.OK);
+    expect(e.io.stderr).toEqual([]);
+    expect(b.calls).toHaveLength(2);
+    const sent = b.calls[1]?.fields.files;
+    expect(Array.isArray(sent) ? sent.map((f) => asJsonObject(f)?.rel) : []).toContain("trick.toml");
+  });
+
+  socketTest("a session's proposal with the Hill off names the session and Settings, Tricks, never the Hill", async () => {
+    const b = await bridge(async () => ({ ok: true, kind: "proposal", id: "legs", hash: "h", decision: "dc_k3m9x2p7q1ab", replaced: null, where: { session: true, hill: false } }));
+    const d = deps([walkySocketPath(b.stateDir)]);
+    expect(await cmdTrickPropose(d, [trickFolder()])).toBe(EXIT.OK);
+    expect(d.io.stdout).toContain("Proposed legs. Your person sees it as dc_k3m9x2p7q1ab in this session on the phone, and in Settings, Tricks. Nothing runs before their yes.");
   });
 
   socketTest("a config.toml stays behind, and the CLI says so", async () => {
@@ -313,6 +396,24 @@ describe("collie trick propose, over the walky socket", () => {
     const d = deps([walkySocketPath(b.stateDir)]);
     expect(await cmdTrickPropose(d, [trickFolder()])).toBe(EXIT.REFUSED);
     expect(d.io.stderr).toEqual(["propose: This session proposed 6 tricks in the last hour. Wait, then propose again.", "propose: request id 0f8b5c1e-5a7d-4b8e-9f00-1a2b3c4d5e6f"]);
+    // A trick added on this machine: the CLI adds the way out on a line of its own, after the bridge's words.
+    const added = await bridge(async () => ({ ok: false, code: "exists", error: "legs was added on this machine. Change it there." }));
+    const e = deps([walkySocketPath(added.stateDir)]);
+    expect(await cmdTrickPropose(e, [trickFolder()])).toBe(EXIT.REFUSED);
+    expect(e.io.stderr).toEqual([
+      "propose: legs was added on this machine. Change it there.",
+      `propose: ${PROPOSE_ADDED_HERE_HINT}`,
+      "propose: request id 0f8b5c1e-5a7d-4b8e-9f00-1a2b3c4d5e6f",
+    ]);
+    expect(PROPOSE_ADDED_HERE_HINT).toBe("Copy the folder outside the tricks folder and propose the copy, or ask the person to switch it on.");
+  });
+
+  socketTest("tricks switched off: the bridge's off sentence is printed, nothing is proposed, and it exits STATE", async () => {
+    const b = await bridge(async () => ({ ok: false, code: "no_tricks", error: TRICKS_OFF_LINE }));
+    const d = deps([walkySocketPath(b.stateDir)]);
+    expect(await cmdTrickPropose(d, [trickFolder()])).toBe(EXIT.STATE);
+    expect(d.io.stdout).toEqual([]);
+    expect(d.io.stderr).toEqual([`propose: ${TRICKS_OFF_LINE}`, "propose: request id 0f8b5c1e-5a7d-4b8e-9f00-1a2b3c4d5e6f"]);
   });
 
   socketTest("a bridge without proposals answers unknown, and the CLI says so", async () => {

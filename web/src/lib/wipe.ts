@@ -45,10 +45,15 @@
 import { showBadge } from "@/lib/app-badge";
 import { mounted } from "@/lib/base-path";
 import { forgetAllDiffComments } from "@/lib/diff-comment-store";
-import { clearAllDrafts, clearDraft } from "@/lib/drafts";
+import { forgetAllCreateIntents } from "@/lib/create-intent";
+import { forgetAllUnknownSends, forgetUnknownSend } from "@/lib/send-again";
+import { clearIntent, forgetAllSendIntents } from "@/lib/send-intent";
+import { clearAllDrafts, clearDraft, clearPutBack } from "@/lib/drafts";
 import { forgetAgain } from "@/lib/new-page";
 import { forgetSlots } from "@/lib/slots";
 import { forgetNoPromptsConfirms } from "@/lib/no-prompts";
+import { forgetAnswers } from "@/lib/remembered-shape";
+import { forgetSessionLater } from "@/lib/hill/session-later";
 import { forgetTroubleSignals } from "@/lib/report/once";
 import {
   clearDeviceToken,
@@ -164,8 +169,36 @@ const BUILT_IN: readonly (readonly [string, WipeCleaner])[] = [
   [
     "drafts",
     (context) => {
-      if (context.reason === "password") clearDraft(context.pane.scope, context.pane.paneId);
-      else clearAllDrafts();
+      // Put back's texts are the pane's unsent words too, stored beside its draft (the M102 review 3).
+      if (context.reason !== "password") {
+        clearAllDrafts();
+        return;
+      }
+      clearDraft(context.pane.scope, context.pane.paneId);
+      clearPutBack(context.pane.scope, context.pane.paneId);
+    },
+  ],
+  [
+    // The request id of a send with no answer (lib/send-intent.ts, sessionStorage): its key holds the draft's text.
+    "send-intents",
+    (context) => {
+      if (context.reason === "password") clearIntent(context.pane.scope, context.pane.paneId);
+      else forgetAllSendIntents();
+    },
+  ],
+  [
+    // When a send ended unknown on a pane (lib/send-again.ts): a fingerprint of the text, in memory only, never stored.
+    "send-again",
+    (context) => {
+      if (context.reason === "password") forgetUnknownSend(context.pane.scope, context.pane.paneId);
+      else forgetAllUnknownSends();
+    },
+  ],
+  [
+    // The request id of a quick launch, tab or space create with no answer (lib/create-intent.ts, sessionStorage): its key holds a folder.
+    "create-intents",
+    () => {
+      forgetAllCreateIntents();
     },
   ],
   [
@@ -200,6 +233,20 @@ const BUILT_IN: readonly (readonly [string, WipeCleaner])[] = [
     "trouble-signals",
     (context) => {
       if (context.reason !== "password") forgetTroubleSignals();
+    },
+  ],
+  [
+    // The remembered shape facts (lib/remembered-shape.ts): booleans about which rows a page draws. No content, but they describe this pairing's machine.
+    "answers",
+    (context) => {
+      if (context.reason !== "password") forgetAnswers();
+    },
+  ],
+  [
+    // The "Not now" notes of trick proposals in their sessions (lib/hill/session-later.ts): decision ids of this pairing's bridge.
+    "session-later",
+    (context) => {
+      if (context.reason !== "password") forgetSessionLater();
     },
   ],
   [

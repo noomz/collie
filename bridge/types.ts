@@ -71,14 +71,23 @@ export interface AgentView {
   /** User-set pane label (herdr `pane.rename`), when one is set; absent when the pane is unlabelled. */
   paneLabel?: string;
   /**
-   * The harness's OWN session name, set in-agent by the operator: Claude's via `/rename`, read
-   * out of the pane's rendered text (see `extractClaudeSessionName` in state-engine.ts), and
-   * Muse's user-given name, read out of its journal's `session.name.changed` rows (see
-   * `museSessionNameReader` in journal/muse.ts) — never Muse's automatic session name, which
-   * every session carries and the operator never chose. Derived, not a wire field — absent for
-   * unnamed sessions and every other harness. Display priority is `paneLabel` first.
+   * The harness's OWN session name, set in-agent by the person: read from the harness's journal by
+   * its adapter (journal/*.ts `nameProbe`: Claude's `/rename` rows, pi's `/name`, an Oh My Pi title the
+   * person set), else off the screen where a harness paints it and the journal is out of reach
+   * (Claude's `/rename` name, `extractClaudeSessionName` in state-engine.ts), else Muse's user-given
+   * name from its journal (`museSessionNameReader` in journal/muse.ts). Cleaned by the one normalizer
+   * (session-title.ts). Absent for an unnamed session. Display priority is `paneLabel` first
+   * (pane-name.ts).
    */
   sessionName?: string;
+  /**
+   * The title the agent gave its session itself, from the harness's journal (journal/*.ts `nameProbe`):
+   * Claude's `ai-title`, Oh My Pi's automatic title, OpenCode's session title. Cleaned by the one
+   * normalizer (session-title.ts) and, with COLLIE_REDACT on, masked like the terminal title, because
+   * the agent wrote it. It names the pane after the two hand-set names and before a sole tab's name
+   * (pane-name.ts). Absent when the harness keeps none, and from an older peer.
+   */
+  agentTitle?: string;
   /**
    * How the agent named its session (Herdr `agent_session`), when it named one at all.
    *
@@ -246,6 +255,13 @@ export interface AgentView {
    */
   usage?: PaneUsage;
   /**
+   * The ADDED account this pane's agent runs under (M101, ADR 0141): the folder its agent reported
+   * (hook or statusLine) is that account's folder, or the bridge started this pane with that account
+   * and the agent has not reported yet. ABSENT for the Default account, for a folder no account names,
+   * and from an older bridge. Never keyed on the pane alone: a report from the agent wins over the note.
+   */
+  account?: PaneAccount;
+  /**
    * What the checkout holding this pane's folder is on: a branch, or a detached head at a full
    * object name. Read off disk by `bridge/git-head.ts` (two small files, no git process, no lock) and
    * attached at serialise time exactly as {@link cache} is.
@@ -294,6 +310,13 @@ export type PaneWire = Omit<AgentView, "agentSession" | "sessionAgent"> & {
    * and its panes read as on.
    */
   walkyOff?: true;
+  /**
+   * True when the pane is linked (M99 spec 15): the inside wire is on and a live part of the pane declares
+   * what a send needs, so a plain message goes by data (`bridge/surface/path.ts` `isLinked`). Present only
+   * then, never `false`. In a crew a member's field reaches the phone through the lead unchanged; an older
+   * member sends none, and its panes read as not linked.
+   */
+  linked?: true;
   /**
    * Which member of the crew this pane lives on — the `?h=` value completing the `(host, session,
    * paneId)` address (CREW_PROTOCOL.md §4). Present exactly when {@link SnapshotResponse.servers}
@@ -375,6 +398,14 @@ export type PaneWire = Omit<AgentView, "agentSession" | "sessionAgent"> & {
    * Absent otherwise, so a bridge without the flag sends the same bytes as before.
    */
   sendProtocol?: true;
+  /**
+   * Present (and `true`) on a terminal pane with `sendProtocol` whose bridge answers a tap on a screen
+   * card through its own `POST /api/ask/<id>`, also when a lead forwards it over the crew link (M102
+   * spec 14). A lead reads it off a member's pane to send that member's screen-card taps by the ask
+   * route instead of the raw keys route. Absent from a bridge older than the mark, whose cards keep the
+   * keys route, and on a program pane, whose answers keep the program's own route.
+   */
+  askRoute?: true;
   /**
    * Present (and `true`) when a Stop (M68) has a key to press on this pane: it has a screen Surface and
    * its profile names an interrupt key (`keys.interrupt`) and is not revoked at the binary's version.
@@ -924,6 +955,18 @@ export interface SnapshotResponse {
    * while the Hill is on, so an install that never switched it keeps its bytes.
    */
   hillOff?: true;
+  /**
+   * Tricks as a whole are switched off on this bridge (bridge/tricks/feature-switch.ts, off by default): the
+   * phone draws the switch on Settings, Tricks and the off state from it. Absent while on, and on a bridge
+   * with no tricks runner. A crew member's own value does not ride to its lead, as its `hillOff` does not.
+   */
+  tricksOff?: true;
+  /**
+   * With the Hill off (M96 spec 14): the hill's revision while it holds a card of Collie's own about a
+   * trick. The phone reads `GET /api/hill`, which then serves only those cards, for Settings, Tricks, the
+   * Dashboard's line and the card's page. Absent with the Hill on (then `hillRev` rides) and when none is held.
+   */
+  trickCardsRev?: number;
   ts: number;
 }
 
@@ -1379,10 +1422,12 @@ export interface PaneReadResponse {
   /** Herdr's monotonic pane revision — passed through for the client's prompt-select race guard. */
   revision: number;
   /**
-   * The same rows with soft wraps undone, present only when the grid shows a URL the pane's width
-   * cut in two (`hasSplitUrl`). The mirror keeps rendering `text`; the client uses this to give the
-   * fragments of one URL the href of the whole URL. ABSENT rather than empty when there is nothing
-   * to repair — the payload stays byte-identical to what it was for every other pane.
+   * The same rows with soft wraps undone. By default, present (with SGR stripped) only when the grid
+   * shows a URL the pane's width cut in two (`hasSplitUrl`): the mirror keeps rendering `text`, and
+   * the client uses this to give the fragments of one URL the href of the whole URL, while the
+   * payload stays byte-identical for every other pane. With `?logical=1`, always present on a
+   * multiplexer that implements `readLogicalText` (Herdr, Tern) with SGR styling preserved; still
+   * absent when the multiplexer has no logical read.
    */
   logicalText?: string;
   /**
@@ -1760,6 +1805,21 @@ export type WorktreeCreateResponse =
 
 
 /**
+ * GET /api/worktree/folder, and the answer to POST /api/worktree/folder/set: this machine's "Worktree
+ * folder" setting (ADR 0093, note of 2026-11-13). `dir` is the stored string, `null` when unset. `path`
+ * is its real path when it passes the folder rule now, and `problem` is the refusal when it does not;
+ * neither is set when `dir` is `null`. `fallback` is the folder the default uses while the setting is
+ * unset: Herdr's `[worktrees] directory`, else `~/.herdr/worktrees`.
+ */
+export interface WorktreeFolderSettingResponse {
+  ok: true;
+  dir: string | null;
+  path?: string;
+  problem?: { error: string; code?: ErrorCode; detail?: ApiErrorDetail };
+  fallback: string;
+}
+
+/**
  * GET /api/worktree/plan — what a branch from a folder would be, before Start (M48, ADR 0093).
  *
  * `repoRoot` is the repo's main checkout, as a real path. `defaultBranch` is what a create with
@@ -1781,6 +1841,13 @@ export type WorktreePlanResponse =
       remembered?: { base: "default" | "current"; folder: "default" | "parent"; parent?: string };
       branchValid?: boolean;
       defaultTarget?: { path: string; exists: boolean; reason?: string };
+      /**
+       * Where `defaultTarget` comes from: the machine's "Worktree folder" setting, or Herdr's rule
+       * (its config directory, else `~/.herdr/worktrees`). Answered with `defaultTarget`.
+       */
+      defaultSource?: "setting" | "rule";
+      /** The setting is set and fails the folder rule right now, so there is no `defaultTarget`; a create would refuse. */
+      defaultRefusal?: { error: string; code?: ErrorCode; detail?: ApiErrorDetail };
       parentTarget?:
         | { ok: true; path: string }
         | { ok: false; error: string; code?: ErrorCode; detail?: ApiErrorDetail };
@@ -2352,10 +2419,25 @@ export interface CacheWatchListResponse {
   entries: CacheWatchEntryWire[];
 }
 
+/**
+ * POST /api/notifications/clear — the pane slots the clear emptied (`paneTag` of the session's herd
+ * tag and the pane id), one per pane it marked seen that has no alert left. A pane still blocked on
+ * the operator is not listed: its slot keeps counting.
+ */
+export interface NotificationsClearResponse {
+  clearedSlots: string[];
+}
+
 /** GET /api/config — bridge capabilities and the build id (push setup + stale-cache detection). */
 export interface BridgeConfig {
   push: boolean;
   vapidPublicKey: string;
+  /**
+   * The bridge's API number (M102 spec 14 decision 4, `web/src/lib/api-version.ts`): the phone compares
+   * it with its bundle's and says so when they differ. Absent from an older bridge, and from a
+   * hand-built body that does not pass it.
+   */
+  apiVersion?: number;
   /** Build id of the bundle the bridge is currently serving (for stale-cache detection). */
   build?: string;
   /**
@@ -2575,3 +2657,103 @@ export const STATUS_RANK = {
   idle: 3,
   done: 4,
 } satisfies Record<AgentStatus, number>;
+
+// ── Accounts (M101, ADR 0141): GET /api/accounts, POST /api/accounts[/remove] ──────────────────
+
+/** An added account as a pane carries it. */
+export interface PaneAccount {
+  id: string;
+  label: string;
+}
+
+/** One usage window of an account, in the harness's own key. */
+export interface AccountWindow {
+  window: string;
+  label?: string;
+  /** Percent used, 0 to 100. `null`: the window passed its reset time and was not read since. */
+  usedPct: number | null;
+  resetsAt: number | null;
+}
+
+/** An account-capable harness found on this machine. */
+export interface AccountHarness {
+  /** A HARNESS_LAUNCHES id. */
+  id: string;
+  label: string;
+  /** What picks the folder, as text: `CLAUDE_CONFIG_DIR`. */
+  select: string;
+  /** What Add may offer for it on this machine. */
+  kinds: ("shared" | "own")[];
+  /** The pattern of a new folder, `~/.claude-{slug}`. */
+  newFolder: string;
+  /** The command that starts the agent (its `HARNESS_LAUNCHES` binary), for the terminal line the page shows. */
+  binary: string;
+  /** Present when a sign-in that ends well reaches the running sessions of the folder (the adapter's word). */
+  reachesRunningSessions?: true;
+  /** The hosts of the agent's sign-in address the phone may open (the adapter's list). Absent: none. */
+  signInHosts?: string[];
+}
+
+/** One account row. Per harness, the Default row first, then the added rows in the order added. */
+export interface AccountRow {
+  /** Default: `<harness>:default`. Added: an opaque stable id. */
+  id: string;
+  harness: string;
+  /** Default rows carry "" and the app writes its own word. */
+  label: string;
+  kind: "default" | "shared" | "own";
+  /** For reading: `~/.claude-work` when under the home folder. */
+  folder: string;
+  /** What a desktop terminal needs: `CLAUDE_CONFIG_DIR=~/.claude-work claude`; Default: `claude`. */
+  startLine: string;
+  windows: AccountWindow[];
+  /** Epoch ms of the reading in `windows`; `null` when never read. */
+  seenAt: number | null;
+  /** A pane of this account runs now. */
+  live: boolean;
+  /**
+   * How many agent panes of this account run now, a sign-in session left out. Absent when none. Counted
+   * as {@link live} is: the folder a session reported, else the launch note.
+   */
+  running?: number;
+  /**
+   * The ids of the panes on THIS machine that run in this row's folder: exactly the panes {@link running}
+   * counts, a sign-in session left out, at most 64. Absent when none. A pane in a folder no row names is
+   * in no row's list, so the phone offers nothing for it (additive-optional; an older bridge sends none).
+   */
+  panes?: string[];
+  /** Shared only: entries that should be links and are not. */
+  unlinked?: string[];
+  /** Only where the adapter can tell. */
+  hooks?: "installed" | "missing";
+  /**
+   * Who is signed in, from the agent's own status command (M101 spec 04). Absent: unknown, an agent
+   * with no status command, or not read yet. Never on disk, in an audit line or in a log line.
+   */
+  identity?: AccountIdentity;
+}
+
+/** Who is signed in on an account's folder. The email is private: memory and this wire only. */
+export interface AccountIdentity {
+  signedIn: boolean;
+  email?: string;
+  /** The plan as the agent names it, `max`. */
+  plan?: string;
+}
+
+/** A folder in use that is not added yet. */
+export interface FoundFolder {
+  harness: string;
+  /** For reading, as {@link AccountRow.folder}. */
+  folder: string;
+  /** The absolute path, the value an Add sends back. */
+  path: string;
+  why: "reported" | "name";
+}
+
+/** The body of `GET /api/accounts`. */
+export interface AccountsBody {
+  harnesses: AccountHarness[];
+  accounts: AccountRow[];
+  found: FoundFolder[];
+}

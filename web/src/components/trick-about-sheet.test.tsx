@@ -1,13 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { OfficialTrickAboutSheet, TrickAboutSheet, aboutParagraphs } from "@/components/trick-about-sheet";
+import { OfficialTrickAboutSheet, TrickAboutSheet, aboutParagraphs, repoFactsLine } from "@/components/trick-about-sheet";
 import { readOfficialTricksReply, readTrick } from "@/lib/tricks/wire";
-import { ABOUT_MAX, AGENT_VIEW_TAP_WORDS, AGENT_VIEW_WORDS, RULES_WORDS, type WireOfficialTrick, type WireTrickInfo } from "@/lib/tricks/schema";
+import { ABOUT_MAX, AGENT_VIEW_TAP_WORDS, AGENT_VIEW_WORDS, MENU_TAP_WORDS, MENU_WORDS, RULES_WORDS, type WireOfficialTrick, type WireTrickInfo } from "@/lib/tricks/schema";
 
 // A trick's About sheet: the name as the title, the description and the about paragraphs, then two groups
 // built only from what the bridge already sends for the row.
@@ -104,6 +104,63 @@ describe("TrickAboutSheet", () => {
       "Asks for the environment names GH_TOKEN.",
       "This trick reaches the network.",
     ]);
+  });
+
+  it("says `on` and `watch` as rights, in the two lines of the proposal card, after the environment names", () => {
+    open({ ...FULL, warnings: undefined, events: ["turn.end", "ask.open"], watch: ["~/notes/todo.md", "/etc/hosts"] });
+    const does = within(screen.getByRole("dialog")).getByRole("list", { name: "What it does" });
+    const rows = within(does).getAllByRole("listitem").map((li) => li.textContent);
+    expect(rows.slice(-2)).toEqual(["Runs when a session changes state.", "Runs when these files change: ~/notes/todo.md, /etc/hosts."]);
+  });
+
+  it("a trick with a program and `on` or `watch` says it keeps running with no phone open, last of the rows", () => {
+    const line = "It keeps running with no phone open.";
+    const rowsOf = (trick: WireTrickInfo): (string | null)[] => {
+      const { unmount } = open(trick);
+      const does = within(screen.getByRole("dialog")).getByRole("list", { name: "What it does" });
+      const rows = within(does).getAllByRole("listitem").map((li) => li.textContent);
+      unmount();
+      return rows;
+    };
+    const reacting: WireTrickInfo = { ...FULL, run: "bun run gates.ts", access: "see" };
+    expect(rowsOf({ ...reacting, events: ["turn.end"] }).at(-1)).toBe(line);
+    expect(rowsOf({ ...reacting, watch: ["~/notes/todo.md"] }).at(-1)).toBe(line);
+    // After the warnings and the level line too, never before them.
+    expect(rowsOf({ ...reacting, events: ["turn.end"] }).at(-2)).toBe("This trick reaches the network.");
+    // A tap-only trick, a plain timer and a trick with no program do not say it.
+    expect(rowsOf(reacting)).not.toContain(line);
+    expect(rowsOf({ ...reacting, everyMs: 30_000 })).not.toContain(line);
+    expect(rowsOf({ ...FULL, events: ["turn.end"] })).not.toContain(line);
+  });
+
+  it("says the level of access in its one plain line, none for none, and never calls it a permission", () => {
+    const see = "It reads your machines, sessions, usage and the Hill.";
+    const read = "It reads your sessions' screens.";
+    const runsAsYou = "This trick runs as you on this machine. It can do there what you can do.";
+    const rowsFor = (access: WireTrickInfo["access"]): (string | null)[] => {
+      const trick: WireTrickInfo = { ...FULL, warnings: undefined };
+      if (access !== undefined) trick.access = access;
+      const { unmount } = open(trick);
+      const does = within(screen.getByRole("dialog")).getByRole("list", { name: "What it does" });
+      const rows = within(does).getAllByRole("listitem").map((li) => li.textContent);
+      unmount();
+      return rows;
+    };
+    expect(rowsFor("see").slice(-2)).toEqual([runsAsYou, see]);
+    expect(rowsFor("read").slice(-2)).toEqual([runsAsYou, read]);
+    expect(rowsFor(undefined).join(" ")).not.toMatch(/It reads your|runs as you on this machine/u);
+    for (const text of [see, read]) expect(text).not.toMatch(/permission|can only/iu);
+    // A level this phone does not know has one fixed line (review 3, item 4).
+    expect(rowsFor("unknown").at(-1)).toBe("It asks for access this app does not know yet. Update the app before you say yes.");
+    // The wire reader keeps one of the two words, keeps any other text as `unknown`, and drops what is not text.
+    const wire = { host: "lodge", id: "gates", name: "Release Gates", icon: "flask", on: true, state: "ok", places: ["belt"] };
+    expect(readTrick({ ...wire, access: "read" })?.access).toBe("read");
+    expect(readTrick({ ...wire, access: "send" })?.access).toBe("unknown");
+    expect(readTrick({ ...wire, access: 3 })?.access).toBeUndefined();
+    expect(readTrick({ ...wire, access: "" })?.access).toBeUndefined();
+    expect(readTrick({ ...wire, access: "send", accessOff: true })).toMatchObject({ access: "unknown", accessOff: true });
+    expect(readTrick({ ...wire, access: "see", accessOff: true })).toMatchObject({ access: "see", accessOff: true });
+    expect(readTrick({ ...wire, accessOff: true })?.accessOff).toBeUndefined();
   });
 
   it("leaves out each row whose fact is absent, and the whole group when none is there", () => {
@@ -217,7 +274,13 @@ describe("an agent view and its rules (contract 2)", () => {
   it("lists the two rights lines and the rules line under What it does, with no later note, in the schema's words", () => {
     render(<TrickAboutSheet trick={VIEW_TRICK} open onClose={vi.fn()} />);
     const does = screen.getByRole("list", { name: "What it does" });
-    expect([...does.querySelectorAll("li")].map((li) => li.textContent)).toEqual(["Draws in: agent view.", AGENT_VIEW_WORDS, AGENT_VIEW_TAP_WORDS, RULES_WORDS]);
+    expect([...does.querySelectorAll("li")].map((li) => li.textContent)).toEqual([
+      "Your agent reads this trick's instructions and draws its answers. That uses tokens.",
+      "Draws in: agent view.",
+      AGENT_VIEW_WORDS,
+      AGENT_VIEW_TAP_WORDS,
+      RULES_WORDS,
+    ]);
     expect(AGENT_VIEW_WORDS).toBe("Adds a view of a session that the session's own agent draws. You switch it on per session.");
     expect(AGENT_VIEW_TAP_WORDS).toBe("A tap in that view sends a message in your name to that session only.");
     expect(RULES_WORDS).toBe("Gives your agents instructions written by its author.");
@@ -290,5 +353,147 @@ describe("review 8 V-N5: rules the phone cannot show, and no auto switch on any 
   it("an agent view never shows the Updates switch, even when its rules did not arrive", () => {
     render(<TrickAboutSheet trick={VIEW} open onClose={vi.fn()} onAuto={vi.fn()} />);
     expect(screen.queryByText("Updates")).toBeNull();
+  });
+});
+
+describe("the menu place's two lines (contract 2)", () => {
+  it("an installed trick with session settings rows and an Official entry that adds them say the same two lines, the schema's", () => {
+    const trick: WireTrickInfo = { host: "lodge", id: "ci", name: "CI", icon: "flask", on: true, state: "ok", places: ["menu"], provenance: { via: "folder" } };
+    render(<TrickAboutSheet trick={trick} open onClose={vi.fn()} />);
+    const does = screen.getByRole("list", { name: "What it does" });
+    expect([...does.querySelectorAll("li")].map((li) => li.textContent)).toEqual(["Draws in: session settings.", MENU_WORDS, MENU_TAP_WORDS]);
+    cleanup();
+    const entry: WireOfficialTrick = { id: "ci", name: "CI", description: "Reruns CI.", repo: "https://example.com/tricks.git", repoName: "owner/tricks", commit: "a".repeat(40), state: "absent", addsMenu: true };
+    render(<OfficialTrickAboutSheet entry={entry} open onClose={vi.fn()} busy={false} canWrite onAdd={vi.fn()} />);
+    const official = screen.getByRole("list", { name: "What it does" });
+    expect([...official.querySelectorAll("li")].map((li) => li.textContent)).toEqual([MENU_WORDS, MENU_TAP_WORDS]);
+    expect(readOfficialTricksReply(JSON.parse(JSON.stringify({ tricks: [entry] })))?.tricks[0]?.addsMenu).toBe(true);
+  });
+});
+
+describe("where it comes from: the repository's link, its facts and the version (2026-11-12)", () => {
+  const URL = "https://github.com/owner/gates-trick";
+  const FROM_REPO: WireTrickInfo = { ...FULL, provenance: { ...FULL.provenance, via: "repo", url: URL } };
+  const FACTS = { stars: 1234, pushedAt: "2026-11-10T23:30:00Z" };
+  const from = () => {
+    const group = document.querySelector<HTMLElement>('[data-section="from"]');
+    if (group === null) throw new Error("no from group");
+    return group;
+  };
+
+  it("links the repository in the Hill Decision link's shape, the host whole, in a new tab with no opener", () => {
+    render(<TrickAboutSheet trick={FROM_REPO} open onClose={vi.fn()} timeZone="UTC" />);
+    const link = within(from()).getByRole("link", { name: /Open the repository/ });
+    expect(link.getAttribute("href")).toBe(URL);
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(link.className).toContain("min-h-11");
+    expect(link.querySelector("[data-trick-link-host]")?.getAttribute("title")).toBe("github.com");
+    // No facts yet: nothing, and no space held for them beyond the row's own 44 px.
+    expect(link.querySelector('[data-line="repo-facts"]')).toBeNull();
+  });
+
+  it("puts the stars and the last commit's date inside the link row, in a pinned zone", () => {
+    const view = render(<TrickAboutSheet trick={{ ...FROM_REPO, repoFacts: FACTS }} open onClose={vi.fn()} timeZone="UTC" />);
+    expect(from().querySelector('[data-line="repo-facts"]')).toHaveTextContent("1,234 stars, last commit Nov 10, 2026");
+    expect(from().querySelector('[data-slot="trick-repo-link"] [data-line="repo-facts"]')).not.toBeNull();
+    view.unmount();
+    render(<TrickAboutSheet trick={{ ...FROM_REPO, repoFacts: { stars: 1, pushedAt: FACTS.pushedAt } }} open onClose={vi.fn()} timeZone="Pacific/Auckland" />);
+    expect(from().querySelector('[data-line="repo-facts"]')).toHaveTextContent("1 star, last commit Nov 11, 2026");
+  });
+
+  it("writes the star count in the app's number format, one or many, never compact", () => {
+    const line = (stars: number) => repoFactsLine({ stars, pushedAt: "2026-11-10T12:00:00Z" }, "UTC");
+    expect(line(1)).toBe("1 star, last commit Nov 10, 2026");
+    expect(line(999)).toBe("999 stars, last commit Nov 10, 2026");
+    expect(line(1234)).toBe("1,234 stars, last commit Nov 10, 2026");
+    expect(line(12500)).toBe("12,500 stars, last commit Nov 10, 2026");
+  });
+
+  it("shows no facts for a host other than github.com, and no link for a trick not from a repository or a bad URL", () => {
+    const other = "https://codeberg.org/owner/gates-trick";
+    const view = render(<TrickAboutSheet trick={{ ...FROM_REPO, provenance: { ...FROM_REPO.provenance, via: "repo", url: other }, repoFacts: FACTS }} open onClose={vi.fn()} />);
+    expect(within(from()).getByRole("link").getAttribute("href")).toBe(other);
+    expect(from().querySelector("[data-trick-link-host]")?.getAttribute("title")).toBe("codeberg.org");
+    expect(from().querySelector('[data-line="repo-facts"]')).toBeNull();
+    view.unmount();
+    for (const provenance of [{ via: "folder" as const, url: URL }, { via: "repo" as const, repo: "owner/x", url: "http://github.com/owner/x" }, { via: "repo" as const, repo: "owner/x" }]) {
+      const again = render(<TrickAboutSheet trick={{ ...FULL, provenance, repoFacts: FACTS }} open onClose={vi.fn()} />);
+      expect(within(from()).queryByRole("link")).toBeNull();
+      again.unmount();
+    }
+  });
+
+  it("shows the version when the manifest names one, and no row when it does not", () => {
+    const view = render(<TrickAboutSheet trick={{ ...FROM_REPO, version: "1.2.0" }} open onClose={vi.fn()} />);
+    expect(from().querySelector('[data-line="version"]')).toHaveTextContent("Version 1.2.0");
+    view.unmount();
+    render(<TrickAboutSheet trick={FROM_REPO} open onClose={vi.fn()} />);
+    expect(from().querySelector('[data-line="version"]')).toBeNull();
+  });
+
+  it("the wire keeps a version, facts and a source URL that hold, and drops ones that do not", () => {
+    const raw = { ...FROM_REPO, version: "1.2.0", repoFacts: FACTS };
+    expect(readTrick(JSON.parse(JSON.stringify(raw)))).toMatchObject({ version: "1.2.0", repoFacts: FACTS, provenance: { url: URL } });
+    const bad = readTrick(JSON.parse(JSON.stringify({ ...FROM_REPO, version: "1 2", repoFacts: { stars: -1, pushedAt: "yesterday" }, provenance: { via: "repo", repo: "owner/x", url: "https://user:pw@github.com/owner/x" } })));
+    expect(bad?.version).toBeUndefined();
+    expect(bad?.repoFacts).toBeUndefined();
+    expect(bad?.provenance?.url).toBeUndefined();
+  });
+
+  it("the not-added sheet links the list's repository with its facts", () => {
+    const entry: WireOfficialTrick = { id: "morph", name: "Morph", description: "One screen.", repo: "https://github.com/AltanS/collie-tricks", repoName: "AltanS/collie-tricks", commit: "0d80399aa", state: "absent", repoFacts: FACTS };
+    render(<OfficialTrickAboutSheet entry={entry} open onClose={vi.fn()} busy={false} canWrite onAdd={vi.fn()} timeZone="UTC" />);
+    const rows = [...from().querySelectorAll("li")].map((li) => li.textContent);
+    expect(rows[0]).toBe("From AltanS/collie-tricks @ 0d80399");
+    expect(within(from()).getByRole("link").getAttribute("href")).toBe("https://github.com/AltanS/collie-tricks");
+    expect(from().querySelector('[data-line="repo-facts"]')).toHaveTextContent("1,234 stars, last commit Nov 10, 2026");
+  });
+});
+
+describe("why a trick uses agent tokens: the first row of What it does (2026-11-12)", () => {
+  const PROGRAM: WireTrickInfo = { host: "lodge", id: "inbox", name: "PR Inbox", icon: "plug", on: true, state: "ok", places: ["belt"], description: "Open pull requests." };
+  const ENTRY: WireOfficialTrick = {
+    id: "pr-inbox",
+    name: "PR Inbox",
+    description: "Open pull requests and issues that wait for you.",
+    repo: "https://github.com/AltanS/collie-tricks",
+    repoName: "AltanS/collie-tricks",
+    commit: "0c1e5d82346486815073fedcdb994bc4c2041b55",
+    state: "absent",
+  };
+  const firstRow = (): string | null | undefined => screen.getByRole("list", { name: "What it does" }).querySelector("li")?.textContent;
+
+  it("says the sentence of its reason first, and draws no chip in the sheet", () => {
+    const rows: [WireTrickInfo, string][] = [
+      [{ ...PROGRAM, rules: { file: "rules.md", text: "Draw one screen.\n" } }, "Your agent reads this trick's instructions. That uses tokens."],
+      [{ ...PROGRAM, decidesReply: true }, "Your answers to its Decisions go to an agent as messages. That uses tokens."],
+    ];
+    for (const [trick, sentence] of rows) {
+      render(<TrickAboutSheet trick={trick} open onClose={vi.fn()} />);
+      expect(firstRow()).toBe(sentence);
+      expect(screen.getByRole("dialog").querySelector('[data-slot="token-use"]')).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("says nothing of tokens for a program trick, even one whose last run listed Decisions", () => {
+    render(<TrickAboutSheet trick={{ ...PROGRAM, decides: true }} open onClose={vi.fn()} />);
+    expect(firstRow()).toBe("Draws in: belt.");
+    expect(screen.getByRole("dialog").textContent).not.toContain("tokens");
+  });
+
+  it("an official entry says it before Add, from the pin alone", () => {
+    render(<OfficialTrickAboutSheet entry={{ ...ENTRY, decidesReply: true }} open onClose={vi.fn()} busy={false} canWrite onAdd={vi.fn()} />);
+    expect(firstRow()).toBe("Your answers to its Decisions go to an agent as messages. That uses tokens.");
+    cleanup();
+    render(<OfficialTrickAboutSheet entry={{ ...ENTRY, givesRules: true, agentView: true }} open onClose={vi.fn()} busy={false} canWrite onAdd={vi.fn()} />);
+    expect([...screen.getByRole("list", { name: "What it does" }).querySelectorAll("li")].map((li) => li.textContent)).toEqual([
+      "Your agent reads this trick's instructions and draws its answers. That uses tokens.",
+      RULES_WORDS,
+    ]);
+    cleanup();
+    render(<OfficialTrickAboutSheet entry={ENTRY} open onClose={vi.fn()} busy={false} canWrite onAdd={vi.fn()} />);
+    expect(screen.queryByRole("list", { name: "What it does" })).toBeNull();
   });
 });

@@ -1,15 +1,22 @@
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { writeTricksFeature } from "../bridge/tricks/feature-switch.ts";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { parseJsonObject } from "../web/src/lib/json.ts";
+import { AgentViewStore, trickViewsDir, viewEntry } from "../bridge/agent-view/store.ts";
+import { TRICKS_MAP_FILE } from "../bridge/tricks/hill.ts";
+import { hillDir } from "../bridge/hill/store.ts";
 import { trickCodeHash } from "../bridge/tricks/code-hash.ts";
 import { ORIGIN_FILE, parseOrigin } from "../bridge/tricks/origin.ts";
-import { APPROVED_DIR, approvedTrickDir, PENDING_DIR, switchesPath, trickStateDir } from "../bridge/tricks/paths.ts";
-import { parseSwitches } from "../bridge/tricks/switches.ts";
+import { APPROVED_DIR, approvedCopyDir, approvedTrickDir, PENDING_DIR, switchesPath, trickStateDir } from "../bridge/tricks/paths.ts";
+import { parseSwitches, withSwitch, writeSwitches } from "../bridge/tricks/switches.ts";
 import { EXIT, type Io } from "./io.ts";
 import { realFiles } from "./sys.ts";
-import { ADD_LIMITS, cmdTrickAdd, cmdTrickRemove, cmdTrickUpdate, GIT_HARDENING, manifestBlurb, OFFICIAL_TRICKS_REPO, parseTrickSource, sourceRefProblem, spawnGit, type GitRunner, type TrickAddDeps } from "./trick-add.ts";
+import { hostFor } from "../bridge/host.ts";
+import { TRICKS_OFF_LINE } from "../web/src/lib/tricks/schema.ts";
+import { ADD_LIMITS, cmdTrickAdd, cmdTrickRemove, cmdTrickUpdate, GIT_HARDENING, gitRunEnv, manifestBlurb, OFFICIAL_TRICKS_REPO, parseTrickSource, sourceRefProblem, spawnGit, type GitRunner, type TrickAddDeps } from "./trick-add.ts";
 import { cmdTrickList, cmdTrickSwitch } from "./trick.ts";
 
 // `collie trick add`, `update` and `remove` (review 15), against a local bare repository through the test
@@ -93,6 +100,8 @@ async function rig(official?: string): Promise<Rig> {
   await mkdir(configDir, { recursive: true });
   await mkdir(stateDir, { recursive: true });
   await mkdir(home, { recursive: true });
+  // Tricks as a whole are on: add and update bring code in only then (bridge/tricks/feature-switch.ts).
+  writeTricksFeature(stateDir, true);
   const out: string[] = [];
   const err: string[] = [];
   const io: Io = { out: (l) => out.push(l), err: (l) => err.push(l) };
@@ -131,6 +140,21 @@ async function expectNoLeftovers(r: Rig): Promise<void> {
   // The folders of approved and pending copies are the bridge's, not a leftover of add or update.
   expect(tricks.filter((n) => n.startsWith(".") && n !== APPROVED_DIR && n !== PENDING_DIR)).toEqual([]);
 }
+
+describe("a git run's environment on Windows (fault a)", () => {
+  test("keeps Path in its own spelling and drops every GIT_ name in any case on Windows, exact case on POSIX", () => {
+    const base = { Path: "C:\\Git\\cmd", GIT_DIR: "C:\\evil", git_config_global: "C:\\evil.cfg", Git_Exec_Path: "C:\\evil" };
+    const win = gitRunEnv(base, false, hostFor("win32"));
+    expect(win.Path).toBe("C:\\Git\\cmd");
+    expect(Object.keys(win).filter((k) => k.toUpperCase().startsWith("GIT_") && !k.startsWith("GIT_"))).toEqual([]);
+    expect(win.GIT_DIR).toBeUndefined();
+    expect(win.GIT_ALLOW_PROTOCOL).toBe("https");
+    // POSIX keeps a lower-case name: a git there does not read `git_config_global` as GIT_CONFIG_GLOBAL.
+    const onPosix = gitRunEnv(base, false, hostFor("linux"));
+    expect(onPosix.git_config_global).toBe("C:\\evil.cfg");
+    expect(onPosix.GIT_DIR).toBeUndefined();
+  });
+});
 
 describe("collie trick add: the source", () => {
   test("a bare name is that folder of the official repository, with or without a ref", () => {
@@ -223,6 +247,57 @@ describe("collie trick add: the source", () => {
 });
 
 describe.if(posix)("collie trick add", () => {
+  test("review J note: a switch entry and approved copies a removed folder left are gone before the new trick lands", async () => {
+    const repo = await fixtureRepo([{ "trick.toml": txt(MANIFEST("legs")), "program.sh": PROGRAM }]);
+    const r = await rig();
+    // The old trick of this id: on, taking changes without asking, its approved copy still on disk, its folder removed by hand.
+    const old = "c".repeat(64);
+    await writeSwitches(r.stateDir, { on: new Map([["legs", { at: "2026-11-09T09:00:00Z", hash: old, auto: true, by: "phone", powers: null }]]), version: 3 });
+    const stale = approvedCopyDir(r.configDir, "legs", old);
+    await mkdir(join(stale, "inputs"), { recursive: true });
+    await writeFile(join(stale, "inputs", "stale.txt"), "left by the old trick");
+    expect(await cmdTrickAdd(r, [repo.bare])).toBe(EXIT.OK);
+    // The new trick is off: no entry, so no auto flag and no approved hash of the old code can carry to it.
+    expect(parseSwitches(await readFile(switchesPath(r.stateDir), "utf8")).switches.on.has("legs")).toBe(false);
+    expect(await stat(approvedTrickDir(r.configDir, "legs")).catch(() => null)).toBeNull();
+    // A folder that is there is no leftover: another add of the same id is refused and touches nothing.
+    await writeSwitches(r.stateDir, withSwitch({ on: new Map(), version: 3 }, "legs", true, "2026-11-10T09:00:00Z", old));
+    await mkdir(stale, { recursive: true });
+    expect(await cmdTrickAdd(r, [repo.bare])).toBe(EXIT.FAIL);
+    expect(parseSwitches(await readFile(switchesPath(r.stateDir), "utf8")).switches.on.has("legs")).toBe(true);
+    expect((await stat(stale)).isDirectory()).toBe(true);
+  });
+
+  test("review J, last read: the state folder, the agent views and the Hill keys of a removed trick are gone before the new trick lands; another trick's stay", async () => {
+    const repo = await fixtureRepo([{ "trick.toml": txt(MANIFEST("legs")), "program.sh": PROGRAM }]);
+    const r = await rig();
+    // What the old trick of this id left: the person's values, a file its program saved, two views, a posted key.
+    const state = trickStateDir(r.stateDir, "legs");
+    await mkdir(join(state, ".collie"), { recursive: true });
+    await writeFile(join(state, ".collie", "values.json"), '{"v":1,"values":{"rows":9}}\n');
+    await writeFile(join(state, "saved.json"), '{"old":true}\n');
+    const views = new AgentViewStore(trickViewsDir(r.stateDir), Date.now, () => {});
+    views.put(viewEntry({ trick: "legs", session: "lodge/%1", on: true, shows: 0, changedAt: 1 }));
+    views.put(viewEntry({ trick: "legs", session: "lodge/%2", on: true, shows: 0, changedAt: 2 }));
+    views.put(viewEntry({ trick: "morph", session: "lodge/%1", on: true, shows: 0, changedAt: 3 }));
+    const key = { decisionId: "dc_1", hash: "a".repeat(16), state: "answered", seq: 1 };
+    await mkdir(hillDir(r.stateDir), { recursive: true });
+    await writeFile(join(hillDir(r.stateDir), TRICKS_MAP_FILE), `${JSON.stringify({ v: 1, tricks: { legs: { gen: 2, keys: { ask: key } }, morph: { gen: 0, keys: { ask: key } } } })}\n`);
+    expect(await cmdTrickAdd(r, [repo.bare])).toBe(EXIT.OK);
+    expect(await stat(join(state, ".collie", "values.json")).catch(() => null)).toBeNull();
+    expect(await stat(join(state, "saved.json")).catch(() => null)).toBeNull();
+    const after = new AgentViewStore(trickViewsDir(r.stateDir), Date.now, () => {});
+    expect(after.all().map((entry) => `${entry.trick} ${entry.session}`)).toEqual(["morph lodge/%1"]);
+    const map = parseJsonObject(await readFile(join(hillDir(r.stateDir), TRICKS_MAP_FILE), "utf8"));
+    // The keys of the old trick are gone, its generation went up (a request id is never reused); the other trick is as it was.
+    expect(map?.tricks).toEqual({ legs: { gen: 3, keys: {} }, morph: { gen: 0, keys: { ask: key } } });
+    // A folder that is there is no leftover: the refused second add removes nothing.
+    await mkdir(join(state, ".collie"), { recursive: true });
+    await writeFile(join(state, "saved.json"), '{"mine":true}\n');
+    expect(await cmdTrickAdd(r, [repo.bare])).toBe(EXIT.FAIL);
+    expect((await stat(join(state, "saved.json"))).isFile()).toBe(true);
+  });
+
   test("adds a trick at the top of a repository, off, with its origin record", async () => {
     const repo = await fixtureRepo([{ "trick.toml": txt(MANIFEST("legs")), "program.sh": PROGRAM, "README.md": txt("# legs\n") }]);
     const r = await rig();
@@ -372,7 +447,7 @@ describe.if(posix)("collie trick add", () => {
     const none = await fixtureRepo([{ "program.sh": PROGRAM }]);
     const o = await rig();
     expect(await cmdTrickAdd(o, [none.bare])).toBe(EXIT.FAIL);
-    expect(o.err.join("\n")).toContain("there is no trick.toml");
+    expect(o.err.join("\n")).toContain("no collie-tricks.json and no trick.toml at its top");
     await expectNoLeftovers(o);
   });
 
@@ -482,6 +557,33 @@ describe.if(posix)("collie trick update", () => {
     expect(r.out.at(-1)).toContain("Nothing to update.");
   });
 
+  test("read of 1bf6c747a, point 4: the two renames of the folder swap run inside the switch lock", async () => {
+    const repo = await fixtureRepo([{ "trick.toml": txt(MANIFEST("legs")), "program.sh": PROGRAM }]);
+    const r = await rig();
+    expect(await cmdTrickAdd(r, [repo.bare])).toBe(EXIT.OK);
+    const dir = trickDir(r, "legs");
+    const next = await fixtureRepo([
+      { "trick.toml": txt(MANIFEST("legs")), "program.sh": PROGRAM },
+      { "trick.toml": txt(MANIFEST("legs")), "program.sh": { text: "echo two\n", exec: true } },
+    ]);
+    const record = parseOrigin(await readFile(join(dir, ORIGIN_FILE), "utf8"));
+    await writeFile(join(dir, ORIGIN_FILE), JSON.stringify({ v: 1, ...record, url: next.bare, commit: next.shas[0] }));
+    // Another writer (the bridge approving, an add of this id) holds the lock.
+    const lock = `${switchesPath(r.stateDir)}.lock`;
+    await mkdir(dirname(lock), { recursive: true });
+    await writeFile(lock, "held");
+    const pending = cmdTrickUpdate(r, ["legs"]);
+    await Bun.sleep(600);
+    // The update has fetched and waits: the live folder is not moved while the lock is held.
+    expect(await readFile(join(dir, "program.sh"), "utf8")).toBe(PROGRAM.text);
+    expect((await readdir(dirname(dir))).filter((name) => name.startsWith(".collie-old-"))).toEqual([]);
+    await rm(lock);
+    expect(await pending).toBe(EXIT.OK);
+    expect(await readFile(join(dir, "program.sh"), "utf8")).toBe("echo two\n");
+    expect(await stat(lock).catch(() => null)).toBeNull();
+    await expectNoLeftovers(r);
+  });
+
   test("refuses a folder that add did not make, and a source that now holds another trick", async () => {
     const r = await rig();
     await mkdir(trickDir(r, "hand"), { recursive: true });
@@ -524,5 +626,71 @@ describe.if(posix)("collie trick remove", () => {
     expect(await stat(trickStateDir(r.stateDir, "legs")).catch(() => null)).toBeNull();
     expect(await stat(approvedTrickDir(r.configDir, "legs")).catch(() => null)).toBeNull();
     expect(await cmdTrickRemove(r, ["legs"])).toBe(EXIT.FAIL);
+  });
+});
+
+describe.if(posix)("collie trick add <url> with no folder: the repository's index (package J)", () => {
+  const INDEX = JSON.stringify({
+    contract: 1,
+    tricks: [
+      { folder: "idle-watch", name: "Idle Watch", about: "Marks a session that waits for you." },
+      { folder: "lodge-board", name: "Lodge Board", about: "Shows the workshop's open jobs." },
+    ],
+  });
+
+  test("prints folder, name, about and the commit, and adds nothing", async () => {
+    // The index wins over a trick.toml at the top: a repository with an index is a list.
+    const repo = await fixtureRepo([{ "collie-tricks.json": txt(INDEX), "trick.toml": txt(MANIFEST("top")), "idle-watch/trick.toml": txt(MANIFEST("idle-watch")), "idle-watch/program.sh": PROGRAM }]);
+    const r = await rig();
+    const code = await cmdTrickAdd(r, [repo.bare]);
+    expect(r.err).toEqual([]);
+    expect(code).toBe(EXIT.OK);
+    expect(r.out[0]).toBe(`Tricks listed in ${repo.bare} at commit ${repo.shas[0] ?? ""} (its collie-tricks.json, in the repository's own words):`);
+    expect(r.out[1]).toBe("  idle-watch   Idle Watch   Marks a session that waits for you.");
+    expect(r.out.join("\n")).toContain("lodge-board");
+    expect(r.out.join("\n")).not.toContain("\u202E");
+    expect(r.out.at(-1)).toBe(`Nothing was added. Add one with: collie trick add ${repo.bare}//<folder>. It is copied into your tricks folder, off.`);
+    expect(await readdir(join(r.configDir, "tricks")).catch(() => [])).toEqual([]);
+    await expectNoLeftovers(r);
+    // With a ref the next line names it.
+    expect(await cmdTrickAdd(r, [`${repo.bare}#main`])).toBe(EXIT.OK);
+    expect(r.out.at(-1)).toContain("//<folder>#main.");
+  });
+
+  test("tricks off: no fetch at all, for a bare link, a folder link and a ref, and nothing is left behind", async () => {
+    const repo = await fixtureRepo([{ "collie-tricks.json": txt(INDEX), "trick.toml": txt(MANIFEST("top")), "idle-watch/trick.toml": txt(MANIFEST("idle-watch")), "idle-watch/program.sh": PROGRAM }]);
+    const r = await rig();
+    writeTricksFeature(r.stateDir, false);
+    for (const link of [repo.bare, `${repo.bare}#main`, `${repo.bare}//idle-watch`, `${repo.bare}//idle-watch#main`]) {
+      r.err.length = 0;
+      expect({ link, code: await cmdTrickAdd(r, [link]) }).toEqual({ link, code: EXIT.FAIL });
+      expect(r.err).toEqual([`error: ${TRICKS_OFF_LINE}`]);
+    }
+    // Not one git run, not one line of the list, no tricks folder.
+    expect(r.gitArgs).toEqual([]);
+    expect(r.out).toEqual([]);
+    expect(await readdir(join(r.configDir, "tricks")).catch(() => [])).toEqual([]);
+    await expectNoLeftovers(r);
+    // Switched on again, the same link reads.
+    writeTricksFeature(r.stateDir, true);
+    expect(await cmdTrickAdd(r, [repo.bare])).toBe(EXIT.OK);
+    expect(r.gitArgs.length).toBeGreaterThan(0);
+  });
+
+  test("a repository with no index and no trick at its top says so and names the folder form", async () => {
+    const repo = await fixtureRepo([{ "idle-watch/trick.toml": txt(MANIFEST("idle-watch")), "idle-watch/program.sh": PROGRAM }]);
+    const r = await rig();
+    expect(await cmdTrickAdd(r, [repo.bare])).toBe(EXIT.FAIL);
+    expect(r.err.join("\n")).toBe(`error: ${repo.bare} has no collie-tricks.json and no trick.toml at its top. Name the trick's folder: collie trick add ${repo.bare}//<folder>`);
+    await expectNoLeftovers(r);
+  });
+
+  test("a refused index adds nothing and says why; a folder named still adds as before", async () => {
+    const repo = await fixtureRepo([{ "collie-tricks.json": txt(JSON.stringify({ contract: 2, tricks: [] })), "idle-watch/trick.toml": txt(MANIFEST("idle-watch")), "idle-watch/program.sh": PROGRAM }]);
+    const r = await rig();
+    expect(await cmdTrickAdd(r, [repo.bare])).toBe(EXIT.FAIL);
+    expect(r.err.join("\n")).toBe("error: collie-tricks.json is written for contract 2, and this Collie reads contract 1; update Collie to read it. Nothing was added.");
+    expect(await cmdTrickAdd(r, [`${repo.bare}//idle-watch`])).toBe(EXIT.OK);
+    expect(r.out.at(-1)).toBe("The trick is off. Read it, then: collie trick on idle-watch");
   });
 });

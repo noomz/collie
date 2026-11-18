@@ -67,7 +67,7 @@ import { COLLAPSE_MS } from "./ui/collapse";
 import { AgentChat } from "./agent-chat";
 import { saveChatTail } from "@/lib/chat-tail";
 import { __resetMaskedHint, maskedHintRetired } from "@/lib/masked-hint";
-import { ARM_DWELL_MS } from "@/lib/arm";
+import { ARM_DWELL_MS, STOP_HOLD_MS } from "@/lib/arm";
 
 // M46 spec 11 turns every send off for a pane the bridge has not answered lately (lib/liveness.ts).
 // These suites drive sends against a mocked network and never poll first, so they pin the pane live;
@@ -1979,7 +1979,7 @@ describe("AgentChat — statusline strip scroll containment", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const crewRoster: ServerSummary[] = [
-  { id: "bluefin", name: "bluefin", isLead: true, reachable: true, protocol: "ok", lastSeenAt: 5_000 },
+  { id: "lodge", name: "lodge", isLead: true, reachable: true, protocol: "ok", lastSeenAt: 5_000 },
   // Reachable-but-long-unseen would be equally stale; unreachable is the case the operator meets.
   { id: "workshop", name: "workshop", isLead: false, reachable: false, protocol: "ok", lastSeenAt: 1_000 },
   {
@@ -2069,7 +2069,7 @@ describe("AgentChat — a pane on a host the lead can't reach", () => {
   });
 
   it("a live host in the same crew is completely untouched", () => {
-    renderCrewChat("bluefin");
+    renderCrewChat("lodge");
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(screen.getByPlaceholderText(/type a reply/i)).not.toBeDisabled();
   });
@@ -2120,7 +2120,8 @@ describe("AgentChat — the mirror's top edge", () => {
     // `pt-0` stated, not merely absent: the base `py-4` is still on the element and Tailwind's own
     // sheet order is what lets the later `pt-0` beat it, so dropping the class restores 16px.
     expect(scroller?.className).toMatch(/\bpt-0\b/);
-    expect(scroller?.className).toMatch(/\bpb-3\b/);
+    // The tail keeps 12px of clearance, and more while the model tag floats over it (#759).
+    expect(scroller?.className).toMatch(/pb-\[max\(0\.75rem,var\(--tail-room,0px\)\)\]/);
   });
 });
 
@@ -2401,6 +2402,20 @@ describe("the pane fits its viewport", () => {
     } finally {
       kb.restore();
     }
+  });
+  // A permission card with subject rows fits the dock (card-dock.tsx): the floor turns soft for it,
+  // the same share as a flex basis that shrinks first, so a short phone shows every button of the card
+  // and less chat. The heights are a layout engine's: e2e/permission-card-fits.spec.ts.
+  it("softens the reading floor for a permission card that fits the dock", () => {
+    const text = readFileSync(join(import.meta.dirname, "..", "fixtures", "panes", "claude--v2322-permission-bash-cut-top--w160.txt"), "utf8");
+    const { container } = renderChat({ text });
+    const reading = container.querySelector<HTMLElement>('[data-slot="pane-reading"]')!;
+    expect(reading.className).toMatch(/(?:^|\s)flex-\[1_1000_30dvh\](?=\s|$)/);
+    expect(reading.className).toMatch(/(?:^|\s)min-h-0(?=\s|$)/);
+    expect(reading.className).not.toMatch(/min-h-\[30dvh\]|(?:^|\s)flex-1(?=\s|$)/);
+    const dock = container.querySelector<HTMLElement>('[data-slot="card-dock"]')!;
+    expect(dock.className).toMatch(/(?:^|\s)grow-\[1000\](?=\s|$)/);
+    expect(dock.querySelector("[data-fit] [data-fit-shrink]")).not.toBeNull();
   });
 
   it("keeps a floor under the folder tab — the gap above the mirror may shrink, never close", () => {
@@ -3165,7 +3180,11 @@ describe("AgentChat — folding the tab and pane rows", () => {
 interface LaunchPostedBody {
   command?: string;
   paneId?: string;
+  requestId?: string;
 }
+
+/** A request id as the phone mints it: a UUID, one per tap (M100 spec 04). */
+const A_REQUEST_ID = expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
 
 describe("AgentChat: Launch section in the switcher", () => {
   function declareLaunchers() {
@@ -3238,7 +3257,7 @@ describe("AgentChat: Launch section in the switcher", () => {
     renderChat();
     await user.click(screen.getByRole("button", { name: "Switch pane" }));
     await user.click(await screen.findByText("Runs & quota"));
-    await waitFor(() => expect(posted).toEqual({ command: "rumen-peek", paneId: agent.paneId }));
+    await waitFor(() => expect(posted).toEqual({ command: "rumen-peek", paneId: agent.paneId, requestId: A_REQUEST_ID }));
   });
 
   // THE NO PROMPTS CONFIRM (ADR 0094) in the switcher: a row that skips permission prompts asks first.
@@ -3289,7 +3308,7 @@ describe("AgentChat: Launch section in the switcher", () => {
       await user.click(screen.getByRole("button", { name: "Switch pane" }));
       await user.click(await screen.findByText("Claude, no prompts"));
       await user.click(within(await screen.findByRole("dialog", { name: "Start without prompts?" })).getByRole("button", { name: "Start" }));
-      await waitFor(() => expect(posted).toEqual([{ command: "claude --yolo", paneId: agent.paneId }]));
+      await waitFor(() => expect(posted).toEqual([{ command: "claude --yolo", paneId: agent.paneId, requestId: A_REQUEST_ID }]));
       expect(noPromptsConfirmed("", "claude --yolo")).toBe(true);
     });
 
@@ -4697,6 +4716,34 @@ describe("AgentChat header — the branch on the path line", () => {
   });
 });
 
+// The added account the session runs under (M101) is a word on the same line, after the branch.
+describe("AgentChat header — the account on the path line", () => {
+  const pathLine = (c: HTMLElement) => c.querySelector<HTMLElement>('[data-slot="pane-place"]')!.parentElement!;
+
+  it("draws the label after the branch and before the meta, in the line's own 12px box", () => {
+    const agent: AgentView = { ...fixtureAgents[0]!, gitHead: { kind: "branch", name: "fix-login" }, account: { id: "acc-work", label: "Work" } };
+    const { container } = renderChat({ agent, agents: [agent, ...fixtureAgents.slice(1)] });
+    const line = pathLine(container);
+    expect(line).toHaveClass("h-3");
+    const tag = line.querySelector<HTMLElement>('[data-slot="pane-account"]')!;
+    expect(tag).toHaveTextContent("Work");
+    expect(tag).toHaveClass("leading-3");
+    expect(tag.previousElementSibling).toHaveAttribute("data-slot", "branch-label");
+    expect(tag.nextElementSibling).toHaveAttribute("data-slot", "pane-meta");
+  });
+
+  it("draws nothing, and the line's markup is as before, for a pane with no account", () => {
+    const base = fixtureAgents[0]!;
+    const plain = renderChat({ agent: { ...base, gitHead: { kind: "branch", name: "fix-login" } } });
+    expect(plain.container.querySelector('[data-slot="pane-account"]')).toBeNull();
+    const html = pathLine(plain.container).innerHTML;
+    cleanup();
+    const withKeyAbsent = renderChat({ agent: { ...base, gitHead: { kind: "branch", name: "fix-login" } } });
+    expect(pathLine(withKeyAbsent.container).innerHTML).toBe(html);
+    expect(html).not.toContain("pane-account");
+  });
+});
+
 // A durable program's subtitle takes the header's second line, in the same 12px box (WIRE.md 7.11).
 // SAFETY: the header reads the field through the JSON guard (lib/pane-marks.ts); this hands it a shape a peer could send.
 const wrongSubtitle = (value: JsonValue): AgentView["subtitle"] => value as AgentView["subtitle"];
@@ -4823,7 +4870,7 @@ describe("AgentChat — the model label and a footer that already names it", () 
     expect(tag(container)).toBeNull();
   });
 
-  it("with a gauge to draw, the tag names the model beside the dots even while the screen names it", () => {
+  it("with a gauge to draw, the tag names the model beside the figures even while the screen names it", () => {
     terminal();
     const footer = pane("codex--v0157-idle.txt");
     const usage = { context: 42, limits: [{ window: "5h" as const, used: 30 }] };
@@ -4831,7 +4878,7 @@ describe("AgentChat — the model label and a footer that already names it", () 
     expect(screen.getAllByText(/GPT-6-Luna low/).length).toBeGreaterThan(0); // the footer names it
     const shown = tag(container);
     expect(shown?.querySelector("[aria-hidden]")?.textContent).toContain("gpt-6-luna · low");
-    expect(shown?.querySelectorAll('[data-slot="usage-dots"]').length).toBe(2);
+    expect([...(shown?.querySelectorAll('[data-slot="usage-percent"]') ?? [])].map((f) => f.textContent)).toEqual(["42%", "30%"]);
     cleanup();
     // No gauge: the model alone would repeat the footer, so there is no tag at all.
     const bare = renderChat({ text: footer, agent: on("codex", "gpt-6-luna", { usage: {} }) });
@@ -5112,7 +5159,7 @@ describe("AgentChat, the newest turn's picture on a pi pane (M39, #292)", () => 
 });
 
 // M68 spec 02: Stop on the belt of a pane with a screen. The rule is `stopFor` (the bridge says a key exists;
-// the turn only decides live or dimmed); the first tap arms, the second posts the request id alone and the receipt shows under the box.
+// the turn only decides live or dimmed); a hold of two seconds posts the request id alone and the receipt shows under the box.
 describe("AgentChat: Stop on a pane with a screen", () => {
   const RUNNING: Surface = { revision: 4, turn: "running", modal: "none", composer: "empty" };
   const IDLE_SURFACE: Surface = { revision: 4, turn: "idle", modal: "none", composer: "empty" };
@@ -5157,26 +5204,35 @@ describe("AgentChat: Stop on a pane with a screen", () => {
     expect(screen.queryByRole("button", { name: "Tap again to stop the turn" })).toBeNull();
   });
 
-  it("arms on the first tap, posts one fresh request id on the second and tells the receipt under the box", async () => {
+  it("a short tap posts nothing and says Hold; a hold posts one fresh request id and tells the receipt under the box", async () => {
     const user = userEvent.setup();
     const posted = serveStop({ requestId: "echo-0001", outcome: "stopped", keys: ["Escape"] });
     renderChat({ agent: stopAgent({ surface: RUNNING, canStop: true }) });
-    await user.click(await screen.findByRole("button", { name: "Stop the turn" }));
+    const stop = await screen.findByRole("button", { name: "Stop the turn" });
+    await user.click(stop);
     expect(posted).toHaveLength(0);
-    await pastTheDwell();
-    await user.click(screen.getByRole("button", { name: "Tap again to stop the turn" }));
-    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(stop).toHaveTextContent("Hold");
+    expect(screen.queryByRole("button", { name: "Tap again to stop the turn" })).toBeNull();
+    // The hold: the finger rests for STOP_HOLD_MS, and the Stop goes out with the finger still down.
+    fireEvent.pointerDown(stop, { button: 0, clientX: 5, clientY: 5, pointerType: "touch" });
+    await new Promise<void>((resolve) => setTimeout(resolve, STOP_HOLD_MS - 300));
+    expect(posted).toHaveLength(0);
+    await waitFor(() => expect(posted).toHaveLength(1), { timeout: 2000 });
     expect(posted[0]).toEqual({ requestId: expect.stringMatching(/^[A-Za-z0-9_-]{8,64}$/) });
     expect(await screen.findByText("Stopped.")).toBeInTheDocument();
   });
 
-  it("tells a refusal in its own words and presses nothing more", async () => {
+  // A key cannot hold, so it keeps the two presses: the first arms, the second stops.
+  it("by keyboard: arms on the first press, stops on the second, and tells a refusal in its own words", async () => {
     const user = userEvent.setup();
     const posted = serveStop({ requestId: "echo-0002", outcome: "refused", reason: "draft_present" });
     renderChat({ agent: stopAgent({ surface: RUNNING, canStop: true }) });
-    await user.click(await screen.findByRole("button", { name: "Stop the turn" }));
+    (await screen.findByRole("button", { name: "Stop the turn" })).focus();
+    await user.keyboard("{Enter}");
+    expect(posted).toHaveLength(0);
     await pastTheDwell();
-    await user.click(screen.getByRole("button", { name: "Tap again to stop the turn" }));
+    screen.getByRole("button", { name: "Tap again to stop the turn" }).focus();
+    await user.keyboard("{Enter}");
     expect(await screen.findByText("The box holds your text and this harness's stop key would clear it.")).toBeInTheDocument();
     expect(posted).toHaveLength(1);
   });

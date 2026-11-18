@@ -1,4 +1,4 @@
-// collie trick helper v4
+// collie trick helper v8
 // The helper of a Collie trick: it reads the facts, collects the parts and the Decisions, and prints the
 // one document the bridge reads. `collie trick init` writes it into the trick folder, and
 // `collie trick helper <id>` rewrites it with the newest version. It imports only node: built-ins and
@@ -6,9 +6,11 @@
 //
 // Two test hooks, which only `collie trick dev`, `collie trick check --run` and a test of your own pass
 // (the bridge never passes a TRICK_* variable): TRICK_NOW (epoch seconds) fixes the clock `now()` reads,
-// and TRICK_TOOLS_ONLY_PATH=1 makes `t.tool` look on PATH alone.
+// and TRICK_TOOLS_ONLY_PATH=1 makes `t.tool` look on PATH alone. TRICK_API_MS shortens the limit of one
+// `t.api` call (a test only).
 
 import { appendFileSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { createConnection } from "node:net";
 import { delimiter, dirname, join } from "node:path";
 
 // Collie's runtime switch is for this process only. A program the trick starts must not inherit it.
@@ -18,9 +20,10 @@ delete process.env.BUN_BE_BUN;
 /**
  * The newest trick contract this helper speaks: Collie's TRICK_CONTRACT (web/src/lib/tricks/contract.ts).
  * A run prints the contract its facts name as the output's "v": 1 for a trick that names none in
- * trick.toml, 2 for one that names `contract = 2` (and may list `inputs`).
+ * trick.toml, 2 for one that names `contract = 2` (and may list `inputs`), 3 for one that names
+ * `contract = 3` (and may list `[[field]]`, the settings a person keeps: `t.values`).
  */
-export const CONTRACT = 2;
+export const CONTRACT = 3;
 export type Tone = "plain" | "accent" | "warn" | "danger" | "ok" | "muted";
 export type Icon =
   | "archive" | "back" | "bell" | "branch" | "camera" | "chat" | "check" | "clock" | "close" | "copy" | "crew" | "delete"
@@ -276,6 +279,17 @@ export interface Facts {
   host: string; memberId: string; sessions: Session[]; spaces: { name: string; folder?: string }[];
   /** How many sessions the facts left out past their caps. Absent when none. */
   sessionsOmitted?: number;
+  /**
+   * Contract 3, for a trick with `[[field]]`: each setting by its key, the person's value or the field's
+   * `default`; a field with neither is absent. The person's data, UNTRUSTED for the program: show it, never run it.
+   */
+  values?: { [key: string]: string | number | boolean };
+  /**
+   * Present when the trick declares `access` and Collie's local API stands: the socket `t.api` dials, the level,
+   * and this run's token, which `t.api` names in `hello`. The token dies when the run ends. Keep it to this run:
+   * never print it, log it or write it to a file.
+   */
+  api?: { socket: string; access: "see" | "read"; token: string };
 }
 /**
  * The tap that started a run, one shape from every place: a button or an action in the trick's session,
@@ -321,9 +335,16 @@ function tapOf(t: Trigger): Tap | null {
 export interface Item { label: string; icon?: Icon; badge?: Num; tone?: Tone }
 export interface Action { id: string; label: string; intent: string; value?: string; icon?: "play" | "pause" | "check" | "x" | "refresh" | "archive" | "flag" | "star" | "send" | "note" | "search" | "more"; disabled?: boolean }
 export interface SessionPart { id?: string; name?: string; icon?: Icon; tone?: Tone; subtitle?: string; badge?: { count: number } | { text: string }; progress?: { value?: number; max?: number }; actions?: Action[]; view: Node[] }
+/** A row in a session's settings (contract 2): a button, or a switch whose `on` is your state. */
+export type MenuRow =
+  | { kind: "button"; id: string; label: string; intent: string; icon?: Icon; disabled?: boolean; confirm?: boolean }
+  | { kind: "switch"; id: string; label: string; intent: string; on: boolean; icon?: Icon; disabled?: boolean };
+/** Where a belt mark or a menu part shows (contract 2): `sessions`, facts ids, binds it to those sessions only. */
+export interface Bind { sessions?: string[]; id?: string }
 export type Part =
   | { at: "status"; id: "status"; chip: { text: string; icon?: Icon; tone?: Tone } }
-  | { at: "belt"; id: "belt"; mark: { label: string; icon?: Icon; tone?: Tone; badge?: string; intent?: string } }
+  | { at: "belt"; id: string; sessions?: string[]; mark: { label: string; icon?: Icon; tone?: Tone; badge?: string; intent?: string } }
+  | { at: "menu"; id: string; sessions?: string[]; rows: MenuRow[] }
   | { at: "dashboard" | "tabbar"; id: "dashboard" | "tabbar"; item: Item }
   | ({ at: "session"; id: string } & Omit<SessionPart, "id">);
 export interface Decision {
@@ -411,11 +432,89 @@ function writeWhole(path: string, json: string): void {
   renameSync(`${path}.tmp`, path);
 }
 
+// ── Collie's local API (`t.api`) ───────────────────────────────────────────────────────────────────
+/** The level each operation needs; the bridge's table (bridge/api/operations.ts) holds the same list. */
+export const API_LEVELS = {
+  hello: "see", sessions: "see", brief: "see", accounts: "see", "hill.list": "see", events: "see", machines: "see", read: "read",
+} as const satisfies Readonly<Record<string, "see" | "read">>;
+/** The level of an operation, or undefined for a name Collie's local API does not have. */
+function levelOf(op: string): "see" | "read" | undefined {
+  return Object.entries(API_LEVELS).find(([name]) => name === op)?.[1];
+}
+/** What one `t.api` call may take, in milliseconds. */
+export const API_CALL_MS = 3000;
+/** The answer of a call: the socket's own line, or a refusal in the same shape. A call never throws. */
+export type ApiAnswer = { ok: true; [field: string]: Json } | { ok: false; error: { code: string; message: string } };
+
+function apiRefusal(code: string, message: string): ApiAnswer {
+  return { ok: false, error: { code, message } };
+}
+
+/** One call: the refusals first (no dial), then one connection that names the run's token, asks once and closes. */
+function apiCall(facts: Facts, op: string, args: Record<string, Json>): Promise<ApiAnswer> {
+  const api = facts.api;
+  if (api === undefined || (api.access !== "see" && api.access !== "read") || typeof api.token !== "string" || api.token === "") return Promise.resolve(apiRefusal("trick.api_off", "Collie's local API is off here."));
+  const need = levelOf(op);
+  if (need === undefined) return Promise.resolve(apiRefusal("trick.api_unknown", `Collie's local API has no operation named ${clip(op, 40)}.`));
+  if (need === "read" && api.access !== "read") return Promise.resolve(apiRefusal("trick.api_level", `${op} needs access "read", and this trick declares "${api.access}".`));
+  const given = Number(process.env.TRICK_API_MS);
+  const ms = Number.isFinite(given) && given > 0 ? given : API_CALL_MS;
+  const { promise, resolve } = Promise.withResolvers<ApiAnswer>();
+  {
+    let done = false;
+    let held = "";
+    const socket = createConnection(api.socket);
+    const finish = (answer: ApiAnswer): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(answer);
+    };
+    const timer = setTimeout(() => finish(apiRefusal("trick.api_timeout", `Collie's local API did not answer within ${String(ms / 1000)} seconds.`)), ms);
+    socket.setEncoding("utf8");
+    socket.on("connect", () => {
+      socket.write(`${JSON.stringify({ id: "h", op: "hello", args: { token: api.token } })}\n${JSON.stringify({ id: "r", op, args })}\n`);
+    });
+    socket.on("data", (chunk: string) => {
+      held += chunk;
+      if (held.length > 2 * 1024 * 1024) return finish(apiRefusal("trick.api_failed", "Collie's local API sent an answer that is too large."));
+      for (let nl = held.indexOf("\n"); nl >= 0; nl = held.indexOf("\n")) {
+        const line = held.slice(0, nl);
+        held = held.slice(nl + 1);
+        try {
+          // SAFETY: the socket answers one JSON object per line; a line that is not one throws and is skipped below.
+          const body = JSON.parse(line) as { [key: string]: Json };
+          // A refused hello (a run token that died, say) is the answer: the call after it never ran.
+          if (body.id === "h" && body.ok === true) continue;
+          if (body.id !== "r" && body.id !== "h") continue;
+          if (body.ok === true) return finish({ ...body, ok: true });
+          const error = body.error;
+          const code = typeof error === "object" && error !== null && !Array.isArray(error) && typeof error.code === "string" ? error.code : "trick.api_failed";
+          const message = typeof error === "object" && error !== null && !Array.isArray(error) && typeof error.message === "string" ? error.message : "Collie's local API refused the call.";
+          return finish(apiRefusal(code, message));
+        } catch {
+          continue;
+        }
+      }
+    });
+    socket.on("error", () => finish(apiRefusal("trick.api_unreachable", "Collie's local API did not answer.")));
+    socket.on("close", () => finish(apiRefusal("trick.api_unreachable", "Collie's local API closed the connection.")));
+  }
+  return promise;
+}
+
 /** One run of the trick: what the program reads, and the places it fills. */
 export class Trick {
   readonly facts: Facts;
   /** `config.toml` of the trick folder, parsed; {} when there is none. */
   readonly config: { [key: string]: TomlValue };
+  /**
+   * Contract 3: the settings the person keeps for this trick (`[[field]]` in trick.toml), by key; {} when it
+   * has none. A required one with no value is absent: show a setup part that says what to set. Never pass a
+   * value to a shell or run it.
+   */
+  readonly values: { [key: string]: string | number | boolean };
   /** The tap that started this run, from any place, a Decision's answer included (`decision` set), or null. */
   readonly tap: Tap | null;
   /** Small JSON files in the trick's own state folder. A name may hold folders: `cache/ci`. */
@@ -436,6 +535,7 @@ export class Trick {
     const text = readText(join(facts.trick.dir, "config.toml"));
     // SAFETY: Bun.TOML.parse answers with a table; the program reads each setting it names.
     this.config = text === null ? {} : (Bun.TOML.parse(text) as { [key: string]: TomlValue });
+    this.values = facts.values ?? {};
     this.tap = tapOf(facts.trigger);
     const root = facts.trick.state;
     this.state = {
@@ -451,14 +551,47 @@ export class Trick {
     };
   }
 
+  /**
+   * Read through Collie's local API: `t.api("machines")`, `t.api("read", { session, lines })`. The answer is the
+   * socket's line (`ok: true` and its fields) or `{ ok: false, error: { code, message } }`; it never throws, and a
+   * program can show `error.message`. It refuses before it dials when the facts carry no `api` (no `access`, or
+   * the local API is off here), or when the operation needs "read" and the trick declares "see". Each call opens
+   * with `hello` and this run's token; the bridge checks the token and the level again. One call takes at most
+   * 3 seconds.
+   */
+  api(op: string, args: Record<string, Json> = {}): Promise<ApiAnswer> {
+    return apiCall(this.facts, op, args);
+  }
   /** One chip in the status line above the Belt (1 to 12 characters). */
   status(chip: { text: string; icon?: Icon; tone?: Tone }): void {
     this.parts.push({ at: "status", id: "status", chip });
   }
-  /** One mark at the end of the Belt. `intent` makes a tap run the trick. */
-  belt(mark: { label: string; icon?: Icon; tone?: Tone; badge?: Num; intent?: string }): void {
-    const { badge, ...rest } = mark;
-    this.parts.push({ at: "belt", id: "belt", mark: badge === undefined ? rest : { ...rest, badge: String(badge) } });
+  /**
+   * One mark at the end of the Belt. `intent` makes a tap run the trick. With `sessions` (contract 2, the
+   * facts' session ids) the mark shows only in those sessions, in place of the unbound one; give each bound
+   * mark its own `id`, or the helper numbers them `belt-1`, `belt-2`.
+   */
+  belt(mark: { label: string; icon?: Icon; tone?: Tone; badge?: Num; intent?: string } & Bind): void {
+    const { badge, sessions, id, ...rest } = mark;
+    const face = badge === undefined ? rest : { ...rest, badge: String(badge) };
+    this.parts.push(sessions === undefined ? { at: "belt", id: id ?? "belt", mark: face } : { at: "belt", id: id ?? this.boundId("belt"), sessions, mark: face });
+  }
+  /**
+   * Rows in a session's settings (contract 2, list "menu" in places): 1 to 6 buttons and switches. A tap
+   * runs the trick with the row's intent and `t.tap.from.session`; a switch's tap carries the state asked
+   * for as `value`, "on" or "off", and the phone shows your next document's `on`, never a guess. Without
+   * `sessions` the rows show in every agent session of this machine; with it, only in those sessions.
+   */
+  menu(rows: MenuRow[], bind: Bind = {}): void {
+    const { sessions, id } = bind;
+    this.parts.push(sessions === undefined ? { at: "menu", id: id ?? "menu", rows } : { at: "menu", id: id ?? this.boundId("menu"), sessions, rows });
+  }
+  /** The next free id of a bound part of `place`: `<place>-1`, `<place>-2`. */
+  private boundId(place: "belt" | "menu"): string {
+    const taken = new Set(this.parts.map((part) => part.id));
+    // One more number than there are parts: one of them is free.
+    const free = Array.from({ length: this.parts.length + 1 }, (_, i) => `${place}-${String(i + 1)}`).find((id) => !taken.has(id));
+    return free ?? `${place}-${String(this.parts.length + 1)}`;
   }
   /** One tile in the strip at the top of the Dashboard. */
   dashboard(item: Item): void {
@@ -676,29 +809,79 @@ export class Trick {
   }
 }
 
+/** How long a run may linger after its output is written, before the helper ends it. */
+const END_GRACE_MS = 1000;
+
+/**
+ * How the helper reads the facts and writes its output. The real one reads stdin and writes the
+ * process's own streams; a test passes a slower one to stand in for a Windows pipe.
+ */
+export interface HelperIo {
+  read(): Promise<string>;
+  /** Write `text` to stdout or stderr and call `done` once the pipe took it. */
+  write(to: "stdout" | "stderr", text: string, done: () => void): void;
+}
+
+const PROCESS_IO: HelperIo = {
+  read: () => Bun.stdin.text(),
+  write: (to, text, done) => {
+    (to === "stdout" ? process.stdout : process.stderr).write(text, () => done());
+  },
+};
+
+/** Write `text` through `io` and wait until the pipe took it. */
+function written(io: HelperIo, to: "stdout" | "stderr", text: string): Promise<void> {
+  return new Promise((resolve) => {
+    io.write(to, text, resolve);
+  });
+}
+
+/**
+ * End the run with `code` after its output is written: set the exit code and let the process end on its
+ * own. A timer or a socket the trick left open cannot hold the run: an unref'd timer ends it
+ * {@link END_GRACE_MS} later, when every write has long reached the pipe.
+ */
+function end(code: number): void {
+  process.exitCode = code;
+  setTimeout(() => process.exit(code), END_GRACE_MS).unref();
+}
+
 /**
  * The trick's main: read the facts from stdin, call `handler`, print the document once, exit 0. A thrown
  * error prints one warn card in the trick's session and exits 0 when the trick has a session; with
  * none it exits 1, so the bridge's backoff applies. The stack goes to stderr, the masked message last.
+ *
+ * A ref'd timer holds the process from the first line of the run until its output is written. On
+ * Windows neither the stdin read nor the pipe write keeps Bun's event loop alive, so without it the
+ * process ended at once with exit 0 and printed nothing. The run then ends after the pipe took the
+ * output, never over a write in flight.
  */
-export function run(handler: (t: Trick) => void | Promise<void>): void {
+export function run(handler: (t: Trick) => void | Promise<void>, io: HelperIo = PROCESS_IO): void {
+  const hold = setInterval(() => {}, 1 << 30);
+  const finish = (code: number): void => {
+    clearInterval(hold);
+    end(code);
+  };
   void (async () => {
     let t: Trick | null = null;
     let facts: Facts | null = null;
     try {
-      const text = await Bun.stdin.text();
+      const text = await io.read();
       if (text.trim() === "") throw new Error("no facts on stdin: try it with collie trick dev <folder>");
       // SAFETY: the bridge writes one facts document (schema.ts `TrickFacts`) on stdin.
       facts = JSON.parse(text) as Facts;
       t = new Trick(facts);
       await handler(t);
-      await Bun.write(Bun.stdout, `${JSON.stringify(t.printed())}\n`);
-      process.exit(0);
+      await written(io, "stdout", `${JSON.stringify(t.printed())}\n`);
+      finish(0);
     } catch (err) {
       const message = mask(err instanceof Error ? err.message : String(err)).replace(/[\s\p{Cc}]+/gu, " ").trim() || "the trick failed";
-      process.stderr.write(`${err instanceof Error ? mask(err.stack ?? "") : ""}\nerror: ${message}\n`);
+      await written(io, "stderr", `${err instanceof Error ? mask(err.stack ?? "") : ""}\nerror: ${message}\n`);
       const id = t?.sessionId ?? (facts !== null && declaredPlaces(facts.trick.dir).includes("session") ? "main" : null);
-      if (id === null) process.exit(1);
+      if (id === null) {
+        finish(1);
+        return;
+      }
       const card = v.card([v.para(message.slice(0, 2000))], { tone: "warn" });
       let doc: Document = { v: facts?.contract ?? 1, parts: [{ at: "session", id, subtitle: message.slice(0, 120), tone: "warn", view: [card] }] };
       try {
@@ -706,8 +889,8 @@ export function run(handler: (t: Trick) => void | Promise<void>): void {
       } catch {
         // A hook that fails on the error card too: the card prints as it is (the bridge masks keys anyway).
       }
-      await Bun.write(Bun.stdout, `${JSON.stringify(doc)}\n`);
-      process.exit(0);
+      await written(io, "stdout", `${JSON.stringify(doc)}\n`);
+      finish(0);
     }
   })();
 }
