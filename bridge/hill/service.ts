@@ -56,10 +56,19 @@
 // reads `gone` with the state it closed in, and a trick's answered key stays closed. The answer receipts
 // are a file of their own and are not touched, so a retried answer `rid` still gets its stored receipt.
 //
-// THE SWITCH (switch.ts). With the Hill off, a post from an agent or a trick is refused (`hill_off`) and
+// THE SWITCH (switch.ts). The Hill is an experiment, off until the person switches it on; no file reads off.
+// A crew member with no file follows its lead (`refusesHere`). With the Hill off, a post from an agent or a trick is refused (`hill_off`) and
 // an answer from the phone is refused too (`off`), so nothing pushes, nothing is typed and no tap runs.
 // The open decisions stay as they are: nothing withdraws or closes them, and they show again when the
-// Hill is back on. The sweep still closes an expired one, or one whose target ended. Status, list and
+// Hill is back on.
+//
+// ONE EXCEPTION, AND ONLY ONE (M96 spec 14, 2026-11-16): a card of Collie's own about a trick (wire.ts
+// `isTrickCard`: a proposal, a new version, a trick's rights, a carried trick) is an approval, not a
+// question an agent or a trick asks. With the Hill off it is still posted (`postAny`), answered (`answer`)
+// and read (`list`, which then serves ONLY those cards), exactly as with the Hill on. Its sender is built
+// only by code inside the bridge (`postCollie`); no door makes one, so an agent's `collie hill post`, a
+// crew member's forwarded post and a trick's own Decision stay refused. An answer opens only for a
+// decision the store holds as such a card. The sweep still closes an expired one, or one whose target ended. Status, list and
 // withdraw keep working, so an agent can clean up. When the switch is seen to go off, the notification
 // of every open `now` decision is closed once, so the phone does not keep a question it cannot open.
 //
@@ -76,6 +85,7 @@ import { HILL_DEFAULT_EXPIRY_DAYS, HILL_DEFAULT_EXPIRY_MS, HILL_MAX_EXPIRY_DAYS,
 import type { JsonObject } from "../json.ts";
 import {
   HILL_ANSWER_TEXT_MAX,
+  HILL_ANSWERED_IN_SESSION,
   HILL_BODY_MAX,
   HILL_DEVICE_ID_RE,
   HILL_LINK_HREF_MAX,
@@ -98,6 +108,7 @@ import {
   HILL_TELL_RECENT_MS,
   hillNode,
   isHillOptionIntent,
+  isTrickCard,
   sortOpenDecisions,
   type HillAnswerRequest,
   type HillCollieRef,
@@ -112,7 +123,7 @@ import {
   type HillRefusalCode,
   type HillState,
 } from "../../web/src/lib/hill/wire.ts";
-import { singleCodeCard } from "../../web/src/lib/hill/code-card.ts";
+import { singleCodeCard, trickCardDecline } from "../../web/src/lib/hill/code-card.ts";
 import { parseAddress } from "../walky/address.ts";
 import { cleanBody } from "../walky/clean.ts";
 import type { WalkyPane } from "../walky/deliver.ts";
@@ -126,6 +137,7 @@ import { hillAnswerDigest, type HillAnswerOutcome, type HillReceiptRecord, type 
 import type { HillStore, HillTombstone } from "./store.ts";
 import type { HillLeadForward, HillListAnswer } from "./crew.ts";
 import { HILL_CREW_STATE_DEFAULT, type HillCrewStateFile } from "./crew-state.ts";
+import type { HillSwitchReading } from "./switch.ts";
 
 /**
  * A session's or a trick's name, never Collie's own (crew slice 8 review Q1, Q2): a name that reads
@@ -190,7 +202,12 @@ export interface HillCollieSender {
 }
 
 /** What the answer to a Collie Decision did: done, or refused in plain words (the card then stays open). */
-export type HillCollieVerdict = { readonly ok: true } | { readonly ok: false; readonly reason: string };
+/**
+ * What Collie's own handler made of an answer. `told`: one plain line of what happened (installed, nothing
+ * installed), typed into the session Collie tells, after the option line (the first full trick run,
+ * 2026-11-16, decision 9). Agent-facing English, never a phone string.
+ */
+export type HillCollieVerdict = { readonly ok: true; readonly told?: string } | { readonly ok: false; readonly reason: string };
 
 /** Every sender a decision can have; the public doors take only {@link HillSender}. */
 type AnySender = HillSender | HillCollieSender;
@@ -213,7 +230,11 @@ export interface HillPlace {
 /** What the walky send reported: typed, held by walky's hold rule, or not confirmed. */
 export type HillDelivery = "typed" | "held" | "unknown";
 /** What one send came to: a delivery, or `refused` when walky typed nothing (a rate limit, a pane gone). */
-export type HillSendResult = HillDelivery | "refused";
+/**
+ * What a send reports. `inbox-only`: the line waits in the session's inbox (typed but not submitted, a
+ * dialog); the answer shows it as `unknown`, but its write is known, so it is not marked `unconfirmed`.
+ */
+export type HillSendResult = HillDelivery | "refused" | "inbox-only";
 
 /** The crew role of this bridge, as `crew.mode` names it in bridge/index.ts. */
 export type HillCrewMode = "solo" | "lead" | "peer";
@@ -266,17 +287,39 @@ export interface HillServiceDeps {
    */
   readonly look?: <T>(fn: () => T) => T;
   /**
-   * Whether the bridge lists any live session yet. False right after boot, before the first refresh:
-   * then the sweep closes nothing for a target that seems gone. Absent: always true.
+   * Whether this bridge holds a census of the machine `address` is on that was read with success (M96
+   * spec 10): on this machine, every multiplexer it drives answered its last read since the bridge
+   * started; on a crew member, the lead's sweep reached it and that machine's own reads answered. An
+   * EMPTY list from a good census is a fact (every agent left). False is unknown: right after boot, a
+   * read that failed, a multiplexer that does not answer. Then the sweep closes nothing for that
+   * address, and the row of absent sweeps starts again. Absent: always true.
    */
-  readonly sessionsKnown?: () => boolean;
+  readonly censusKnown?: (address: string) => boolean;
+  /**
+   * Whether `address` is on a crew machine that this bridge's roster, read with success, no longer lists
+   * (M96 spec 10): the member was removed (`collie crew remove`, or its own `collie leave`). Never this
+   * machine, never a machine that merely does not answer, and false when the roster could not be read.
+   * Then the sweep closes every open card whose answer would go there. Absent: never.
+   */
+  readonly removed?: (address: string) => boolean;
   /** The phone push of a `now` decision (push.ts). Absent: no decision pushes. */
   readonly push?: HillPushPort;
   /**
    * The Hill's own switch (switch.ts `HillSwitch`), read on each use, and written by the phone's route
-   * (`set`, true when written). Absent: always on, and the switch cannot be moved.
+   * (`set`, true when written). `reading` tells unset (no file) from off; a switch that gives none reads
+   * `on` or `off` by `on()`. Absent: always on, and the switch cannot be moved. That absence is a TEST SEAM
+   * only: the one production construction (bridge/index.ts `new HillService`) always wires the file switch.
    */
-  readonly hillSwitch?: { on(): boolean; set?(on: boolean): boolean };
+  readonly hillSwitch?: { on(): boolean; reading?(): HillSwitchReading; set?(on: boolean): boolean };
+  /**
+   * Whether tricks as a whole are switched on on this machine (bridge/tricks/feature-switch.ts), read on each
+   * use. While off, a trick's own Decisions follow the rule of the Hill's own switch: they stay in the store
+   * untouched (their expiry still runs), the list does not serve them, an answer to one is refused before
+   * anything closes, and their notifications close once at the move to off. They show again once tricks are
+   * on. Collie's own cards about a trick are not a trick's Decisions and stay as they are. Absent: always on
+   * (a test seam; bridge/index.ts always wires the file switch).
+   */
+  readonly tricksOn?: () => boolean;
   /**
    * The crew state (crew-state.ts `HillCrewStateFile`), read on each use. Absent: always `here`, and it
    * cannot be set.
@@ -357,8 +400,8 @@ export const HILL_STATE_ON_LEAD = "the crew state lives on the crew's lead; set 
  */
 export const HILL_NOT_TYPED = "it could not be typed into the session now, so the Decision stays open; answer again in a few minutes";
 
-/** The reason a card the person answered in its session closes with, at the second Clear (1.29.0). */
-export const HILL_ANSWERED_IN_SESSION = "answered in the session";
+/** The reason a card the person answered in its session closes with (wire.ts): the second Clear, or a send that started the turn. */
+export { HILL_ANSWERED_IN_SESSION };
 /** What the second Clear answers when the Hill could not be saved: nothing changed. */
 export const HILL_SPOKEN_UNSAVED = "the Hill could not be saved on this machine; nothing was cleared";
 /** The refusal of a crew state set whose file could not be written. */
@@ -423,7 +466,9 @@ export interface HillClearAnswer {
 }
 
 /** The sentence a bridge with the Hill switched off answers a post with: what is off, and the way back on. */
-export const HILL_OFF = "the Hill is off on this Collie; your person can switch it on in Settings, Alerts, on the phone, or with: collie hill on";
+export const HILL_OFF = "the Hill is off on this Collie; your person can switch it on in Settings, Experiments, on the phone, or with: collie hill on";
+/** What the lead of a crew answers a member's post or image with while its own Hill is off (the lead's switch decides). */
+export const HILL_OFF_ON_LEAD = "the Hill is off on the lead of this crew; your person can switch it on in Settings, Experiments, on the phone";
 /** The sentence a bridge with WalkyTalky off answers a post with. */
 export const HILL_WALKY_OFF = "WalkyTalky is off on this machine (COLLIE_WALKY=off), so no answer could reach you";
 /** The closed reason of a withdrawn decision. */
@@ -436,6 +481,28 @@ export const TRICK_OFF = "the trick is off";
 export const TARGET_ENDED = "target session ended";
 /** The closed reason of an expired decision. */
 export const EXPIRED = "expired";
+/** The closed reason of a decision whose answer would go to a crew machine the roster no longer lists. */
+export const LEFT_THE_CREW = "its machine left the crew";
+/**
+ * How long a card that closed without the person stays on the Hill with its closing line (M96 spec 10):
+ * then the sweep clears it as Clear does. The sweep runs every 15 seconds, so it leaves 60 to 75 s after.
+ */
+export const HILL_SELF_CLEAR_MS = 60_000;
+/**
+ * The closed states that leave by themselves. An answer and a dismiss were the person's; those stay. So
+ * does a card closed {@link HILL_ANSWERED_IN_SESSION}: the person's own message closed it, and it stays
+ * under Answered with that line until the person clears it.
+ */
+const SELF_CLEARING: ReadonlySet<HillState> = new Set<HillState>(["expired", "withdrawn", "superseded", "undeliverable"]);
+
+/** Whether a closed card leaves by itself: it closed without the person, and not by their own message. */
+function selfClears(decision: HillDecision): boolean {
+  return SELF_CLEARING.has(decision.state) && decision.from.kind !== "collie" && decision.closedReason !== HILL_ANSWERED_IN_SESSION;
+}
+/** What `status` and `withdraw` answer the poster for a decision that left the Hill: the state it closed in. */
+export function leftTheHill(id: string, state: HillState): string {
+  return `${id} is ${state}; it has left the Hill`;
+}
 /** The first line of a dismiss's message carries this as its second line. */
 export const DISMISSED = "Dismissed.";
 /** How many characters of the title the answer message's first line keeps, the `…` included. */
@@ -720,11 +787,16 @@ export class HillService {
   private absent = new Set<string>();
   /** The switch as last seen, so the move to off closes the open notifications once. */
   private wasOn = true;
+  /** The switch for tricks as a whole as last seen, so the move to off closes a trick's notifications once, and how often it moved. */
+  private tricksWereOn = true;
+  private tricksMoved = 0;
   /** The crew state at the last `rev()`, and how often it changed since the start. */
   private crewSeen: string | null = null;
   private crewMoved = 0;
   /** The Collie Decisions whose answer runs now: no withdraw or supersede closes one under its answer. */
   private answering = new Set<string>();
+  /** How many answers to each decision run now, from the tap to the receipt: no quiet close takes one under its answer. */
+  private claiming = new Map<string, number>();
 
   constructor(private readonly deps: HillServiceDeps) {
     this.now = deps.now ?? Date.now;
@@ -732,42 +804,93 @@ export class HillService {
   }
 
   /**
-   * The revision on the snapshot, or undefined while no decisions file exists and the crew state was
-   * never set. It also moves when a session behind an open decision is renamed, so the phone refetches the
+   * The revision on the snapshot, on every snapshot while the Hill is on: with no decisions file yet it is
+   * the crew state's own count (0 until the person sets one), so the phone shows the Hill in the bar as
+   * soon as the Hill is on, before the first Decision (the first full trick run, 2026-11-16, decision 6;
+   * `docs/hill.md`, spec 09: off, "the Hill leaves the bar"). It also moves when a session behind an open decision is renamed, so the phone refetches the
    * list and shows the new name, and when the crew state changes (from the phone, the terminal or the file).
    */
-  rev(): number | undefined {
+  rev(): number {
     const crew = this.deps.crewState?.read() ?? HILL_CREW_STATE_DEFAULT;
     const stamp = `${crew.state}|${String(crew.at)}|${String(crew.told)}`;
     if (this.crewSeen !== null && stamp !== this.crewSeen) this.crewMoved += 1;
     this.crewSeen = stamp;
     const stored = this.deps.store.rev();
-    // A Hill with no decisions file yet still has a list to serve once the person set a crew state.
-    if (stored === undefined) return crew.at === null ? undefined : this.crewMoved;
+    // A Hill with no decisions file yet still has a page: an empty list and the crew state.
+    if (stored === undefined) return this.crewMoved;
     if (this.deps.sessionName !== undefined) {
       const names = this.look(() => JSON.stringify(this.deps.store.list().open.map((decision) => this.named(decision)).map((decision) => [decision.id, decision.from.label, decision.target?.label ?? null])));
       if (this.namesSeen !== null && names !== this.namesSeen) this.namesMoved += 1;
       this.namesSeen = names;
     }
-    return stored + this.namesMoved + this.crewMoved;
+    return stored + this.namesMoved + this.crewMoved + this.tricksSwitchMoves();
+  }
+
+  /**
+   * Whether a trick's own Decisions are held back now: tricks as a whole are switched off on this machine
+   * (`deps.tricksOn`). Each call reads the switch; the first call that sees it go off closes the notification
+   * of every open Decision of a trick, as {@link isOn} does for the Hill's own switch. The Decisions stay open.
+   */
+  tricksOff(): boolean {
+    const on = this.deps.tricksOn?.() ?? true;
+    if (on !== this.tricksWereOn) this.tricksMoved += 1;
+    if (this.tricksWereOn && !on) {
+      const tags = new Set(this.deps.store.all().flatMap((decision) => (decision.state === "open" && decision.from.kind === "trick" && decision.pushTag !== undefined ? [decision.pushTag] : [])));
+      for (const tag of tags) this.deps.push?.clear(tag);
+      if (tags.size > 0) this.deps.audit?.({ action: "hill.push.cleared", detail: { why: "tricks are off", count: tags.size } });
+    }
+    this.tricksWereOn = on;
+    return !on;
+  }
+
+  /** How often the switch for tricks as a whole moved: the list's revision moves with it, so a phone refetches. */
+  private tricksSwitchMoves(): number {
+    this.tricksOff();
+    return this.tricksMoved;
+  }
+
+  /** Whether `decision` is a trick's own Decision held back while tricks are switched off. */
+  private heldBack(decision: Pick<HillDecision, "from">, tricksOff: boolean): boolean {
+    return tricksOff && decision.from.kind === "trick";
   }
 
   /**
    * The person sent into one of this bridge's sessions from the phone's composer (1.29.0). Every open agent
    * Decision posted from exactly that address before `at`, and not marked yet, gets `spokeAfter: at`: the
    * card says the person wrote to the session after it asked, and sinks below the fresh cards of its
-   * priority. It stays open and answerable; nothing is typed and nothing pushes. Answers how many were marked.
-   * A member's Hill is not here, so a member marks nothing.
+   * priority. It stays open and answerable; nothing is typed and nothing pushes. A member's Hill is not
+   * here, so a member marks nothing.
+   *
+   * `started` (M96 spec 10): the send started the session's next turn, read by the route as a positive
+   * fact (server.ts `sendStartedTurn`: the session waited, and the send was neither a steer nor queued
+   * behind a turn). Then each of those cards whose answer would go into this very session closes
+   * `withdrawn` with {@link HILL_ANSWERED_IN_SESSION}, and NOTHING IS TYPED for it: the person's own
+   * message started the turn the answer would have started. A card whose answer runs now is left to that
+   * answer, as the second Clear leaves it. A card whose answer goes to another session takes the mark only.
+   * One `hill.spoke.closed` audit line with the count. Answers how many cards were marked or closed.
    */
-  noteSpoke(address: string, at: number = this.now()): number {
+  noteSpoke(address: string, at: number = this.now(), started = false): number {
     if (this.deps.crewMode() === "peer" || this.deps.deposed?.() === true) return 0;
-    const marked: HillDecision[] = [];
+    const changed: HillDecision[] = [];
+    let closed = 0;
     for (const decision of this.deps.store.all()) {
-      if (decision.state !== "open" || decision.from.kind !== "agent" || decision.from.address !== address || decision.at >= at || decision.spokeAfter !== undefined) continue;
-      marked.push({ ...decision, spokeAfter: at });
+      if (decision.state !== "open" || decision.from.kind !== "agent" || decision.from.address !== address || decision.at >= at) continue;
+      if (this.busy(decision.id)) continue;
+      if (started && this.answersThePoster(decision)) {
+        changed.push({ ...decision, state: "withdrawn", closedAt: at, closedReason: HILL_ANSWERED_IN_SESSION });
+        closed += 1;
+        continue;
+      }
+      if (decision.spokeAfter === undefined) changed.push({ ...decision, spokeAfter: at });
     }
-    if (marked.length === 0 || !this.save(...marked)) return 0;
-    return marked.length;
+    if (changed.length === 0 || !this.save(...changed)) return 0;
+    if (closed > 0) this.deps.audit?.({ action: "hill.spoke.closed", detail: { count: closed } });
+    return changed.length;
+  }
+
+  /** Whether an answer to this decision runs now: its claim (any sender), or a Collie Decision's act. */
+  private busy(id: string): boolean {
+    return this.answering.has(id) || this.claiming.has(id);
   }
 
   /** The crew state now (crew-state.ts): `here` when this bridge keeps none. */
@@ -809,7 +932,7 @@ export class HillService {
    * how many sessions were asked. One `hill.state.told` audit line with the count.
    */
   async tellAll(at: number, by: string, device: string | null = null): Promise<HillTellAnswer> {
-    if (!this.isOn()) return { ok: false, error: HILL_OFF };
+    if (this.refusesHere()) return { ok: false, error: HILL_OFF };
     if (!this.deps.walkyOn()) return { ok: false, error: HILL_WALKY_OFF };
     if (this.deps.crewMode() === "peer" || this.deps.deposed?.() === true) return { ok: false, error: NOT_ON_LEAD };
     const crew = this.crewState();
@@ -857,7 +980,7 @@ export class HillService {
    * closes the notification of every open decision that holds one. The decisions themselves stay open.
    */
   isOn(): boolean {
-    const on = this.deps.hillSwitch?.on() ?? true;
+    const on = this.reading() === "on";
     if (this.wasOn && !on) {
       const tags = new Set(this.deps.store.all().flatMap((decision) => (decision.state === "open" && decision.pushTag !== undefined ? [decision.pushTag] : [])));
       for (const tag of tags) this.deps.push?.clear(tag);
@@ -865,6 +988,25 @@ export class HillService {
     }
     this.wasOn = on;
     return on;
+  }
+
+  /** What the switch holds now (switch.ts): on, off or unset. With no switch wired (a test seam) it is on. */
+  reading(): HillSwitchReading {
+    const sw = this.deps.hillSwitch;
+    if (sw === undefined) return "on";
+    return sw.reading?.() ?? (sw.on() ? "on" : "off");
+  }
+
+  /**
+   * Whether THIS machine refuses a Hill call on its own switch. A lead, a solo bridge: anything but `on`
+   * (unset is off). A crew MEMBER with no switch file follows its lead: it refuses only on an explicit off,
+   * and otherwise forwards, and the lead's switch decides. Reads the switch through {@link isOn}, so the
+   * move to off still closes the open notifications.
+   */
+  refusesHere(): boolean {
+    const on = this.isOn();
+    if (on) return false;
+    return this.deps.crewMode() !== "peer" || this.reading() === "off";
   }
 
   /**
@@ -882,18 +1024,47 @@ export class HillService {
     return this.deps.look === undefined ? fn() : this.deps.look(fn);
   }
 
+  /** Whether the store holds `id` as a card of Collie's own about a trick (wire.ts `isTrickCard`). */
+  private isHeldTrickCard(id: string): boolean {
+    const decision = this.deps.store.get(id);
+    return decision !== undefined && isTrickCard(decision.from);
+  }
+
   /** One decision by id, any sender (the tricks runner reads its own decisions' states). */
   decision(id: string): HillDecision | undefined {
     return this.deps.store.get(id);
   }
 
-  /** What `GET /api/hill` serves: every open decision with the names its sessions have now. */
+  /**
+   * What `GET /api/hill` serves: every open decision with the names its sessions have now. With the Hill
+   * off, only Collie's own cards about a trick (spec 14): an agent's or a trick's stored decision stays
+   * hidden until the Hill is on again.
+   */
   list(): ReturnType<HillStore["list"]> {
+    const off = this.refusesHere();
+    const tricksOff = this.tricksOff();
     return this.look(() => {
-      const list = this.deps.store.list();
+      const whole = this.deps.store.list();
+      // A trick's own Decisions wait, unserved, while tricks are switched off (`tricksOff`).
+      const list = tricksOff ? { ...whole, open: whole.open.filter((decision) => !this.heldBack(decision, true)), closed: whole.closed.filter((decision) => !this.heldBack(decision, true)) } : whole;
       // The same revision the snapshot carries, so a phone that holds it reads `unchanged`.
-      return { ...list, rev: this.rev() ?? list.rev, open: list.open.map((decision) => served(this.named(decision))), closed: list.closed.map(served) };
+      const rev = this.rev();
+      if (off) {
+        const closedCards = this.deps.store.all().filter((decision) => decision.state !== "open" && isTrickCard(decision.from));
+        return { rev, open: list.open.filter((decision) => isTrickCard(decision.from)).map((decision) => served(this.named(decision))), closed: list.closed.filter((decision) => isTrickCard(decision.from)).map(served), closedTotal: closedCards.length };
+      }
+      return { ...list, rev, open: list.open.map((decision) => served(this.named(decision))), closed: list.closed.map(served) };
     });
+  }
+
+  /**
+   * The revision the snapshot carries while the Hill is off (`trickCardsRev`, spec 14), so the phone reads
+   * Collie's own cards about a trick: the Hill's revision while the store holds at least one such card,
+   * open or closed, else undefined (no key, and the snapshot of an install that never had one keeps its bytes).
+   */
+  trickCardsRev(): number | undefined {
+    if (!this.deps.store.all().some((decision) => isTrickCard(decision.from))) return undefined;
+    return this.rev();
   }
 
   /** The session's name for a walky address, or `fallback` when the bridge has none. */
@@ -930,7 +1101,8 @@ export class HillService {
     // The result carries the crew state at this moment; a member's carries its lead's (crew.ts).
     if (forward === null) return this.withCrewState(this.post(from, read.input));
     // This machine's own switches still hold: the person who switched its Hill or WalkyTalky off meant it.
-    if (!this.isOn()) return refuse("hill_off", HILL_OFF);
+    // A member with no switch file of its own follows the lead: the lead's switch answers below.
+    if (this.refusesHere()) return refuse("hill_off", HILL_OFF);
     if (!this.deps.walkyOn()) return refuse("walky_off", HILL_WALKY_OFF);
     const images = this.readImages(read.input.images ?? [], null);
     if (!images.ok) return images;
@@ -1053,8 +1225,11 @@ export class HillService {
   }
 
   private postAny(from: AnySender, input: HillPostInput, opts: HillPostOptions): HillPostAnswer {
-    // First: with the Hill off nothing is taken, not even a repeat of a post it once took.
-    if (!this.isOn()) return refuse("hill_off", HILL_OFF);
+    // First: with the Hill off nothing is taken, not even a repeat of a post it once took. A member with
+    // no switch file is not refused here: it answers `not_on_lead` below, as it always did. A card of
+    // Collie's own about a trick is the one sender the Hill off lets through (spec 14); only `postCollie`
+    // makes that sender, and every check below still holds for it.
+    if (this.refusesHere() && !isTrickCard(from)) return refuse("hill_off", HILL_OFF);
     // Collie's own answer types nothing, so only a post whose answer is typed needs WalkyTalky.
     if (from.kind !== "collie" && !this.deps.walkyOn()) return refuse("walky_off", HILL_WALKY_OFF);
     if (this.deps.crewMode() === "peer" || this.deps.deposed?.() === true) return refuse("not_on_lead", NOT_ON_LEAD);
@@ -1330,7 +1505,19 @@ export class HillService {
    */
   status(sender: HillSender, id: string): HillOneAnswer {
     const decision = this.mine(sender, id) ?? this.addressedTo(sender, id);
-    return decision === null ? { ok: false, missing: true, error: `no decision ${id} from this session` } : { ok: true, decision: served(this.named(decision)) };
+    if (decision !== null) return { ok: true, decision: served(this.named(decision)) };
+    return this.left(sender, id) ?? { ok: false, missing: true, error: `no decision ${id} from this session` };
+  }
+
+  /**
+   * The answer for one of the sender's decisions that a clear removed (the person's or the sweep's), from
+   * its tombstone: the state it closed in. Null when the sender posted no such decision, or its tombstone aged out.
+   */
+  private left(sender: AnySender, id: string): HillOneAnswer | null {
+    if (this.deps.store.get(id) !== undefined) return null;
+    const stone = this.deps.store.tombstone(id);
+    if (stone === undefined || stone.key !== senderKey(sender)) return null;
+    return { ok: false, missing: false, error: leftTheHill(id, stone.state) };
   }
 
   /** A decision whose `replyTo` is the asking agent's live session, or null. */
@@ -1357,7 +1544,7 @@ export class HillService {
       if (decision.state !== "open" || decision.spokeAfter === undefined) continue;
       if (shown !== null && !shown.has(decision.id)) continue;
       // An answer in flight for it finishes first; the card is left to that answer (C-A7).
-      if (this.answering.has(decision.id)) continue;
+      if (this.busy(decision.id)) continue;
       closed.push({ ...decision, state: "withdrawn", closedAt: now, closedReason: HILL_ANSWERED_IN_SESSION });
     }
     if (closed.length === 0) return { ok: true, cleared: 0 };
@@ -1376,7 +1563,7 @@ export class HillService {
 
   private withdrawAny(sender: AnySender, id: string, reason: string): HillOneAnswer {
     const decision = this.mine(sender, id);
-    if (decision === null) return { ok: false, missing: true, error: `no decision ${id} from this session` };
+    if (decision === null) return this.left(sender, id) ?? { ok: false, missing: true, error: `no decision ${id} from this session` };
     if (decision.state !== "open") return { ok: false, missing: false, error: `${id} is ${decision.state}, nothing to withdraw` };
     const closed: HillDecision = { ...decision, state: "withdrawn", closedAt: this.now(), closedReason: reason };
     if (!this.save(closed)) return { ok: false, missing: false, error: "the change could not be saved on this machine; the decision stays open" };
@@ -1414,16 +1601,7 @@ export class HillService {
       }
     }
     if (chosen.length === 0) return { cleared: [], skipped };
-    const stones = chosen.map((decision): HillTombstone => ({
-      id: decision.id,
-      requestId: decision.requestId,
-      key: keyOf(decision),
-      digest: decision.postDigest ?? null,
-      // `chosen` holds closed decisions only.
-      state: decision.state === "open" ? "withdrawn" : decision.state,
-      closedAt: decision.closedAt ?? decision.at,
-    }));
-    const removed = this.deps.store.forget(stones);
+    const removed = this.forgetClosed(chosen);
     if (removed === null) return null;
     this.deps.audit?.({ action: "hill.clear", device, detail: { count: removed.length, all: ids === null, skipped: skipped.length } });
     return { cleared: removed, skipped };
@@ -1443,18 +1621,28 @@ export class HillService {
    * and every one whose target session has ended as `undeliverable` ("target session ended"), so a
    * poster that is gone does not leave its decisions on the hill. Answers how many closed.
    *
-   * A target counts as ended only when it is absent at two sweeps in a row, and never while the bridge
-   * lists no session at all (right after boot, before the first refresh). A trick's decision with no
-   * `replyTo` has no session to end; its runner owns it.
+   * A decision whose answer would go to a crew machine the roster no longer lists closes `undeliverable`
+   * ({@link LEFT_THE_CREW}) at once: a removal is a fact of the roster, not a reading of a census.
+   *
+   * A target counts as ended only when it is absent at two sweeps in a row, each from a census read
+   * with success (`censusKnown`): an empty list from a good read closes the cards of a machine whose
+   * last agent left, and a failed or unknown read closes nothing. A trick's decision with no `replyTo`
+   * has no session to end; its runner owns it.
    */
   sweep(now: number = this.now()): number {
     // A switch the CLI moved is seen here within one sweep, so its notifications close without a phone.
     this.isOn();
     this.pruneMedia();
+    this.selfClear(now);
     const due = this.deps.store.all().filter((decision) => decision.state === "open" && decision.expiresAt !== null && decision.expiresAt <= now);
     const expired = due.map((decision): HillDecision => Object.assign({}, decision, { state: "expired" as const, closedAt: now, closedReason: EXPIRED }));
-    const ended = this.look(() => this.endedTargets(new Set(due.map((decision) => decision.id))));
-    const closed = [...expired, ...ended.map((decision): HillDecision => Object.assign({}, decision, { state: "undeliverable" as const, closedAt: now, closedReason: TARGET_ENDED }))];
+    const left = this.leftTheCrew(new Set(due.map((decision) => decision.id)));
+    const ended = this.look(() => this.endedTargets(new Set([...due, ...left].map((decision) => decision.id))));
+    const closed = [
+      ...expired,
+      ...left.map((decision): HillDecision => Object.assign({}, decision, { state: "undeliverable" as const, closedAt: now, closedReason: LEFT_THE_CREW })),
+      ...ended.map((decision): HillDecision => Object.assign({}, decision, { state: "undeliverable" as const, closedAt: now, closedReason: TARGET_ENDED })),
+    ];
     if (closed.length === 0) return 0;
     if (this.save(...closed)) return closed.length;
     // Not saved: the ended ones are still absent, and the next sweep tries them again.
@@ -1462,12 +1650,52 @@ export class HillService {
     return 0;
   }
 
+  /**
+   * Clear every agent's or trick's decision that closed without the person ({@link SELF_CLEARING}) at
+   * least {@link HILL_SELF_CLEAR_MS} ago, as Clear does: removed with its images, a tombstone kept, the
+   * revision moved, one `hill.clear.self` audit line with the count. A card the person's own message
+   * closed ({@link HILL_ANSWERED_IN_SESSION}) is theirs, as an answer is, and stays. Collie's own cards are left to the
+   * person: the version card reads an expired card as seen, and a cleared one would ask again. A write
+   * that fails leaves them for the next sweep.
+   */
+  private selfClear(now: number): void {
+    const due = this.deps.store.all().filter((decision) => selfClears(decision) && (decision.closedAt ?? decision.at) + HILL_SELF_CLEAR_MS <= now);
+    if (due.length === 0) return;
+    const removed = this.forgetClosed(due);
+    if (removed !== null && removed.length > 0) this.deps.audit?.({ action: "hill.clear.self", detail: { count: removed.length } });
+  }
+
+  /** Remove closed decisions with a tombstone each. The ids removed, or null when the write failed. */
+  private forgetClosed(chosen: readonly HillDecision[]): string[] | null {
+    const stones = chosen.map((decision): HillTombstone => ({
+      id: decision.id,
+      requestId: decision.requestId,
+      key: keyOf(decision),
+      digest: decision.postDigest ?? null,
+      // Only closed decisions are chosen.
+      state: decision.state === "open" ? "withdrawn" : decision.state,
+      closedAt: decision.closedAt ?? decision.at,
+    }));
+    return this.deps.store.forget(stones);
+  }
+
+  /**
+   * The open decisions whose answer would go to a crew machine the roster no longer lists (`removed`). A
+   * fact of the roster, not of a census, so one sweep is enough. Only on the bridge that holds the crew's
+   * Hill (a lead, or a lead whose last member went and is solo now); never on a peer or a deposed lead.
+   */
+  private leftTheCrew(skip: ReadonlySet<string>): HillDecision[] {
+    const removed = this.deps.removed;
+    if (removed === undefined || this.deps.crewMode() === "peer" || this.deps.deposed?.() === true) return [];
+    return this.deps.store.all().filter((decision) => {
+      if (decision.state !== "open" || skip.has(decision.id) || decision.target === null) return false;
+      const to = decision.replyTo ?? decision.from.address;
+      return to !== null && removed(to);
+    });
+  }
+
   /** The open decisions whose target was gone at this sweep and the last one. Moves the memory of who was gone. */
   private endedTargets(skip: ReadonlySet<string>): HillDecision[] {
-    if (!(this.deps.sessionsKnown?.() ?? true)) {
-      this.absent.clear();
-      return [];
-    }
     const gone: string[] = [];
     const ended: HillDecision[] = [];
     for (const decision of this.deps.store.all()) {
@@ -1477,6 +1705,9 @@ export class HillService {
       if (decision.target === null || to === null) continue;
       // A crew machine that is not answering ends none of its sessions: the decision waits for it (§22).
       if (this.away(to) !== null) continue;
+      // Not sure is not a fact: absent from a census this bridge could not read with success says nothing,
+      // and leaving it out of `gone` starts its row again.
+      if (!(this.deps.censusKnown?.(to) ?? true)) continue;
       if (this.deps.place(to)?.address === to) continue;
       if (this.absent.has(decision.id)) ended.push(decision);
       else gone.push(decision.id);
@@ -1497,8 +1728,12 @@ export class HillService {
    * delivered when the decision is still open, else answered `gone` with the state it has.
    */
   answer(request: HillAnswerRequest, id: string, by: string, deviceId: string | null = null): Promise<HillAnswerOutcome> {
-    // With the Hill off nothing is typed and no tap runs; the decision stays open for when it is back.
-    if (!this.isOn()) return Promise.resolve({ kind: "off" });
+    // With the Hill off nothing is typed and no tap runs; the decision stays open for when it is back. The
+    // one exception is a card of Collie's own about a trick, as the store holds it (spec 14).
+    if (this.refusesHere() && !this.isHeldTrickCard(id)) return Promise.resolve({ kind: "off" });
+    // Tricks switched off as a whole: a trick's own Decision stays open, nothing closes and no program runs.
+    const held = this.deps.store.get(id);
+    if (held !== undefined && this.heldBack(held, this.tricksOff())) return Promise.resolve({ kind: "tricks-off" });
     // §25: a deposed lead's Decisions went to the machine that took over, and a peer's Hill is not the
     // crew's; an answer here could be a second one. Refused, nothing typed, nothing closed, nothing stored.
     if (this.deps.crewMode() === "peer" || this.deps.deposed?.() === true) {
@@ -1531,6 +1766,18 @@ export class HillService {
   }
 
   private async run(request: HillAnswerRequest, id: string, by: string, digest: string, deviceId: string | null): Promise<HillAnswerOutcome> {
+    // SYNCHRONOUS up to the first await: the answer counts as running from the tap on.
+    this.claiming.set(id, (this.claiming.get(id) ?? 0) + 1);
+    try {
+      return await this.runClaimed(request, id, by, digest, deviceId);
+    } finally {
+      const left = (this.claiming.get(id) ?? 1) - 1;
+      if (left <= 0) this.claiming.delete(id);
+      else this.claiming.set(id, left);
+    }
+  }
+
+  private async runClaimed(request: HillAnswerRequest, id: string, by: string, digest: string, deviceId: string | null): Promise<HillAnswerOutcome> {
     const claimed = this.lane.then(() => this.guarded(id, () => this.claim(request, id, by, digest, deviceId)));
     this.lane = claimed.then(
       () => undefined,
@@ -1540,6 +1787,8 @@ export class HillService {
     if (claim.kind === "done") return claim.outcome;
     let delivery: NonNullable<HillReceipt["delivery"]> = "none";
     let threw = false;
+    // The write of the typed line was not confirmed: walky said `unknown`, or the send threw.
+    let unconfirmed = false;
     if (claim.send !== null) {
       let sent: HillSendResult;
       try {
@@ -1551,7 +1800,8 @@ export class HillService {
       }
       // Walky typed nothing (C-S1, review 8): the answer did not happen, so the Decision opens again.
       if (sent === "refused" && claim.decision.from.kind !== "collie") return await this.unclaim(claim, request, by);
-      delivery = sent === "refused" ? "unknown" : sent;
+      delivery = sent === "refused" || sent === "inbox-only" ? "unknown" : sent;
+      unconfirmed = sent === "unknown";
     }
     // One line of its own: the answer is kept on the decision, and the session reads it with `collie hill status`.
     if (claim.send !== null && delivery === "unknown") this.deps.audit?.({ action: "hill.undelivered", device: by, detail: { decisionId: id, why: threw ? "the send failed" : "not confirmed" } });
@@ -1560,7 +1810,10 @@ export class HillService {
     const receipt: HillReceipt = { ...claim.record.receipt, delivery, trick };
     await this.deps.receipts.record({ ...claim.record, receipt });
     const now = this.deps.store.get(id);
-    if (now?.answer?.rid === request.rid && (now.answer.delivery !== delivery || now.answer.trick !== trick)) this.save({ ...now, answer: { ...now.answer, delivery, trick } });
+    if (now?.answer?.rid === request.rid && (now.answer.delivery !== delivery || now.answer.trick !== trick || (now.answer.unconfirmed === true) !== unconfirmed)) {
+      const { unconfirmed: _was, ...kept } = now.answer;
+      this.save({ ...now, answer: unconfirmed ? { ...kept, delivery, trick, unconfirmed: true } : { ...kept, delivery, trick } });
+    }
     this.auditAnswer(claim.decision, request, by, receipt);
     return { kind: "receipt", receipt };
   }
@@ -1600,7 +1853,14 @@ export class HillService {
    */
   private singleCodeRule(decision: HillDecision, request: HillAnswerRequest): string | null {
     const single = singleCodeCard(decision);
-    if (single === null || request.intent === "dismiss" || request.intent === single.decline) return null;
+    // A trick card whose stored view holds no code part offers no yes (2026-11-17): the bridge makes none
+    // (version-card.ts `keepOnly`), the phone shows none, and a yes that comes anyway is refused here, so
+    // nothing installs or switches on from a card that showed no code. The decline and a dismiss still go.
+    if (single === null) {
+      const decline = trickCardDecline(decision);
+      return decline === null || request.intent === "dismiss" || request.intent === decline ? null : HILL_CODE_READ_FIRST;
+    }
+    if (request.intent === "dismiss" || request.intent === single.decline) return null;
     const asked = request.group;
     if (asked === undefined) return HILL_CODE_OLD_APP;
     if (asked.digest !== single.digest) return HILL_GROUP_CHANGED;
@@ -1622,14 +1882,13 @@ export class HillService {
    * Act on an answer to a Collie Decision before it closes: null when done, else the plain line the
    * refusal shows. A throw, or no handler, refuses; the card stays open for another tap.
    */
-  private async actForCollie(decision: HillDecision, intent: string): Promise<string | null> {
+  private async actForCollie(decision: HillDecision, intent: string): Promise<HillCollieVerdict> {
     const ref = decision.from.ref;
-    if (ref === undefined || this.deps.onCollieAnswer === undefined) return HILL_NO_ANSWER_HANDLER;
+    if (ref === undefined || this.deps.onCollieAnswer === undefined) return { ok: false, reason: HILL_NO_ANSWER_HANDLER };
     try {
-      const verdict = await this.deps.onCollieAnswer(ref, intent);
-      return verdict.ok ? null : verdict.reason;
+      return await this.deps.onCollieAnswer(ref, intent);
     } catch {
-      return HILL_NO_ANSWER_HANDLER;
+      return { ok: false, reason: HILL_NO_ANSWER_HANDLER };
     }
   }
 
@@ -1696,7 +1955,8 @@ export class HillService {
     // Collie's own card carries Collie's own title and labels (a trick's id, fixed words), so the session
     // it tells gets them as a poster does.
     // The crew state at this moment rides on the typed answer as one last line, while it is not `here`.
-    const body = withCrewLine(answerMessage(decision, intent, option?.label ?? null, text, this.answersThePoster(decision) || decision.from.kind === "collie"), this.crewState().state);
+    const message = answerMessage(decision, intent, option?.label ?? null, text, this.answersThePoster(decision) || decision.from.kind === "collie");
+    let body = withCrewLine(message, this.crewState().state);
     if (codePoints(body) > WALKY_BODY_MAX) return this.final(request, id, by, digest, receiptOf(rid, now, "rejected", "text is too long for one message", "open", null));
 
     // Where the answer goes: `replyTo`, else the poster. A trick with no `replyTo` has nothing to type into.
@@ -1716,8 +1976,11 @@ export class HillService {
     // Collie's own Decision acts here, once, before anything is written: a refusal (the code moved since
     // the card was made) keeps the card open, and a dismiss closes it with no act at all.
     if (decision.from.kind === "collie" && intent !== "dismiss") {
-      const refused = await this.actForCollie(decision, intent);
-      if (refused !== null) return this.final(request, id, by, digest, receiptOf(rid, now, "rejected", refused, "open", null));
+      const verdict = await this.actForCollie(decision, intent);
+      if (!verdict.ok) return this.final(request, id, by, digest, receiptOf(rid, now, "rejected", verdict.reason, "open", null));
+      // What Collie did rides after the option line, when it still fits one message.
+      const told = verdict.told === undefined ? body : withCrewLine(`${message}\n${verdict.told}`, this.crewState().state);
+      if (codePoints(told) <= WALKY_BODY_MAX) body = told;
     }
     const state: HillState = intent === "dismiss" ? "dismissed" : "answered";
     // Collie's own card with a session to tell (a trick proposal's proposer): typed only while that session

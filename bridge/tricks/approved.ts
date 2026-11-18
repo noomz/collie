@@ -9,8 +9,8 @@ import { hillImageMime } from "../hill/media.ts";
 import { CODE_BYTES_MAX, CONFIG_FILE, diskTrickFs, hashCodeEntries, isPictureName, linkRefusal, PICTURE_DIRS, walkFingerprint, walkTrickCode, WRITABLE_TOP_DIRS, type CodeEntry, type TrickFs } from "./code-hash.ts";
 import { readManifestFile, readSmallFile } from "./discover.ts";
 import { ORIGIN_FILE } from "./origin.ts";
-import { APPROVED_DIR, approvedCopyDir, approvedTrickDir, hash16, PENDING_DIR, pendingTrickDir, switchesPath, tricksConfigDir } from "./paths.ts";
-import { MIGRATED, parseSwitches, SWITCHES_VERSION, updateSwitches, withApproval, type SwitchEntry, type Switches } from "./switches.ts";
+import { APPROVED_DIR, approvedCopyDir, approvedTrickDir, hash16, PENDING_DIR, pendingTrickDir, switchesPath, tricksConfigDir, tricksStateDir, trickStateDir } from "./paths.ts";
+import { MIGRATED, parseSwitches, SWITCHES_VERSION, updateSwitches, withApproval, withSwitch, type SwitchEntry, type Switches } from "./switches.ts";
 
 // THE APPROVED COPY (M94, crew slice 2): a trick runs from a copy of the code a person said yes to, so an
 // edit of its folder never stops it. The folder is where the trick is written; the copy is what runs.
@@ -308,6 +308,11 @@ export async function syncConfig(src: string, copyDir: string, fs: TrickFs = dis
  * auto, no "Use it and stop asking", the card shows it whole. A manifest read from its text alone, whose
  * rules file was not read, hashes `rules` as the empty string: never equal to a read one.
  *
+ * `access = "see"` or `"read"` (M105 spec 04) is a right too, hashed only when the manifest has it, under `through`.
+ *
+ * `decides = "reply"` (2026-11-12) is a right too, hashed only when the manifest has it: a Decision with
+ * `replyTo` types the person's answer into a session, so a version that adds it asks again, even with auto.
+ *
  * THE CANONICAL FORM (fault B). The three first keys, `env`, `inputs` and `places`, are always hashed, as
  * sorted lists. Every key added after them is hashed only when it holds something: an absent key equals
  * its neutral value (`undefined`, `null`, `false`, an empty list, an empty object), so a right a later
@@ -316,12 +321,21 @@ export async function syncConfig(src: string, copyDir: string, fs: TrickFs = dis
  * text above. The keys go in sorted order (`env`, `inputs`, `places`, then {@link LATER_POWER_KEYS}), which is
  * the order every stored hash was written in.
  */
-export function powersOf(manifest: Pick<TrickManifest, "env" | "places" | "inputs" | "agentView" | "rules" | "rulesSha256">): string {
+export function powersOf(manifest: Pick<TrickManifest, "env" | "places" | "inputs" | "agentView" | "rules" | "rulesSha256" | "decides" | "on" | "watch" | "access">): string {
   const env = [...new Set(manifest.env ?? [])].toSorted();
   const places = [...new Set<string>([...manifest.places, ...(manifest.agentView === true ? [AGENT_VIEW_PLACE] : [])])].toSorted();
   const inputs = [...new Set(manifest.inputs ?? [])].toSorted();
   const later: LaterPowers = {};
   if (manifest.rules !== undefined) later.rules = manifest.rulesSha256 ?? "";
+  // `decides = "reply"`: its Decisions may type the person's answer into a session. Absent hashes as before.
+  if (manifest.decides !== undefined) later.replies = manifest.decides;
+  // `on` and `watch` (M105 step one) make the trick run when something happens, so each is a right: a
+  // version that adds one, or names another event or path, asks again. Sorted and once; absent hashes as before.
+  if (manifest.on !== undefined) later.reacts = [...new Set<string>(manifest.on)].toSorted();
+  if (manifest.watch !== undefined) later.watches = [...new Set(manifest.watch)].toSorted();
+  // `access` (M105 spec 04): how much of the local API the trick reads. `none` is the absent key, so a trick
+  // approved before the key existed, or without it, hashes as before and asks nothing on an update.
+  if (manifest.access !== undefined) later.through = manifest.access;
   return powersHash({ env, inputs, places }, later);
 }
 
@@ -354,12 +368,20 @@ export interface FirstPowers {
 
 /** The power keys added after the first three. A new right gets its key here, and in {@link LATER_POWER_KEYS}. */
 export interface LaterPowers {
+  /** The manifest's `on` events, sorted and once (M105 step one). Named so it sorts after `places`. */
+  reacts?: readonly string[];
+  /** The manifest's `decides`: `reply` when the trick's Decisions may answer into a session (2026-11-12). Named so it sorts after `places`. */
+  replies?: string;
   /** The rules file's SHA-256, or the empty string for rules named but not read. */
   rules?: string;
+  /** The manifest's `watch` paths as written, sorted and once (M105 step one). */
+  watches?: readonly string[];
+  /** The manifest's `access`, `see` or `read`: how much of the local API the trick reads (M105 spec 04). Named so it sorts after `places`. */
+  through?: string;
 }
 
 /** The later keys, in sorted order. */
-export const LATER_POWER_KEYS = ["rules"] as const satisfies readonly (keyof LaterPowers)[];
+export const LATER_POWER_KEYS = ["reacts", "replies", "rules", "through", "watches"] as const satisfies readonly (keyof LaterPowers)[];
 
 /** Whether a later power key holds nothing, so it hashes as if absent: absent, or an empty list. The empty string holds something. */
 export function neutralPower(value: string | readonly string[] | undefined): boolean {
@@ -368,11 +390,11 @@ export function neutralPower(value: string | readonly string[] | undefined): boo
 
 /** The powers hash: the three first keys, then each later key that holds something, all keys in sorted order. */
 export function powersHash(first: FirstPowers, later: LaterPowers = {}): string {
-  const doc: FirstPowers & LaterPowers = { env: first.env, inputs: first.inputs, places: first.places };
-  for (const key of LATER_POWER_KEYS) {
+  const held = LATER_POWER_KEYS.flatMap((key) => {
     const value = later[key];
-    if (value !== undefined && !neutralPower(value)) doc[key] = value;
-  }
+    return value !== undefined && !neutralPower(value) ? [[key, value] as const] : [];
+  });
+  const doc = { env: first.env, inputs: first.inputs, places: first.places, ...Object.fromEntries(held) };
   return createHash("sha256").update(JSON.stringify(doc)).digest("hex").slice(0, 16);
 }
 
@@ -625,6 +647,85 @@ export async function removeTrickCopies(configDir: string, id: string): Promise<
   if (!isTrickId(id)) return;
   await removeTree(approvedTrickDir(configDir, id));
   await removeTree(pendingTrickDir(configDir, id));
+}
+
+/**
+ * Before a NEW trick is written under `id` (an add from the official list, from a repository, at the terminal,
+ * or an agent's proposal): forget what an earlier trick of that name left. A switch entry a removed folder left
+ * behind goes off (an auto flag or an approved hash of the old code must never carry to the new one), its
+ * approved and pending copies are removed, so a copy of the same code hashes the same and would be kept, old
+ * config, origin record and writable folders with it, and so is its state folder `<stateDir>/tricks/<id>/`
+ * (`.collie/values.json` and what the old program saved: a different author's code must not read them).
+ * `forget` then drops what lives beside the files: the agent views and the Hill's posted keys of that id.
+ * It runs only when the files went, and is the caller's to give: a bridge hands it its live stores, the
+ * terminal hands it a disk-only one (a running bridge keeps its own copy in memory).
+ *
+ * Does nothing while a folder of that name is there: that is a trick that exists, not a leftover. The look is
+ * made twice, the second inside the switch file's lock: the bridge's approval of a trick of this id takes the
+ * same lock, so a folder that appeared while this add waited for it is seen and nothing is removed.
+ * Inside the lock the three paths are only RENAMED aside, to `<parent>/.gone-<id>-<random>` (a trick id holds no
+ * dot, and the same parent keeps the rename atomic): every other writer waits for the lock at most six seconds
+ * (`SWITCH_LOCK_WAIT_MS`) and then fails, so a slow `rm` of a state folder a trick has filled must never hold it, or
+ * a phone's approval or a `collie trick on` would fail for it. The renamed paths are removed
+ * after the unlock, and the bridge's start sweeps what a crash left ({@link sweepGone}). A dotted name is
+ * never a trick id, so no scan, list or prune reads one as a trick. A rename moves a symbolic link itself and
+ * never follows it, and `rm` with recursive and force removes a link and never follows it either.
+ * Throws only when the switch file cannot be written or a path cannot be renamed (the add stops).
+ */
+export async function forgetLeftovers(opts: { stateDir: string; configDir: string; id: string; at: string; forget?: (id: string) => void | Promise<void> }): Promise<void> {
+  if (!isTrickId(opts.id)) return;
+  const folder = join(tricksConfigDir(opts.configDir), opts.id);
+  const there = async (): Promise<boolean> => (await lstat(folder).catch(() => null)) !== null;
+  if (await there()) return;
+  let cleared = false;
+  const aside: string[] = [];
+  try {
+    await updateSwitches(opts.stateDir, async (now) => {
+      if (await there()) return now;
+      for (const path of [trickStateDir(opts.stateDir, opts.id), approvedTrickDir(opts.configDir, opts.id), pendingTrickDir(opts.configDir, opts.id)]) {
+        const to = await moveAside(path, opts.id);
+        if (to !== null) aside.push(to);
+      }
+      cleared = true;
+      return now.on.has(opts.id) ? withSwitch(now, opts.id, false, opts.at) : now;
+    });
+    if (cleared) await opts.forget?.(opts.id);
+  } finally {
+    // Outside the lock, and also when the write or `forget` threw: what went aside is not wanted back.
+    for (const path of aside) await removeTree(path);
+  }
+}
+
+/** The prefix of a path set aside for removal. Never a trick id: ids hold no dot. */
+export const GONE_PREFIX = ".gone-";
+
+/** Rename `path` to a dotted sibling `.gone-<id>-<random>`. Its new name, or null when nothing was there. */
+async function moveAside(path: string, id: string): Promise<string | null> {
+  const to = join(dirname(path), `${GONE_PREFIX}${id}-${randomBytes(6).toString("hex")}`);
+  try {
+    await rename(path, to);
+    return to;
+  } catch (err) {
+    if (err instanceof Error && "code" in err && err.code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+/**
+ * Remove every `.gone-*` entry that a crash between the rename and the removal of {@link forgetLeftovers} left,
+ * in the three folders it renames inside. Run once when the bridge starts. Never throws.
+ */
+export async function sweepGone(opts: { stateDir: string; configDir: string }): Promise<number> {
+  const root = tricksConfigDir(opts.configDir);
+  let removed = 0;
+  for (const parent of [tricksStateDir(opts.stateDir), join(root, APPROVED_DIR), join(root, PENDING_DIR)]) {
+    for (const name of await names(parent)) {
+      if (!name.startsWith(GONE_PREFIX)) continue;
+      await removeTree(join(parent, name));
+      removed += 1;
+    }
+  }
+  return removed;
 }
 
 /** The approved copy a switch entry names, or null when it approves nothing. */

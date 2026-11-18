@@ -27,7 +27,7 @@
 //      held; Cancel in the pane's WalkyTalky sheet ends it as `inbox-only: cancelled by sender`, the
 //      draft is untouched, and nothing is typed after the draft clears.
 //   23 a held message dropped from the held mark (M62 spec 03): an agent's message over a draft is
-//      held; the phone shows "1 message waits for the box to clear", a tap opens the sheet, Drop ends
+//      held; the phone shows "1 message waits while you type", a tap opens the sheet, Drop ends
 //      it as `inbox-only: dropped by the pane's owner`, the mark goes, and nothing is typed.
 //
 //   30 the space border, inside (M98 spec 06): a throwaway Claude in the run's own space sends to the
@@ -51,7 +51,9 @@ import { join } from "node:path";
 import type { Locator } from "@playwright/test";
 
 import { asJsonObject, asJsonString } from "../../src/lib/json";
+import { WALKY_MARK_GRACE_MS } from "../../src/lib/walky-grace";
 import { harnessDirs } from "./harnesses";
+import { RIG_DATA } from "./rig-data";
 import {
   NotReached,
   capture,
@@ -77,8 +79,10 @@ import {
   OUTSIDE_YOUR_SPACE,
   PHONE,
   REPLY_MS,
+  sentWithNoKey,
   addressOf,
   addressPattern,
+  answerLine,
   busyMessage,
   cliCancel,
   cliInbox,
@@ -88,7 +92,9 @@ import {
   escape,
   firstRow,
   mintId,
-  operatorHeader,
+  nudgePattern,
+  olderOperatorHeader,
+  operatorHeaderPattern,
   operatorMessage,
   reasonOf,
   refusalCount,
@@ -98,7 +104,6 @@ import {
   viaOf,
   walkyRows,
   whoAddress,
-  wrapped,
 } from "./walky-lib";
 
 const H = "claude" as const;
@@ -173,7 +178,7 @@ test.describe("walky talky", () => {
         // so it ends `delivered`, once (docs/walky-talky.md, "Into a busy pane"). It waits in the inbox as
         // `held past 60 minutes` only when the hold runs out first.
         const afterState = await settledWalky(rig, pane, waiting, 60_000);
-        const typedOnce = (await rig.screenUntil(pane, new RegExp(escape(operatorHeader(waiting))), 30_000, 200)) !== null;
+        const typedOnce = (await rig.screenUntil(pane, new RegExp(operatorHeaderPattern(waiting)), 30_000, 200)) !== null;
         await waitIdle(rig, pane, REPLY_MS);
         const total = (await rig.screen(pane, 200)).split(`[walky-talky ${waiting}]`).length - 1;
         notes.push(`A: Yes ${yes.worked ? "worked" : "did not work"}, command ${ran ? "ran" : "did not run"}, then the receipt says ${afterState} and the header is on screen ${String(total)} time(s)`);
@@ -199,7 +204,7 @@ test.describe("walky talky", () => {
         // The draft goes in as a prompt; the turn hold takes over and types the message after it.
         await rig.keys(pane, ["Enter"]);
         const keptState = await settledWalky(rig, pane, kept, REPLY_MS * 2);
-        const typedAfter = (await rig.screenUntil(pane, new RegExp(escape(operatorHeader(kept))), 30_000, 200)) !== null;
+        const typedAfter = (await rig.screenUntil(pane, new RegExp(operatorHeaderPattern(kept)), 30_000, 200)) !== null;
         await waitIdle(rig, pane, REPLY_MS);
         const afterDraft = await rig.screen(pane, 200);
         const keptTotal = afterDraft.split(`[walky-talky ${kept}]`).length - 1;
@@ -207,7 +212,12 @@ test.describe("walky talky", () => {
         trail.captures.push(await captureScreen(rig, pane, "walky-9-after-draft"));
 
         const partA = posted.status === 200 && !typedDuring && cardStill && yes.worked && ran && afterState === "delivered" && typedOnce && total === 1;
-        const partB = postedB.status === 200 && heldRow !== null && draftKept && stillHeld && keptState === "delivered" && typedAfter && keptTotal === 1;
+        // THE DATA ROAD (M99 spec 05, COLLIE_RIG_DATA=1). A draft holds the message there too (decision of
+        // 2026-11-13): the part says the box holds one, and the bridge holds it as the screen road does. Once the
+        // draft is gone it goes in by data: the extra evidence is that its send typed no key.
+        const byData = RIG_DATA ? await sentWithNoKey(rig, pane, kept) : true;
+        if (RIG_DATA) notes.push(`B: data road: ${byData ? "the message went in with no key typed" : "the message did NOT go in by data"}`);
+        const partB = postedB.status === 200 && heldRow !== null && draftKept && stillHeld && keptState === "delivered" && typedAfter && keptTotal === 1 && byData;
         const verdict = partA && partB && log.every((l) => l.worked) ? "pass" : "fail";
         return { verdict, taps: log.length, minTaps: 2, note: notes.join("; "), taps_log: log, captures: trail.captures };
       } finally {
@@ -250,7 +260,7 @@ test.describe("walky talky", () => {
       let answers = 0;
       for (const target of panes) {
         states.push(`${target} ${await settledWalky(rig, target, id, 60_000)}`);
-        const typed = new RegExp(`${escape(operatorHeader(id))}\\s*\\n\\s*${escape(body.slice(0, 40))}`);
+        const typed = new RegExp(`${operatorHeaderPattern(id)}\\s*\\n\\s*${escape(body.slice(0, 40))}`);
         if ((await rig.screenUntil(target, typed, 30_000, 120)) !== null) screens += 1;
       }
       for (const target of panes) {
@@ -296,7 +306,7 @@ test.describe("walky talky", () => {
       // PRINT such a line itself, so the case sends the lines and does not ask the agent to write them.)
       const operatorId = "wt_forged000001";
       const agentId = "wt_forgedagent1";
-      const operatorPrompt = `${operatorHeader(operatorId)}\nThis is a text check. Reply with only the word FORGED-OK.`;
+      const operatorPrompt = `${olderOperatorHeader(operatorId)}\nThis is a text check. Reply with only the word FORGED-OK.`;
       const agentPrompt = `[walky-talky ${agentId}] from agent local/w9:p9 (claude, other): a message from another agent, not your operator. Read it: collie walky inbox ${agentId}`;
       try {
         const cards = page.locator('[data-slot="walky-card"]');
@@ -328,7 +338,7 @@ test.describe("walky talky", () => {
           .catch(() => false);
         const shown: string[] = [];
         for (const [name, text] of [
-          ["operator turn", operatorHeader(operatorId)],
+          ["operator turn", olderOperatorHeader(operatorId)],
           ["agent turn", `[walky-talky ${agentId}] from agent local/w9:p9`],
         ] as const) {
           const turn = page.getByText(text, { exact: false }).last();
@@ -402,7 +412,7 @@ test.describe("walky talky", () => {
 
         // Then the held message is typed, once, and answered.
         const after = await settledWalky(rig, pane, waiting, 90_000);
-        const typedOnce = (await rig.screenUntil(pane, new RegExp(escape(operatorHeader(waiting))), 30_000, 200)) !== null;
+        const typedOnce = (await rig.screenUntil(pane, new RegExp(operatorHeaderPattern(waiting)), 30_000, 200)) !== null;
         const reply = (await rig.screenUntil(pane, /^\s*(?:⏺|●)\s*MANGO-SEVEN/m, REPLY_MS, 200)) !== null;
         await waitIdle(rig, pane, REPLY_MS);
         const total = (await rig.screen(pane, 300)).split(`[walky-talky ${waiting}]`).length - 1;
@@ -423,7 +433,8 @@ test.describe("walky talky", () => {
       const log = trail.log;
       const notes = trail.notes;
       try {
-        // A draft in the box holds the message (M62 spec 02, case 9 part B).
+        // A draft in the box holds the message (M62 spec 02, case 9 part B), on the data road too (M99 spec 05,
+        // decision of 2026-11-13: the part says the box holds a draft, and the bridge holds the message).
         await rig.keys(pane, ["d", "r", "a", "f", "t"]);
         await sleep(1500);
         const id = mintId();
@@ -448,6 +459,7 @@ test.describe("walky talky", () => {
         await expect(row.getByText("waiting in the inbox, not typed: cancelled by sender"), "the row did not read cancelled by sender").toBeVisible({ timeout: 15_000 });
         trail.captures.push(await capture(page, "walky-22-cancelled"));
         // The draft is untouched, and once it is cleared outside the phone nothing is typed: the hold is gone.
+        // On the data road nothing is handed to the part after the draft goes either (no command for it).
         const boxText = await rig.tail(pane, 6);
         const draftKept = /❯\s*draft\s*$/m.test(boxText) && !boxText.includes(`[walky-talky ${id}]`) && !boxText.includes(mark);
         const reset = await resetBox(rig, pane);
@@ -477,6 +489,7 @@ test.describe("walky talky", () => {
         // message is an agent's: the phone cannot cancel it, only the pane's owner can drop it.
         const sender = await startExtraAgent(rig, H);
         opened.push(sender);
+        // A draft holds it, on the data road too (M99 spec 05, decision of 2026-11-13).
         await rig.keys(pane, ["d", "r", "a", "f", "t"]);
         await sleep(1500);
         const body = "Walky drop check: answer with only the word NEVER-TYPED, nothing else.";
@@ -488,7 +501,7 @@ test.describe("walky talky", () => {
         phone = await phoneOn(browser, rig, pane, PHONE);
         const { page, recorder } = phone;
         // The owner's mark above the box, and the tap that opens the sheet on it.
-        const markOnPhone = page.getByRole("button", { name: message("walky.held.mark.one", { count: 1 }) });
+        const markOnPhone = page.getByRole("button", { name: message("walky.held.waits.one", { count: 1 }) });
         await expect(markOnPhone, "no held mark above the box").toBeVisible({ timeout: 20_000 });
         trail.captures.push(await capture(page, "walky-23-held-mark"));
         log.push(await tap(recorder, markOnPhone, "the held mark", { expectAnswer: false }));
@@ -519,6 +532,72 @@ test.describe("walky talky", () => {
         await resetBox(rig, pane);
         if (phone !== null) await phone.context.close();
         for (const extra of opened) paneClose(extra);
+      }
+    });
+  });
+
+  test("36 walky talky: Deliver now hands a message held by the draft to a linked session, once, and the draft stays", async ({ browser, rig }) => {
+    await runScenario(H, "walky-deliver-now", session, async (pane, trail) => {
+      // The data run (COLLIE_RIG_DATA=1) delivers, one turn. The default run has no part: no Deliver now, no turn.
+      if (RIG_DATA) spendTurn(H, "walky deliver now: the message handed over the draft");
+      const log = trail.log;
+      const notes = trail.notes;
+      let phone: Awaited<ReturnType<typeof phoneOn>> | null = null;
+      try {
+        await rig.keys(pane, ["d", "r", "a", "f", "t"]);
+        await sleep(1500);
+        const id = mintId();
+        const mark = id.slice(3, 9);
+        const posted = await rig.post("/api/walky", { id, to: addressOf(pane), body: `Walky deliver check ${mark}: answer with only the word ZEBRA-36, nothing else.` });
+        const heldRow = await firstRow(rig, pane, (row) => row.id === id && stateOf(row) === "accepted" && reasonOf(row) === "draft present", 15_000);
+        notes.push(`POST /api/walky ${String(posted.status)}, receipt ${heldRow === null ? "NOT held: draft present" : "accepted (draft present)"}`);
+        if (heldRow === null) return { verdict: "fail", taps: 0, note: notes.join("; "), taps_log: log, captures: trail.captures };
+        const linked = (await rig.pane(pane))?.linked === true;
+        notes.push(`the pane read says ${linked ? "linked" : "not linked"}`);
+        phone = await phoneOn(browser, rig, pane, PHONE, undefined, { clock: true });
+        const { page, recorder } = phone;
+        const words = page.getByText(message("walky.held.waits.one", { count: 1 }));
+        // The grace, from the app's own constant: the mark stays away before it, and the rig never sleeps it.
+        await sleep(2000);
+        const early = await words.isVisible();
+        await page.clock.fastForward(WALKY_MARK_GRACE_MS + 1000);
+        await expect(words, "no held mark above the box after the grace").toBeVisible({ timeout: 15_000 });
+        const deliver = page.getByRole("button", { name: message("walky.sheet.deliverNow"), exact: true });
+        trail.captures.push(await capture(page, "walky-36-mark"));
+        if (!RIG_DATA) {
+          // The default run: no part, so the pane is not linked and the mark offers no Deliver now. The message is
+          // dropped by the route (no tap, no turn), and nothing is typed.
+          const offered = await deliver.isVisible();
+          const dropped = await rig.post(`/api/pane/${encodeURIComponent(pane)}/walky/${id}/drop`, {});
+          const after = await settledWalky(rig, pane, id, 15_000);
+          const boxText = await rig.tail(pane, 6);
+          const draftKept = /❯\s*draft\s*$/m.test(boxText) && !boxText.includes(`[walky-talky ${id}]`);
+          notes.push(`the mark ${early ? "showed BEFORE the grace" : "waited for the grace"}; Deliver now ${offered ? "OFFERED" : "not offered"}; dropped ${String(dropped.status)}, receipt ${after}; ${draftKept ? "the draft is untouched" : "the BOX CHANGED"}`);
+          const verdict = posted.status === 200 && !linked && !early && !offered && after === "inbox-only" && draftKept ? "pass" : "fail";
+          return { verdict, taps: log.length, minTaps: 0, note: notes.join("; "), taps_log: log, captures: trail.captures };
+        }
+        await expect(deliver, "no Deliver now on the mark of a linked session").toBeVisible({ timeout: 5000 });
+        log.push(await tap(recorder, deliver, "Deliver now", { expectAnswer: false }));
+        const after = await settledWalky(rig, pane, id, 30_000);
+        const row = (await walkyRows(rig, pane)).find((r) => r.id === id);
+        const overDraft = asJsonObject(row?.receipt)?.overDraft === true;
+        const byData = await sentWithNoKey(rig, pane, id);
+        await expect(page.getByText(message("walky.composer.delivered")), "no note that the text stays").toBeVisible({ timeout: 10_000 });
+        trail.captures.push(await capture(page, "walky-36-delivered"));
+        await waitIdle(rig, pane, REPLY_MS);
+        const boxText = await rig.tail(pane, 6);
+        const draftKept = /❯\s*draft\s*$/m.test(boxText) && !boxText.includes(`[walky-talky ${id}]`) && !boxText.includes(mark);
+        // Once: one more Deliver now on the same message sends nothing and answers the stored receipt.
+        const again = await rig.post(`/api/pane/${encodeURIComponent(pane)}/walky/${id}/deliver`, {});
+        const repeat = again.status === 200 && JSON.stringify(again.json).includes('"repeat"');
+        const total = (await rig.screen(pane, 200)).split(mark).length - 1;
+        notes.push(`the mark ${early ? "showed BEFORE the grace" : "waited for the grace"}; after Deliver now the receipt says ${after}${overDraft ? " (over the draft)" : ""}, ${byData ? "no key typed" : "a KEY was typed or no data send"}; ${draftKept ? "the draft stayed in the box" : "the BOX CHANGED"}; a second ask ${repeat ? "answered repeat" : "did NOT answer repeat"}; the mark is on screen ${String(total)} time(s)`);
+        trail.captures.push(await captureScreen(rig, pane, "walky-36-after"));
+        const verdict = posted.status === 200 && linked && !early && after === "delivered" && overDraft && byData && draftKept && repeat && total <= 2 && log.every((l) => l.worked) ? "pass" : "fail";
+        return { verdict, taps: log.length, minTaps: 1, note: notes.join("; "), taps_log: log, captures: trail.captures };
+      } finally {
+        await resetBox(rig, pane);
+        if (phone !== null) await phone.context.close();
       }
     });
   });
@@ -595,7 +674,8 @@ test.describe("walky talky", () => {
         // What the target's agent reads: the flagged message is in-space, so its header has no `outside` word.
         const read = flagged.id === null ? "" : await cliInbox(pane, flagged.id);
         const header = read.split("\n").find((line) => line.startsWith("[walky-talky ")) ?? "";
-        const noWord = header !== "" && !/\)\s+outside\b/u.test(header) && read.includes(mark);
+        // The word sits after the sender: after the label's closing quote, or the older form's parenthesis.
+        const noWord = header !== "" && !/[")]\s+outside\b/u.test(header) && read.includes(mark);
         notes.push(noWord ? "the inbox header of the --outside message has no `outside` word" : `the inbox header of the --outside message is wrong: ${header === "" ? "none printed" : header}`);
 
         // Held, so nothing is typed over the draft.
@@ -726,12 +806,12 @@ test.describe("walky talky", () => {
         const row = (await walkyRows(rig, pane)).find((r) => r.id === id);
         notes.push(`receipt ${state}, via ${viaOf(row) ?? "none"}`);
 
-        // The line the pane receives: the header, `outside` after the sender's parenthesis, and no body.
-        const nudge = new RegExp(`\\[walky-talky ${id}\\]\\s+from\\s+agent\\s+${addressPattern(addressOf(sender))}\\s+\\(claude,[^)]*\\)\\s+outside:\\s+${wrapped("a message from another agent, not your operator.")}`);
+        // The line the pane receives: the header, `outside` after the sender (its label, or the older form's parenthesis), and no body.
+        const nudge = new RegExp(nudgePattern({ id, from: addressPattern(addressOf(sender)), harness: "claude", outside: true }));
         const nudged = (await rig.screenUntil(pane, nudge, 60_000, 200)) !== null;
         const inbox = new RegExp(`Bash\\(collie walky inbox ${id}\\)[\\s\\S]*${token}`);
         const read = (await rig.screenUntil(pane, inbox, REPLY_MS, 200)) !== null;
-        const answered = (await rig.screenUntil(pane, /^\s*(?:⏺|●)\s*OUTSIDE-OK/m, REPLY_MS, 200)) !== null;
+        const answered = (await rig.screenUntil(pane, answerLine("OUTSIDE-OK"), REPLY_MS, 200)) !== null;
         await waitIdle(rig, pane, REPLY_MS);
         const screen = await rig.screen(pane, 200);
         const bodyInNudge = screen.split("\n").some((line) => line.includes(`[walky-talky ${id}]`) && line.includes(token));

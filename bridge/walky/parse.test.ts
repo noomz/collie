@@ -86,6 +86,15 @@ describe("the lead's pane list for a member's `who` (M98 spec 04)", () => {
     expect(readWhoAnswer(wire({ targets: [{ ...row, walky: "yes" }] }))).toEqual([row]);
   });
 
+  test("carries a row's name, who set it and the agent's title; drops a field that is not one", () => {
+    const named = { ...row, name: "dialog pings", nameBy: "harness" as const, title: "Dialog ping sounds" };
+    expect(readWhoAnswer(wire({ targets: [named] }))).toEqual([named]);
+    expect(readWhoAnswer(wire({ targets: [{ ...row, name: 3, nameBy: "robot", title: "" }] }))).toEqual([row]);
+    expect(readWhoAnswer(wire({ targets: [{ ...row, name: "lead", nameBy: "robot" }] }))).toEqual([{ ...row, name: "lead" }]);
+    const long = "x".repeat(500);
+    expect(readWhoAnswer(wire({ targets: [{ ...row, title: long }] }))![0]!.title!.length).toBe(120);
+  });
+
   test("a body that is no list is null, never a throw", () => {
     for (const body of [{}, { targets: "x" }, [row], null, "x"]) expect(readWhoAnswer(wire(body))).toBeNull();
     expect(readWhoAnswer(undefined)).toBeNull();
@@ -158,6 +167,13 @@ describe("the space and the outside flag on the wire (M98 spec 02)", () => {
     expect(parseWalkyRequest(JSON.stringify({ ...base, outside: true }))).toMatchObject({ op: "send", outside: true });
     for (const outside of [false, "true", 1, null]) expect(parseWalkyRequest(JSON.stringify({ ...base, outside }))).toMatchObject({ outside: false });
     expect(parseWalkyRequest(JSON.stringify(base))).toMatchObject({ outside: false });
+  });
+
+  test("a send line carries the raw subject to the service, which cleans and checks it; a subject that is not text is unread (M98 spec 07)", () => {
+    expect(parseWalkyRequest(JSON.stringify({ ...base, subject: ' ci: "red" ' }))).toMatchObject({ op: "send", subject: ' ci: "red" ' });
+    expect(parseWalkyRequest(JSON.stringify(base))).toMatchObject({ subject: null });
+    expect(parseWalkyRequest(JSON.stringify({ ...base, subject: null }))).toMatchObject({ subject: null });
+    for (const subject of [7, true, ["a"], { a: 1 }]) expect(parseWalkyRequest(JSON.stringify({ ...base, subject }))).toBeNull();
   });
 
   test("a message keeps `outside: true` and no other value", () => {

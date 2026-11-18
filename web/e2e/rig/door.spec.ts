@@ -85,7 +85,7 @@ test.describe("pi's inbox", () => {
     }
   });
 
-  test("36 a desk draft, then a phone send through pi's inbox: taken, the draft stays, one turn", async ({ browser, rig }) => {
+  test("37 a desk draft, then a phone send through pi's inbox: taken, the draft stays, one turn", async ({ browser, rig }) => {
     await runScenario(H, "door-draft", session, async (pane, trail) => {
       const core = muxOf("lead") === "herdr-core";
       const { context, page, recorder } = await phoneOn(browser, rig, pane, PHONE);

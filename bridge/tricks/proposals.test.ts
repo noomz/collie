@@ -1,3 +1,4 @@
+import { HILL_ANSWER_RIGHT } from "../hill/parse.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,14 +7,15 @@ import { join } from "node:path";
 import { HOST } from "../host.ts";
 import { ensureOwnerOnlyDir, isOwnerOnly, privateRoot } from "../owner-only.ts";
 import { memoryHillReceipts } from "../hill/receipts.ts";
-import { HILL_GROUP_CHANGED, HILL_GROUP_OLD_APP, HILL_OFF, HillService, type HillPlace } from "../hill/service.ts";
+import { HILL_CODE_READ_FIRST, HILL_GROUP_CHANGED, HILL_GROUP_OLD_APP, HILL_OFF, HillService, type HillPlace } from "../hill/service.ts";
 import { HillStore } from "../hill/store.ts";
 import type { HillDecision, HillReceipt } from "../../web/src/lib/hill/wire.ts";
 import { ORIGIN_FILE } from "./origin.ts";
-import { TRICKS_DIR } from "./paths.ts";
+import { approvedCopyDir, approvedTrickDir, TRICKS_DIR, trickStateDir } from "./paths.ts";
 import { PROPOSAL_AUTHOR_WORDS } from "./proposal-card.ts";
 import {
   PROPOSAL_CHANGED,
+  PROPOSAL_NO_CHANGE,
   PROPOSAL_NOT_COMPARED,
   PROPOSAL_ORPHAN_MS,
   PROPOSAL_STORE_MOVED,
@@ -25,17 +27,18 @@ import {
   PROPOSED_BYTES_MAX,
   PROPOSED_DIR,
   PROPOSALS_FILE,
+  proposalTold,
   TrickProposals,
   type Proposer,
 } from "./proposals.ts";
 import { ProposeDoor } from "./propose-door.ts";
 import { GROUP_CODE_BYTES, GROUP_MASKED, GROUP_NOT_TEXT, GROUP_TOO_LARGE, helperCell, helperNote } from "./card-group.ts";
 import { HELPER_VERSION, TRICK_HELPER } from "./scan.ts";
-import { readProposal, wireFiles, type ProposalRead, type ProposedFile } from "./propose-wire.ts";
+import { PROPOSAL_SETTINGS_LEFT, PROPOSE_HAS_RULES, readProposal, wireFiles, type ProposalRead, type ProposedFile } from "./propose-wire.ts";
 import { PENDING_SETTLE_MS, TricksService } from "./service.ts";
-import { withSwitch, writeSwitches } from "./switches.ts";
+import { SWITCHES_VERSION, withEntry, withSwitch, writeSwitches } from "./switches.ts";
 import { VersionCards } from "./version-card.ts";
-import { powersOfDir } from "./approved.ts";
+import { approveFolder, powersOfDir } from "./approved.ts";
 import { trickCodeHash } from "./code-hash.ts";
 import type { VersionDiff } from "./version-diff.ts";
 import { singleCodeCard } from "../../web/src/lib/hill/code-card.ts";
@@ -92,7 +95,7 @@ interface Lead {
   live: Set<string>;
 }
 
-async function lead(opts: { hillOff?: boolean; diff?: (base: string | null, next: string) => Promise<VersionDiff> } = {}): Promise<Lead> {
+async function lead(opts: { self?: { memberId: string; machine: string }; hillOff?: boolean; diff?: (base: string | null, next: string) => Promise<VersionDiff>; forgetTrick?: (id: string) => void; platform?: NodeJS.Platform } = {}): Promise<Lead> {
   const root = await tempDir();
   const configDir = join(root, "config");
   const stateDir = join(root, "state");
@@ -128,6 +131,7 @@ async function lead(opts: { hillOff?: boolean; diff?: (base: string | null, next
   const diff = async (): Promise<{ files: []; counted: false }> => ({ files: [], counted: false });
   cards = new VersionCards({ hill, tricks: () => service, diff });
   service = new TricksService({
+    feature: { on: () => true },
     configDir,
     stateDir,
     memberId: "lodge",
@@ -138,10 +142,13 @@ async function lead(opts: { hillOff?: boolean; diff?: (base: string | null, next
     revBase: 1000,
     run: async () => ({ kind: "exited", code: 0, stdout: JSON.stringify({ v: 1, parts: [] }), stderr: "", ms: 1 }),
     versions: cards,
+    forgetTrick: opts.forgetTrick ?? (() => undefined),
   });
   // The real diff: a failed one refuses a new version's card (review 7 R9), so the rig no longer fakes one.
   const deps: ConstructorParameters<typeof TrickProposals>[0] = { configDir, stateDir, hill, tricks: () => service, now: () => clock.t, warn: () => undefined };
   if (opts.diff !== undefined) deps.diff = opts.diff;
+  if (opts.self !== undefined) deps.self = opts.self;
+  if (opts.platform !== undefined) deps.platform = opts.platform;
   proposals = new TrickProposals(deps);
   await proposals.start();
   return { root, configDir, stateDir, clock, hill, store, service, cards, proposals, sent, live };
@@ -195,12 +202,12 @@ describe("a proposal for a new trick", () => {
     }
     expect(await listed(l)).toEqual([]);
     // A fresh runner on the same folders (a bridge restart) does not see it either.
-    const again = new TricksService({ configDir: l.configDir, stateDir: l.stateDir, memberId: "lodge", world: () => ({ machine: "lodge", sessions: [], spaces: [] }), env: {}, warn: () => undefined, revBase: 1 });
+    const again = new TricksService({ feature: { on: () => true }, configDir: l.configDir, stateDir: l.stateDir, memberId: "lodge", world: () => ({ machine: "lodge", sessions: [], spaces: [] }), env: {}, warn: () => undefined, revBase: 1 });
     expect((await again.reply(undefined)).tricks).toEqual([]);
     const [card] = openCards(l);
     expect(card?.from).toMatchObject({ kind: "collie", label: "Collie", ref: { type: "proposal", id: "legs", hash: p.hash } });
     expect(card?.title).toBe("Switch on the trick legs?");
-    expect(card?.summary).toStartWith("An agent session (repo#one) on workshop proposes it. It has");
+    expect(card?.summary).toStartWith("A session on workshop proposes it. It has");
     expect(card?.options.map((o) => [o.intent, o.label])).toEqual([
       ["on", "Switch it on"],
       ["later", "Not now"],
@@ -235,6 +242,18 @@ describe("a proposal for a new trick", () => {
     expect(await readdir(join(l.configDir, TRICKS_DIR, PROPOSED_DIR, "legs")).catch(() => [])).toEqual([]);
     expect(l.sent.at(-1)).toMatchObject({ to: "workshop/%3#abcd" });
     expect(l.sent.at(-1)?.body).toContain("Option: on");
+    // Decision 9: the line after the option says what the yes did.
+    expect(l.sent.at(-1)?.body).toContain(`Option: on (Switch it on)\n${proposalTold("legs", "on", "new")}`);
+    expect(proposalTold("legs", "on", "new")).toBe("legs is installed and on.");
+  });
+
+  test("decision 9: Not now types that the person declined, the proposal is closed and nothing was installed", async () => {
+    const l = await lead();
+    await l.proposals.propose(proposal("legs"), AGENT);
+    const [card] = openCards(l);
+    expect(await tap(l, card!, "later")).toMatchObject({ code: "ok" });
+    expect(l.sent.at(-1)?.body).toEndWith("\nYour person declined. The proposal of legs is closed, and nothing was installed.");
+    expect(await listed(l)).toEqual([]);
   });
 
   test("a stored copy changed on disk after the card refuses the yes and keeps the card open (TOCTOU)", async () => {
@@ -246,6 +265,117 @@ describe("a proposal for a new trick", () => {
     expect(await tap(l, card!, "on")).toMatchObject({ code: "rejected", reason: PROPOSAL_CHANGED });
     expect(l.store.get(card!.id)?.state).toBe("open");
     expect(await listed(l)).toEqual([]);
+  });
+
+  test("a stored trick card with no code part refuses the yes: nothing installs or switches, the decline still goes (2026-11-17)", async () => {
+    const l = await lead();
+    const p = proposal("legs");
+    await l.proposals.propose(p, AGENT);
+    const [card] = openCards(l);
+    // The stored card loses its code part, as an older bridge or a hand edit of the store could leave it.
+    const { view: _code, ...bare } = card!;
+    expect(l.store.put(bare)).toBe(true);
+    expect(singleCodeCard(l.store.get(card!.id)!)).toBeNull();
+    // A yes with the old card's digest and card 1 opened, and a yes with nothing, are both refused.
+    expect(await tap(l, card!, "on")).toMatchObject({ code: "rejected", reason: HILL_CODE_READ_FIRST, state: "open" });
+    const plain = await l.hill.answer({ rid: nextRid(), node: `hill/${card!.id}`, intent: "on", value: { text: null } }, card!.id, "Pixel 9");
+    expect(plain.kind === "receipt" && plain.receipt).toMatchObject({ code: "rejected", reason: HILL_CODE_READ_FIRST, state: "open" });
+    expect(l.store.get(card!.id)?.state).toBe("open");
+    expect(await listed(l)).toEqual([]);
+    expect(await stat(join(l.configDir, TRICKS_DIR, "legs")).catch(() => null)).toBeNull();
+    // Not now still closes it.
+    expect(await tap(l, bare, "later")).toMatchObject({ code: "ok" });
+    expect(await listed(l)).toEqual([]);
+  });
+
+  test("decision 3: the yes starts from a fresh switch entry and a new state folder, whatever an old entry of that name held", async () => {
+    const l = await lead();
+    // A trick folder deleted by hand leaves its entry (auto on, an Undo target) and its state folder behind.
+    const stale = { at: "2026-11-01T00:00:00Z", hash: "a".repeat(64), auto: true, by: "cli", powers: null, previous: { hash: "b".repeat(64), at: "2026-10-01T00:00:00Z", by: "cli", powers: null } };
+    await writeSwitches(l.stateDir, withEntry(withSwitch({ on: new Map(), version: SWITCHES_VERSION }, "legs", true, stale.at), "legs", stale));
+    const oldState = join(l.stateDir, TRICKS_DIR, "legs");
+    await mkdir(oldState, { recursive: true });
+    await writeFile(join(oldState, "notes.json"), '{"from":"the old trick"}\n');
+    await l.proposals.propose(proposal("legs"), AGENT);
+    const [card] = openCards(l);
+    expect(await tap(l, card!, "on")).toMatchObject({ code: "ok" });
+    const entry = JSON.parse(await readFile(join(l.stateDir, TRICKS_DIR, "switches.json"), "utf8")).on.legs;
+    expect(entry).toMatchObject({ by: "proposal", auto: false });
+    expect(entry.previous).toBeUndefined();
+    expect(entry.hash).not.toBe(stale.hash);
+    expect(await readdir(oldState).catch(() => [])).not.toContain("notes.json");
+  });
+
+  test("decision 7: a trick that needs the settings it leaves behind says so on card 1; the flag changes no hash", async () => {
+    const l = await lead();
+    const files = wireFiles(proposal("legs").files);
+    const read = readProposal({ requestId: nextRid(), files, settings: true });
+    if (!read.ok) throw new Error(read.refusal.error);
+    expect(read.proposal.settingsLeft).toBe(true);
+    const plain = readProposal({ requestId: nextRid(), files });
+    expect(plain.ok && plain.proposal.hash).toBe(read.proposal.hash);
+    await l.proposals.propose(read.proposal, AGENT);
+    const [card] = openCards(l);
+    expect(JSON.stringify(card!.view ?? card!.group?.parts[0]?.view)).toContain(PROPOSAL_SETTINGS_LEFT);
+    // Without the flag, no such line.
+    const m = await lead();
+    if (plain.ok) await m.proposals.propose(plain.proposal, AGENT);
+    expect(JSON.stringify(openCards(m))).not.toContain(PROPOSAL_SETTINGS_LEFT);
+  });
+
+  test("decision 4: bytes that do not hash to the card's hash are never written, for a new trick and a new version", async () => {
+    const l = await lead();
+    const p = proposal("legs");
+    const origin = { by: "agent" as const, host: "workshop", label: "repo#one", at: "2026-11-16T09:00:00Z" };
+    expect(await l.service.installProposed("legs", p.files, origin, "0".repeat(64))).toEqual({ ok: false, message: PROPOSAL_CHANGED });
+    expect(await readdir(join(l.configDir, TRICKS_DIR))).not.toContain("legs");
+    expect(await l.service.installProposedVersion("legs", p.files, origin, "c".repeat(64), "0".repeat(64))).toEqual({ ok: false, message: PROPOSAL_CHANGED });
+    // The card's own hash installs.
+    expect(await l.service.installProposed("legs", p.files, origin, p.hash)).toMatchObject({ ok: true });
+  });
+
+  test("review J note: a copy a removed trick left under .collie-approved is cleared when a new trick of that id is installed", async () => {
+    const l = await lead();
+    const p = proposal("legs");
+    const origin = { by: "agent" as const, host: "workshop", label: "repo#one", at: "2026-11-16T09:00:00Z" };
+    const first = await l.service.installProposed("legs", p.files, origin, p.hash);
+    if (!first.ok) throw new Error(first.message);
+    const copy = approvedCopyDir(l.configDir, "legs", first.codeHash);
+    await mkdir(join(copy, "inputs"), { recursive: true });
+    await writeFile(join(copy, "inputs", "stale.txt"), "left by the old trick");
+    // The folder is removed by hand and the entry goes: the old copy stays on disk.
+    await rm(join(l.configDir, TRICKS_DIR, "legs"), { recursive: true, force: true });
+    await writeSwitches(l.stateDir, { on: new Map(), version: SWITCHES_VERSION });
+    expect((await stat(join(copy, "inputs", "stale.txt"))).isFile()).toBe(true);
+    // The same code installed again: equal code hashes the same, and no old file may ride along.
+    const again = await l.service.installProposed("legs", p.files, origin, p.hash);
+    expect(again).toMatchObject({ ok: true, codeHash: first.codeHash });
+    expect(await stat(join(copy, "inputs", "stale.txt")).catch(() => null)).toBeNull();
+    expect((await readdir(approvedTrickDir(l.configDir, "legs")).catch(() => [])).filter((n) => !n.startsWith("."))).toEqual([first.codeHash.slice(0, 16)]);
+  });
+
+  test("review J, last read: the state folder, the views and the Hill keys of a removed trick are gone before a new trick of that id first runs", async () => {
+    const forgotten: string[] = [];
+    const l = await lead({ forgetTrick: (id) => void forgotten.push(id) });
+    const p = proposal("legs");
+    const origin = { by: "agent" as const, host: "workshop", label: "repo#one", at: "2026-11-16T09:00:00Z" };
+    const first = await l.service.installProposed("legs", p.files, origin, p.hash);
+    if (!first.ok) throw new Error(first.message);
+    // The old program saved a value and a file; the folder is removed by hand and the entry goes.
+    const state = trickStateDir(l.stateDir, "legs");
+    await mkdir(join(state, ".collie"), { recursive: true });
+    await writeFile(join(state, ".collie", "values.json"), '{"v":1,"values":{"rows":9}}\n');
+    await writeFile(join(state, "saved.json"), '{"old":true}\n');
+    await rm(join(l.configDir, TRICKS_DIR, "legs"), { recursive: true, force: true });
+    await writeSwitches(l.stateDir, { on: new Map(), version: SWITCHES_VERSION });
+    // The add's own call, and the service's scan that meets the new id (it forgets an arrival, too): both for "legs".
+    expect(forgotten.length).toBeGreaterThanOrEqual(1);
+    const before = forgotten.length;
+    expect(await l.service.installProposed("legs", p.files, origin, p.hash)).toMatchObject({ ok: true });
+    expect(await stat(join(state, ".collie", "values.json")).catch(() => null)).toBeNull();
+    expect(await stat(join(state, "saved.json")).catch(() => null)).toBeNull();
+    expect(forgotten.length).toBeGreaterThan(before);
+    expect(new Set(forgotten)).toEqual(new Set(["legs"]));
   });
 
   test("a folder of that name that appeared since the card is never written over", async () => {
@@ -294,10 +424,40 @@ describe("a proposal for a new trick", () => {
     expect(await stat(join(l.configDir, TRICKS_DIR, PROPOSED_DIR, "ghost")).catch(() => null)).toBeNull();
   });
 
-  test("the Hill switched off refuses with its own words, and nothing is stored", async () => {
+  // M96 spec 14: a proposal's card is Collie's own about a trick, an approval that needs no Hill.
+  test("spec 14: with the Hill off a proposal is taken, its card is served, the yes installs and the answer is typed", async () => {
     const l = await lead({ hillOff: true });
-    expect(await l.proposals.propose(proposal("legs"), AGENT)).toEqual({ ok: false, code: "hill_off", error: HILL_OFF });
-    expect(await readdir(join(l.configDir, TRICKS_DIR))).toEqual([]);
+    expect(l.hill.isOn()).toBe(false);
+    const p = proposal("legs");
+    expect(await l.proposals.propose(p, AGENT)).toMatchObject({ ok: true, kind: "proposal", id: "legs", hash: p.hash });
+    const [card] = openCards(l);
+    expect(card?.title).toBe("Switch on the trick legs?");
+    expect(l.hill.list().open.map((d) => d.id)).toEqual([card!.id]);
+    expect(await tap(l, card!, "on")).toMatchObject({ code: "ok", state: "answered", delivery: "typed" });
+    expect(await listed(l)).toEqual(["legs"]);
+    expect(l.sent.at(-1)).toMatchObject({ to: "workshop/%3#abcd" });
+    expect(l.sent.at(-1)?.body).toContain(`Option: on (Switch it on)\n${proposalTold("legs", "on", "new")}`);
+    // A new version of it, the Hill still off: its card, and its yes.
+    const v2 = proposal("legs", "console.log(2)\n");
+    expect(await l.proposals.propose(v2, AGENT)).toMatchObject({ ok: true, kind: "version", id: "legs" });
+    const [version] = openCards(l);
+    expect(version?.title).toBe("Use the new version of legs?");
+    expect(await tap(l, version!, "on")).toMatchObject({ code: "ok", state: "answered" });
+    expect(await readFile(join(l.configDir, TRICKS_DIR, "legs", "program.ts"), "utf8")).toBe("console.log(2)\n");
+    expect(l.sent.at(-1)?.body).toContain(proposalTold("legs", "on", "version"));
+  });
+
+  test("spec 14: with the Hill off every cap of a proposal still holds", async () => {
+    const l = await lead({ hillOff: true });
+    for (let i = 0; i < PROPOSALS_SENDER_OPEN_MAX; i += 1) expect((await l.proposals.propose(proposal(`t${String(i)}`), AGENT)).ok).toBe(true);
+    expect(await l.proposals.propose(proposal("more"), AGENT)).toMatchObject({ ok: false, code: "too_many_open" });
+    expect(await l.proposals.propose(proposal("legs"), OTHER)).toMatchObject({ ok: true });
+    expect(await l.proposals.propose(proposal("legs"), TERMINAL)).toMatchObject({ ok: false, code: "open_elsewhere" });
+    // Not now with the Hill off: declined, the copy goes, nothing is installed.
+    const [first] = openCards(l);
+    expect(await tap(l, first!, "later")).toMatchObject({ code: "ok" });
+    expect(await listed(l)).toEqual([]);
+    expect(HILL_OFF).toContain("Settings, Experiments");
   });
 });
 
@@ -337,8 +497,9 @@ describe("one open proposal per trick id", () => {
     // S2: the new card says it replaces an earlier one; the first did not.
     const [old, now] = proposalCards(l);
     expect(old?.summary).not.toContain("It replaces");
-    expect(now?.summary).toStartWith("An agent session (repo#one) on workshop proposes it. It replaces an earlier proposal from the same session.");
-    expect(now?.view?.[0]).toEqual({ kind: "para", text: "It replaces an earlier proposal from the same session." });
+    expect(now?.summary).toStartWith("A session on workshop proposes it. It replaces an earlier proposal from the same session.");
+    expect(now?.view?.[0]).toEqual({ kind: "para", text: "This trick runs as you on this machine. It can do there what you can do." });
+    expect(now?.view?.[1]).toEqual({ kind: "para", text: "It replaces an earlier proposal from the same session." });
     const again = await l.proposals.propose(proposal("legs", "2\n"), AGENT);
     expect(again).toMatchObject({ ok: true, decision: two.ok ? two.decision : "", replaced: null });
     expect(openCards(l)).toHaveLength(1);
@@ -552,6 +713,49 @@ describe("a trick id that exists", () => {
     }
   });
 
+  test("a new version with the same code as the one that runs makes no card at all (2026-11-17)", async () => {
+    const l = await lead();
+    await proposedOn(l, "legs");
+    const same = proposal("legs", "old\n");
+    expect(await l.proposals.propose(same, AGENT)).toEqual({ ok: false, code: "exists", error: PROPOSAL_NO_CHANGE });
+    expect(openCards(l)).toEqual([]);
+    expect(await stat(l.proposals.storeDir("legs", same.hash)).catch(() => null)).toBeNull();
+  });
+
+  // POSIX only: Windows keeps no file mode, so there a mode-only change is no change (the twin below runs that branch everywhere).
+  test.skipIf(process.platform === "win32")("a new version whose only change is a file mode shows that change as a line of code, and its yes needs the end seen (2026-11-17)", async () => {
+    const l = await lead();
+    await proposedOn(l, "legs");
+    const read = readProposal({ requestId: nextRid(), files: wireFiles([
+      { rel: "trick.toml", bytes: enc(manifest("legs")), executable: false },
+      { rel: "program.ts", bytes: enc("old\n"), executable: false },
+    ]) });
+    if (!read.ok) throw new Error(read.refusal.error);
+    expect(await l.proposals.propose(read.proposal, AGENT)).toMatchObject({ ok: true, kind: "version" });
+    const [card] = openCards(l);
+    expect(card?.view).toContainEqual({ kind: "diff", text: "program.ts: mode -x, it can no longer run as a program", attrs: { file: "program.ts" } });
+    const one = singleCodeCard(card!);
+    expect(one).not.toBeNull();
+    // A yes that does not name the card's code as seen is refused; with it, the yes lands.
+    const bare = await l.hill.answer({ rid: nextRid(), node: `hill/${card!.id}`, intent: "on", value: { text: null } }, card!.id, "Pixel 9");
+    expect(bare.kind === "receipt" ? bare.receipt.code : bare.kind).toBe("rejected");
+    expect(await tap(l, card!, "on")).toMatchObject({ code: "ok" });
+  });
+
+  test("on Windows a mode is never a change: a version whose only change is a file mode makes no card, as the same code (the platform seam)", async () => {
+    const l = await lead({ platform: "win32" });
+    await proposedOn(l, "legs");
+    const read = readProposal({ requestId: nextRid(), files: wireFiles([
+      { rel: "trick.toml", bytes: enc(manifest("legs")), executable: false },
+      { rel: "program.ts", bytes: enc("old\n"), executable: false },
+    ]) });
+    if (!read.ok) throw new Error(read.refusal.error);
+    expect(await l.proposals.propose(read.proposal, AGENT)).toEqual({ ok: false, code: "exists", error: PROPOSAL_NO_CHANGE });
+    // The same code with the bit it was proposed with: no change either.
+    expect(await l.proposals.propose(proposal("legs", "old\n"), AGENT)).toEqual({ ok: false, code: "exists", error: PROPOSAL_NO_CHANGE });
+    expect(openCards(l)).toEqual([]);
+  });
+
   test("a stored copy that changes while its card is made is not posted (review 7 R9)", async () => {
     let swap: string | null = null;
     const l = await lead({
@@ -581,7 +785,7 @@ describe("a trick id that exists", () => {
     expect(await snapshot(l)).toEqual(before);
     const [card] = openCards(l);
     expect(card?.title).toBe("Use the new version of legs?");
-    expect(card?.summary).toStartWith("An agent session (repo#one) on workshop proposes it.");
+    expect(card?.summary).toStartWith("A session on workshop proposes it.");
     expect(card?.recommends).toBeNull();
     expect(card?.options.map((o) => [o.intent, o.label])).toEqual([
       ["on", "Use the new version"],
@@ -716,7 +920,7 @@ describe("the card belongs to Collie and to the person", () => {
     await l.proposals.propose(proposal("legs"), AGENT);
     const [card] = openCards(l);
     expect(await tap(l, card!, "on")).toMatchObject({ code: "ok" });
-    expect(l.sent).toEqual([{ to: "workshop/%3#abcd", body: `Answer to ${card!.id} "Switch on the trick legs?"\nOption: on (Switch it on)` }]);
+    expect(l.sent).toEqual([{ to: "workshop/%3#abcd", body: `Answer to ${card!.id} "Switch on the trick legs?"\nOption: on (Switch it on)\nlegs is installed and on.` }]);
   });
 
   test("a dismiss types nothing into the proposer's session", async () => {
@@ -731,7 +935,7 @@ describe("the card belongs to Collie and to the person", () => {
     const l = await lead();
     await l.proposals.propose(proposal("legs"), { ...AGENT, label: "ｃｏｌｌｉｅ" });
     const [card] = openCards(l);
-    expect(card?.summary).toStartWith("An agent session on workshop proposes it.");
+    expect(card?.summary).toStartWith("A session on workshop proposes it.");
   });
 
   test("a terminal's proposal names no session", async () => {
@@ -828,6 +1032,15 @@ describe("nothing outside the store moves before the yes (review S5)", () => {
     expect(local).toBe(0);
     expect(await wholeTree(l, () => false)).toEqual(before);
   });
+
+  test("spec 14: a member's proposal reaches a lead whose Hill is off, and its card goes up there", async () => {
+    const l = await lead({ hillOff: true });
+    const door = new ProposeDoor({ mode: () => "lead", proposals: () => l.proposals, memberId: "lodge", machine: "lodge", place: () => null });
+    const res = await door.fromMember({ requestId: nextRid(), files: wireFiles(proposal("legs").files), from: { address: "laptop/%1#abcd" } }, "laptop");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, kind: "proposal", id: "legs" });
+    expect(openCards(l).map((d) => d.title)).toEqual(["Switch on the trick legs?"]);
+  });
 });
 
 // A GROUP OF CARDS (crew slice 8): a trick whose code does not fit one card shows on 2 to 8 cards, and the
@@ -851,9 +1064,9 @@ describe("a proposal whose code does not fit one card", () => {
     expect(card!.view).toBeUndefined();
     expect(group.parts.length).toBeGreaterThanOrEqual(3);
     expect(group.decline).toBe("later");
-    expect(card!.summary).toBe(`An agent session (repo#one) on workshop proposes it. It has 2 files. It asks for the belt. It shows on ${String(group.parts.length)} cards.`);
+    expect(card!.summary).toBe(`A session on workshop proposes it. It has 2 files. It asks for the belt. It shows on ${String(group.parts.length)} cards.`);
     const first = JSON.stringify(group.parts[0]!.view);
-    expect(first).toContain("An agent session (repo#one) on workshop proposes it.");
+    expect(first).toContain("A session on workshop proposes it.");
     expect(first).toContain(`2 files, on cards 2 to ${String(group.parts.length)}.`);
     expect(group.parts[0]!.view.some((node) => node.kind === "diff")).toBe(false);
     // Every line of the program is on cards 2 to n, in order.
@@ -890,8 +1103,8 @@ describe("a proposal whose code does not fit one card", () => {
     const parts = card!.group!.parts;
     expect(parts.length).toBe(2);
     const first = JSON.stringify(parts[0]!.view);
-    expect(first).toContain(helperNote(HELPER_VERSION));
-    expect(first).toContain(helperCell(HELPER_VERSION));
+    expect(first).toContain(helperNote({ what: "helper", version: HELPER_VERSION }));
+    expect(first).toContain(helperCell({ what: "helper", version: HELPER_VERSION }));
     expect(first).toContain("2 files, on card 2.");
     expect(JSON.stringify(parts[1]!.view)).not.toContain("trick.ts");
     const changed: ProposedFile = { rel: "trick.ts", bytes: enc(`${TRICK_HELPER}// mine\n`), executable: false };
@@ -916,5 +1129,201 @@ describe("a trick that gives agents instructions (contract 2)", () => {
       expect(answer).toEqual({ ok: false, code: "has_rules", error: "A trick that gives agents instructions cannot be proposed by an agent. Ask your person to add it on the machine." });
     }
     expect(openCards(l)).toEqual([]);
+  });
+});
+
+// A13 (counsel on Edge build 5): a proposed VERSION of an installed trick is held to the same rule as a new trick. An agent
+// cannot give agents instructions, by adding rules or by changing them, and a version that TAKES them away shows the
+// change on its card, so a yes never removes an agent's instructions unseen.
+describe("a proposed version and the rules of an agent view (contract 2)", () => {
+  const RULES_OLD = "Draw one screen.\nKeep it short.\n";
+  const RULES_MANIFEST = manifest("morph", 'rules = "rules.md"\n').replace('places = ["belt"]', 'places = ["belt", "agent-view"]').replace("contract = 1", "contract = 2");
+  const LABEL = "The agent instructions, every line:";
+
+  async function settle(l: Lead): Promise<void> {
+    l.clock.t += 1000;
+    await l.service.refresh(true);
+    l.clock.t += PENDING_SETTLE_MS;
+    await l.service.refresh(true);
+    await l.cards.settled();
+  }
+
+  /** A trick a proposal made and the person switched on: the approved copy has NO rules. */
+  async function proposedOn(l: Lead, id: string): Promise<string> {
+    await l.proposals.propose(proposal(id, "old\n"), TERMINAL);
+    const card = openCards(l).find((d) => d.from.kind === "collie" && d.from.ref?.id === id);
+    expect(await tap(l, card!, "on")).toMatchObject({ code: "ok" });
+    return join(l.configDir, TRICKS_DIR, id);
+  }
+
+  /** The same trick after an agent with a shell wrote rules into its folder and the person said yes to that version: the approved copy HAS rules. */
+  async function withRules(l: Lead, id: string): Promise<void> {
+    const dir = await proposedOn(l, id);
+    await writeFile(join(dir, "trick.toml"), RULES_MANIFEST);
+    await writeFile(join(dir, "rules.md"), RULES_OLD);
+    // The person's yes to that version, as the switch writes it: the folder as it is now is copied and approved.
+    const approved = await approveFolder({ stateDir: l.stateDir, configDir: l.configDir, id, by: "phone", at: "2026-11-17T09:00:00Z" });
+    expect(approved.ok).toBe(true);
+    await l.service.refresh(true);
+    await settle(l);
+    expect((await l.service.reply(undefined)).tricks.find((t) => t.id === id)?.on).toBe(true);
+  }
+
+  /** The proposal as a caller that skipped the wire would send it: the manifest names rules, so it is an agent view. */
+  const withRulesNamed = (read: ProposalRead): ProposalRead => ({ ...read, manifest: { ...read.manifest, agentView: true as const, rules: "rules.md" } });
+
+  test("the wire refuses a version that names rules, with the code and the sentence of a new trick", () => {
+    const files: ProposedFile[] = [
+      { rel: "trick.toml", bytes: enc(RULES_MANIFEST), executable: false },
+      { rel: "program.ts", bytes: enc("new\n"), executable: true },
+      { rel: "rules.md", bytes: enc(RULES_OLD), executable: false },
+    ];
+    const read = readProposal({ requestId: nextRid(), files: wireFiles(files) });
+    expect(read).toEqual({ ok: false, refusal: { code: "has_rules", error: PROPOSE_HAS_RULES } });
+  });
+
+  test("a version that ADDS rules is refused like a new trick's: same code, same sentence, no card", async () => {
+    const l = await lead();
+    await proposedOn(l, "morph");
+    const answer = await l.proposals.propose(withRulesNamed(proposal("morph", "new\n")), AGENT);
+    expect(answer).toEqual({ ok: false, code: "has_rules", error: PROPOSE_HAS_RULES });
+    expect(openCards(l)).toEqual([]);
+  });
+
+  test("a version that CHANGES rules is refused the same way", async () => {
+    const l = await lead();
+    await withRules(l, "morph");
+    const answer = await l.proposals.propose(withRulesNamed(proposal("morph", "new\n")), AGENT);
+    expect(answer).toEqual({ ok: false, code: "has_rules", error: PROPOSE_HAS_RULES });
+    expect(openCards(l)).toEqual([]);
+  });
+
+  test("a version that REMOVES rules shows the rules line and every line they held, and the card still waits for the yes", async () => {
+    const l = await lead();
+    await withRules(l, "morph");
+    const answer = await l.proposals.propose(proposal("morph", "new\n"), AGENT);
+    expect(answer).toMatchObject({ ok: true, kind: "version", id: "morph" });
+    const [card] = openCards(l);
+    expect(card?.title).toStartWith("Use the new version of ");
+    expect(card?.options.map((o) => o.intent)).toEqual(["on", "later"]);
+    // The label and the whole removed text, as diff rows, on the card or on a card of its group.
+    const views = card?.group === undefined ? [card?.view ?? []] : card.group.parts.map((part) => part.view);
+    const text = JSON.stringify(views);
+    expect(text).toContain(LABEL);
+    expect(text).toContain("-Draw one screen.");
+    expect(text).toContain("-Keep it short.");
+  });
+
+  test("no rules on either side: the card carries no rules line", async () => {
+    const l = await lead();
+    await proposedOn(l, "plain");
+    expect(await l.proposals.propose(proposal("plain", "new\n"), AGENT)).toMatchObject({ ok: true, kind: "version" });
+    const [card] = openCards(l);
+    const views = card?.group === undefined ? [card?.view ?? []] : card.group.parts.map((part) => part.view);
+    expect(JSON.stringify(views)).not.toContain(LABEL);
+    expect(JSON.stringify(views)).not.toContain("agent instructions");
+  });
+});
+
+describe("package I: the card in the session that proposed it, switched on with one answer", () => {
+  test("propose in a session ties the card to that pane and says where it is: the session, and the Hill only while it is on", async () => {
+    const on = await lead();
+    const p = proposal("legs");
+    const answer = await on.proposals.propose(p, AGENT);
+    expect(answer).toMatchObject({ ok: true, where: { session: true, hill: true } });
+    expect(openCards(on)[0]?.replyTo).toBe("workshop/%3#abcd");
+    // The same files again (a retry) say the same place.
+    expect(await on.proposals.propose(proposal("legs", "console.log(1)\n", { rid: p.requestId }), AGENT)).toMatchObject({ ok: true, where: { session: true, hill: true } });
+    const off = await lead({ hillOff: true });
+    expect(await off.proposals.propose(proposal("legs"), AGENT)).toMatchObject({ ok: true, where: { session: true, hill: false } });
+    // A terminal has no session: its card is in Settings, Tricks only.
+    const term = await lead({ hillOff: true });
+    expect(await term.proposals.propose(proposal("legs"), TERMINAL)).toMatchObject({ ok: true, where: { session: false, hill: false } });
+    expect(openCards(term)[0]?.replyTo).toBeNull();
+  });
+
+  test("the yes carries the hash the card showed: exactly those bytes go on; a stale hash is refused in one sentence and nothing is written", async () => {
+    const l = await lead({ hillOff: true });
+    const p = proposal("legs");
+    await l.proposals.propose(p, AGENT);
+    const [card] = openCards(l);
+    const request = { rid: nextRid(), node: `hill/${card!.id}`, intent: "on", value: { text: null } };
+    const stale = await l.hill.answer({ ...request, group: { digest: "0".repeat(64), opened: [1] } }, card!.id, "Pixel 9");
+    expect(stale.kind === "receipt" && stale.receipt).toMatchObject({ code: "rejected", reason: HILL_GROUP_CHANGED, state: "open" });
+    expect(HILL_GROUP_CHANGED.split(". ").length).toBeLessThanOrEqual(2);
+    expect(await listed(l)).toEqual([]);
+    const yes = await l.hill.answer({ ...request, rid: nextRid(), group: { digest: p.hash, opened: [1] } }, card!.id, "Pixel 9");
+    expect(yes.kind === "receipt" && yes.receipt).toMatchObject({ code: "ok", state: "answered" });
+    expect((await l.service.reply(undefined)).tricks.find((t) => t.id === "legs")).toMatchObject({ on: true });
+  });
+
+  test("the same request id twice switches on once and answers the same receipt", async () => {
+    const l = await lead();
+    const p = proposal("legs");
+    await l.proposals.propose(p, AGENT);
+    const [card] = openCards(l);
+    const request = { rid: nextRid(), node: `hill/${card!.id}`, intent: "on", value: { text: null }, group: { digest: p.hash, opened: [1] } };
+    const first = await l.hill.answer(request, card!.id, "Pixel 9");
+    const sentAfterFirst = l.sent.length;
+    const second = await l.hill.answer(request, card!.id, "Pixel 9");
+    expect(first.kind === "receipt" && first.receipt.code).toBe("ok");
+    expect(second.kind === "receipt" ? second.receipt : null).toEqual(first.kind === "receipt" ? first.receipt : null);
+    // Typed once, installed once.
+    expect(l.sent.length).toBe(sentAfterFirst);
+    expect(await listed(l)).toEqual(["legs"]);
+  });
+
+  test("no agent door reaches the yes: the answer route needs the write right, the walky socket has no answer op, the local API only reads", async () => {
+    const server = await readFile(join(import.meta.dir, "..", "server.ts"), "utf8");
+    const route = server.slice(server.indexOf('if (pathname === "/api/hill/answer" && req.method === "POST")'));
+    expect(route.slice(0, 200)).toContain("browserGate(HILL_ANSWER_RIGHT)");
+    expect(HILL_ANSWER_RIGHT).toBe("write");
+    const socket = await readFile(join(import.meta.dir, "..", "walky", "socket.ts"), "utf8");
+    expect(socket).not.toContain('"hill.answer"');
+    expect(socket).not.toContain('"trick.on"');
+    const { DECLARED } = await import("../api/operations.ts");
+    // Every operation only reads: `see` or `read`, never `send` or `control` (M105 spec 04's ordered rights).
+    for (const op of Object.values(DECLARED)) {
+      expect(op.kind).toBe("read");
+      expect(["see", "read"]).toContain(op.right);
+    }
+  });
+});
+
+describe("where a proposal will run", () => {
+  const SELF = { memberId: "lodge", machine: "lodge" };
+
+  test("from another machine of the crew: the card says it will run on this one, under the proposer", async () => {
+    const l = await lead({ self: SELF });
+    expect(await l.proposals.propose(proposal("legs"), AGENT)).toMatchObject({ ok: true });
+    expect(openCards(l)[0]?.summary).toStartWith("A session on workshop proposes it. It will run on lodge. ");
+  });
+
+  test("a terminal on a crew member says it too", async () => {
+    const l = await lead({ self: SELF });
+    expect(await l.proposals.propose(proposal("legs"), { ...TERMINAL, memberId: "workshop", host: "workshop" })).toMatchObject({ ok: true });
+    expect(openCards(l)[0]?.summary).toStartWith("Someone on workshop proposes it. Collie could not confirm which session. It will run on lodge. ");
+  });
+
+  test("from this machine: no such line", async () => {
+    const l = await lead({ self: SELF });
+    expect(await l.proposals.propose(proposal("legs"), TERMINAL)).toMatchObject({ ok: true });
+    expect(openCards(l)[0]?.summary).not.toContain("It will run on");
+  });
+
+  test("a lead that does not know itself says nothing", async () => {
+    const l = await lead();
+    expect(await l.proposals.propose(proposal("legs"), AGENT)).toMatchObject({ ok: true });
+    expect(openCards(l)[0]?.summary).not.toContain("It will run on");
+  });
+});
+
+describe("a file mode where the platform keeps none (Windows)", () => {
+  test("a new trick's card says a file can run as a program only where the platform keeps the bit", async () => {
+    for (const [platform, line] of [["linux", true], ["win32", false]] as const) {
+      const l = await lead({ platform });
+      expect(await l.proposals.propose(proposal("legs"), AGENT)).toMatchObject({ ok: true, kind: "proposal" });
+      expect(JSON.stringify(openCards(l)[0]?.view).includes("program.ts: mode +x, it can run as a program"), platform).toBe(line);
+    }
   });
 });

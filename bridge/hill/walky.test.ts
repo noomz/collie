@@ -13,9 +13,13 @@ import type { WalkyReceipt } from "../walky/types.ts";
 import { HillStore } from "./store.ts";
 import { memoryHillReceipts } from "./receipts.ts";
 import { HillService } from "./service.ts";
-import { hillSessionName, OneLook, deliveryOf, walkyPlace, walkySend, type WalkySendOptions } from "./walky.ts";
+import { hillCensus, hillLeftTheCrew, hillRosterIds, hillSessionName, OneLook, deliveryOf, walkyPlace, walkySend, type HillCensusMember, type WalkySendOptions } from "./walky.ts";
 
 import { spaceOf } from "../walky/space.ts";
+import { enrollPeer, isEnrollRefusal, removeMember } from "../crew/enrollment.ts";
+import { counterRandom, fp, leadStore, material, member, peerStore, T0 } from "../crew/fixtures.ts";
+import { adoptLeadership } from "../crew/takeover.ts";
+import type { TrustStoreData } from "../crew/trust-store.ts";
 
 /** One unnamed space on one machine: every fixture pane shares it, and no rule reads it yet. */
 const SOLO_SPACE = spaceOf({ memberId: "local", spaceId: "w1", spaceLabel: "w1" });
@@ -81,7 +85,7 @@ describe("the send: one operator walky message", () => {
     const typed: string[] = [];
     const send = walkySend(walky(() => ({ outcome: "sent" }), typed), { mintId: () => "wt_aaaaaaaaaaa1", sleep: async () => undefined });
     expect(await send("local/%1#aaaa", 'Answer to dc_k3m9x2p7q1ab "Ship?"\nOption: yes (Yes)', "Pixel 9")).toBe("typed");
-    expect(typed).toEqual(['[walky-talky wt_aaaaaaaaaaa1] from operator (Pixel 9)\nAnswer to dc_k3m9x2p7q1ab "Ship?"\nOption: yes (Yes)']);
+    expect(typed).toEqual(['[walky-talky wt_aaaaaaaaaaa1] from operator "Pixel 9"\nAnswer to dc_k3m9x2p7q1ab "Ship?"\nOption: yes (Yes)']);
   });
 
   test("a session that ended (the token moved) is refused by walky and reports refused: nothing was typed", async () => {
@@ -113,7 +117,9 @@ describe("the send: one operator walky message", () => {
     expect(deliveryOf({ ...base, state: "delivered" })).toBe("typed");
     expect(deliveryOf({ ...base, reason: "turn running" })).toBe("held");
     expect(deliveryOf(base)).toBe("unknown");
-    expect(deliveryOf({ ...base, state: "inbox-only", reason: "dialog" })).toBe("unknown");
+    expect(deliveryOf({ ...base, state: "inbox-only", reason: "dialog" })).toBe("inbox-only");
+    expect(deliveryOf({ ...base, state: "inbox-only", reason: "typed, not submitted" })).toBe("inbox-only");
+    expect(deliveryOf({ ...base, state: "unknown", reason: "no evidence" })).toBe("unknown");
     // C-S1: walky typed nothing, so the Hill opens the Decision again instead of closing it answered.
     expect(deliveryOf({ ...base, state: "refused", reason: "off" })).toBe("refused");
     expect(deliveryOf(undefined)).toBe("unknown");
@@ -224,5 +230,144 @@ describe("agent view heads at the walky doors", () => {
       expect(typed[0]).toContain("(morph x] go");
       expect(typed[0]!.split("\n").slice(1).some((line) => hasViewHead(line))).toBe(false);
     }
+  });
+});
+
+describe("the census the Hill's sweep trusts (M96 spec 10)", () => {
+  const census = (local: { reachable: boolean }[], members: HillCensusMember[] = [], memberId: string | null = "lead") => hillCensus({ memberId, local: () => local, members: () => members });
+
+  test("this machine: known only while it drives a session and every last read answered", () => {
+    expect(census([{ reachable: true }])("local/%1#aaaa")).toBe(true);
+    expect(census([{ reachable: true }])("lead/%1#aaaa")).toBe(true);
+    expect(census([{ reachable: true }, { reachable: false }])("local/%1#aaaa")).toBe(false);
+    // Right after boot every engine reads `disconnected`; a bridge with no session knows nothing.
+    expect(census([{ reachable: false }])("local/%1")).toBe(false);
+    expect(census([])("local/%1")).toBe(false);
+  });
+
+  test("a crew member: known only when the sweep reached it and its own reads answered", () => {
+    const good: HillCensusMember = { memberId: "far", reachable: true, sessions: [{ reachable: true }] };
+    expect(census([], [good])("far/%7#cccc")).toBe(true);
+    expect(census([], [{ ...good, reachable: false }])("far/%7")).toBe(false);
+    expect(census([], [{ ...good, sessions: null }])("far/%7")).toBe(false);
+    expect(census([], [{ ...good, sessions: [] }])("far/%7")).toBe(false);
+    expect(census([], [{ ...good, sessions: [{ reachable: true }, { reachable: false }] }])("far/%7")).toBe(false);
+    // A machine the lead holds no row for, and an address that is not a pane's, are unknown.
+    expect(census([{ reachable: true }], [good])("other/%7")).toBe(false);
+    expect(census([{ reachable: true }], [good])("not an address")).toBe(false);
+  });
+});
+
+describe("a member that left the crew (M96 spec 10)", () => {
+  const left = (roster: readonly string[] | null) => hillLeftTheCrew({ memberId: "lead", ownIds: ["lead", "oldsolo"], roster: () => roster });
+
+  test("a machine the roster read with success no longer lists is removed", () => {
+    expect(left(["lead", "near"])("far/%7#cccc")).toBe(true);
+    expect(left(["lead", "far"])("far/%7#cccc")).toBe(false);
+  });
+
+  test("this machine, under any of its names, is never removed, and an unknown roster removes nothing", () => {
+    expect(left([])("local/%1")).toBe(false);
+    expect(left([])("lead/%1")).toBe(false);
+    expect(left([])("oldsolo/%1")).toBe(false);
+    expect(left(null)("far/%7")).toBe(false);
+    expect(left([])("not an address")).toBe(false);
+  });
+});
+
+describe("a rename is not a removal (M96 spec 10)", () => {
+  const crew = (): TrustStoreData => leadStore({ peers: [member({ memberId: "laptop" }), member({ memberId: "nas" })] });
+  const rejoin = (data: TrustStoreData): TrustStoreData => {
+    const change = enrollPeer(data, { fingerprint: fp("laptop"), certPem: material("laptop").certPem, address: "laptop.lan:8787", label: "laptop-two" }, T0 + 1, counterRandom("r"));
+    if (change === null || isEnrollRefusal(change)) throw new Error("fixture: expected an enrollment");
+    return change.next;
+  };
+
+  test("the roster keeps a member's id through `crew rename`, a re-join under the same key, and a takeover", () => {
+    const left = (data: TrustStoreData) => hillLeftTheCrew({ memberId: data.self.memberId, ownIds: [data.self.memberId], roster: () => hillRosterIds(data) });
+    // `crew rename` moves the crew's display name only.
+    const renamed: TrustStoreData = { ...crew(), crew: { ...crew().crew!, name: "the shed" } };
+    expect(left(renamed)("laptop/%3#cccc")).toBe(false);
+    // A re-join under the same pinned certificate, with another label, keeps its member id.
+    expect(hillRosterIds(rejoin(crew()))).toEqual(["desk", "nas", "laptop"]);
+    expect(left(rejoin(crew()))("laptop/%3#cccc")).toBe(false);
+    // A takeover: the deputy's new roster carries the old lead as a member, and every other member.
+    const took = adoptLeadership(peerStore(), {
+      roster: [{ memberId: "nas", fingerprint: fp("nas"), certPem: material("nas").certPem, address: "nas.lan:8787" }],
+      confirmed: new Set(),
+      now: T0 + 1,
+    });
+    if (took === null) throw new Error("fixture: expected a takeover");
+    expect(left(took.next)("desk/%1#aaaa")).toBe(false);
+    expect(left(took.next)("nas/%2#bbbb")).toBe(false);
+    // Only a deleted row removes: `crew remove`.
+    const removed = removeMember(crew(), "laptop");
+    if (removed === null) throw new Error("fixture: expected a removal");
+    expect(left(removed.next)("laptop/%3#cccc")).toBe(true);
+    expect(left(removed.next)("nas/%2#bbbb")).toBe(false);
+  });
+
+  test("a null or unreadable trust store removes nobody and closes no card", () => {
+    expect(hillRosterIds(null)).toBeNull();
+    let n = 0;
+    const hill = new HillService({
+      store: new HillStore(null, () => 1000),
+      receipts: memoryHillReceipts(),
+      place: (address) => ({ address, label: "repo", host: "laptop", unattended: false }),
+      send: async () => "typed",
+      crewMode: () => "lead",
+      walkyOn: () => true,
+      memberId: "desk",
+      machine: "desk",
+      now: () => 1000,
+      mintId: () => `dc_null${String((n += 1)).padStart(8, "0")}`,
+      removed: hillLeftTheCrew({ memberId: "desk", ownIds: ["desk"], roster: () => hillRosterIds(null) }),
+    });
+    const sender = { kind: "agent", address: "laptop/%3#cccc", memberId: "laptop", harness: "agent-x", label: "repo", host: "laptop" } as const;
+    const posted = hill.post(sender, { requestId: "00000000-0000-4000-8000-000000000001", title: "Ship it?", summary: "Green." });
+    if (!posted.ok) throw new Error(posted.error);
+    for (const at of [2000, 3000, 4000]) hill.sweep(at);
+    expect(hill.list().open.map((d) => d.id)).toEqual([posted.decision.id]);
+  });
+
+  test("a card for a member that re-joined stays open and answerable; after `crew remove` it closes", async () => {
+    let data = crew();
+    const typed: string[] = [];
+    let n = 0;
+    const hill = new HillService({
+      store: new HillStore(null, () => 1000),
+      receipts: memoryHillReceipts(),
+      place: (address) => ({ address, label: "repo", host: "laptop", unattended: false }),
+      send: async (to) => {
+        typed.push(to);
+        return "typed";
+      },
+      crewMode: () => "lead",
+      walkyOn: () => true,
+      memberId: "desk",
+      machine: "desk",
+      now: () => 1000,
+      mintId: () => `dc_crew${String((n += 1)).padStart(8, "0")}`,
+      removed: hillLeftTheCrew({ memberId: "desk", ownIds: ["desk"], roster: () => hillRosterIds(data) }),
+    });
+    const sender = { kind: "agent", address: "laptop/%3#cccc", memberId: "laptop", harness: "agent-x", label: "repo", host: "laptop" } as const;
+    const ask = (i: number) => {
+      const posted = hill.post(sender, { requestId: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`, title: "Ship it?", summary: "Green.", options: [{ intent: "yes", label: "Yes" }], recommends: null });
+      if (!posted.ok) throw new Error(posted.error);
+      return posted.decision.id;
+    };
+    const first = ask(1);
+    const second = ask(2);
+    data = { ...rejoin(data), crew: { ...data.crew!, name: "the shed" } };
+    hill.sweep(2000);
+    hill.sweep(3000);
+    expect(hill.list().open.map((d) => d.id)).toEqual([first, second]);
+    const outcome = await hill.answer({ rid: "00000000-0000-4000-8000-000000000101", node: `hill/${first}`, intent: "yes", value: { text: null } }, first, "Pixel 9");
+    if (outcome.kind !== "receipt") throw new Error(outcome.kind);
+    expect(outcome.receipt.state).toBe("answered");
+    expect(typed).toEqual(["laptop/%3#cccc"]);
+    data = removeMember(data, "laptop")!.next;
+    hill.sweep(4000);
+    expect(hill.list().closed.find((d) => d.id === second)).toMatchObject({ state: "undeliverable", closedReason: "its machine left the crew" });
   });
 });

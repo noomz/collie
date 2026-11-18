@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { writeTricksFeature } from "../bridge/tricks/feature-switch.ts";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -9,22 +10,22 @@ import { trickCodeHash } from "../bridge/tricks/code-hash.ts";
 import { OFFICIAL_REPOS, shippedOfficialList } from "../bridge/tricks/official.ts";
 import { ORIGIN_FILE, renderOrigin } from "../bridge/tricks/origin.ts";
 import { approvedCopyDir, switchesPath } from "../bridge/tricks/paths.ts";
+import { approveFolder } from "../bridge/tricks/approved.ts";
 import { HILL_WRITING } from "./hill-rules.ts";
 import { cmdTrickAdd, OFFICIAL_TRICKS_REPO } from "./trick-add.ts";
 import { EXIT, type Io } from "./io.ts";
 import { tricksFindings } from "./trick-findings.ts";
 import { GROUP_CAPACITY_WORDS, GROUP_TOO_LARGE } from "../bridge/tricks/card-group.ts";
-import { TAP_SHOWS_NOTHING, agentPaneRefusal, checkStatic, runAgainstFixture, cmdTrick, cmdTrickAuto, cmdTrickCheck, cmdTrickHelper, cmdTrickInit, sampleProgram, cmdTrickList, cmdTrickSkill, cmdTrickSwitch, sampleAgents, SKILL_BYTES_MAX, TRICK_WRITE_BRIEF, TRICK_SUBCOMMANDS, type TrickCheckReport, type TrickDeps } from "./trick.ts";
+import { TAP_SHOWS_NOTHING, agentPaneRefusal, checkStatic, runAgainstFixture, cmdTrick, cmdTrickAuto, cmdTrickCheck, cmdTrickHelper, cmdTrickInit, sampleProgram, cmdTrickList, cmdTrickSkill, cmdTrickSwitch, SWITCHED_ON_NOT_WHOLE, sampleAgents, SKILL_BYTES_MAX, TRICK_WRITE_BRIEF, TRICK_SUBCOMMANDS, type TrickCheckReport, type TrickDeps } from "./trick.ts";
 import { checkWarnings, HELPER_VERSION, helperVersion, isBareImport, isScannedFile, looksBinary, runsLines, shippedHelperVersion, TRICK_HELPER } from "../bridge/tricks/scan.ts";
 import { realFiles } from "./sys.ts";
+import type { JsonObject } from "../bridge/json.ts";
+import { localTricksView } from "../bridge/local-key.ts";
 import { leadStore, member } from "../bridge/crew/fixtures.ts";
 import { serializeTrustStore, trustStorePath } from "../bridge/crew/trust-store.ts";
 import { inputsSentence, parseTrickDocument, TRICK_CONTRACT, TRICK_CONTRACT_DEFAULT, type TricksReply } from "../web/src/lib/tricks/schema.ts";
-import { TRICKS_WINDOWS_LINE } from "../web/src/lib/tricks/schema.ts";
-
-// gated on Windows (b): a program that uses the helper (`./trick.ts`) prints nothing on Windows yet, so
-// Collie gates tricks there (bridge/tricks/service.ts `gated`). Each `helperTest` runs such a program.
-const helperTest = test.skipIf(process.platform === "win32");
+import { STATUS_TEXT_MAX, TRICKS_OFF_LINE, TRICKS_WINDOWS_LINE, TRICKS_WINDOWS_SHELL_LINE } from "../web/src/lib/tricks/schema.ts";
+import { trickGuide } from "./trick-guide.ts";
 
 const dirs: string[] = [];
 async function tempDir(): Promise<string> {
@@ -54,7 +55,10 @@ function fail(): never {
   throw new Error("the manifest did not parse");
 }
 
-async function deps(answer: TricksReply | null = null): Promise<TrickDeps & Captured & { configDir: string; stateDir: string; asked: string[] }> {
+/** What the bridge answers the CLI: the phone's reply, plus the runner's PATH only the CLI gets. */
+type CliAnswer = TricksReply & { path?: string };
+
+async function deps(answer: CliAnswer | null = null): Promise<TrickDeps & Captured & { configDir: string; stateDir: string; asked: string[] }> {
   const root = await tempDir();
   const configDir = join(root, "config");
   const stateDir = join(root, "state");
@@ -81,6 +85,15 @@ async function deps(answer: TricksReply | null = null): Promise<TrickDeps & Capt
     },
     now: () => Date.parse("2026-11-08T09:00:00Z"),
   };
+}
+
+const DRAFT_PANE = { HERDR_PANE_ID: "w1:p2", HERDR_SOCKET_PATH: "/run/user/1000/herdr.sock" };
+
+/** Deps whose pane the bridge says runs an agent (or a shell), with `cwd` as the working folder. */
+async function inPaneDraft(kind: "agent" | "shell", cwd?: string) {
+  const d = await deps();
+  const work = cwd ?? (await tempDir());
+  return { d: { ...d, ctx: { ...d.ctx, env: { ...d.ctx.env, ...DRAFT_PANE } }, paneKind: async () => kind, cwd: work }, work };
 }
 
 describe("collie trick init", () => {
@@ -157,7 +170,7 @@ describe("collie trick init", () => {
     expect(sampleProgram("legs").trimEnd().split("\n").length).toBeLessThanOrEqual(30);
   });
 
-  helperTest("the folder init writes passes check --run with no refusal, in both forms", async () => {
+  test("the folder init writes passes check --run with no refusal, in both forms", async () => {
     const d = await deps();
     await cmdTrickInit(d, ["hello"]);
     const dir = join(d.configDir, "tricks", "hello");
@@ -171,12 +184,156 @@ describe("collie trick init", () => {
     expect(report.run?.problem).toBeNull();
     expect(report.run?.refusals).toEqual([]);
     expect(report.run?.parts).toEqual(["status status", "dashboard dashboard", "session main"]);
-    // The shell form runs `./program.sh` as a shell line, which is `cmd.exe` on Windows (bridge/tricks/run.ts).
-    const e = await deps();
-    await cmdTrickInit(e, ["--sh", "plain"]);
-    expect(await cmdTrickCheck(e, ["--run", join(e.configDir, "tricks", "plain")])).toBe(EXIT.OK);
-    expect(e.out.join("\n")).toContain("parts: belt belt");
-    expect(e.out.at(-1)).toBe("ok: no problems.");
+    // The shell form runs `./program.sh` as a shell line, on Linux and macOS only: on Windows init --sh
+    // refuses with the one sentence (fault d), and writes nothing.
+    const e = { ...(await deps()), platform: HOST.platform };
+    if (HOST.platform === "win32") {
+      expect(await cmdTrickInit(e, ["--sh", "plain"])).toBe(EXIT.FAIL);
+      expect(e.err[0]).toBe(`error: ${TRICKS_WINDOWS_SHELL_LINE}`);
+    } else {
+      await cmdTrickInit(e, ["--sh", "plain"]);
+      expect(await cmdTrickCheck(e, ["--run", join(e.configDir, "tricks", "plain")])).toBe(EXIT.OK);
+      expect(e.out.join("\n")).toContain("parts: belt belt");
+      expect(e.out.at(-1)).toBe("ok: no problems.");
+    }
+    // A draft made in an agent's pane checks and runs the same, with nothing registered for its id.
+    const { d: agent, work } = await inPaneDraft("agent");
+    expect(await cmdTrickInit(agent, ["solo"])).toBe(EXIT.OK);
+    const mark = agent.out.length;
+    expect(await cmdTrickCheck(agent, ["--run", "--json", join(work, "solo")])).toBe(EXIT.OK);
+    // SAFETY: `--json` prints exactly one TrickCheckReport, and the fields read below are checked by value.
+    const drafted = JSON.parse(agent.out.slice(mark).join("\n")) as TrickCheckReport;
+    expect(drafted.refusals).toEqual([]);
+    expect(drafted.problems).toEqual([]);
+    expect(drafted.run?.problem).toBeNull();
+    expect(drafted.run?.parts).toEqual(["status status", "dashboard dashboard", "session main"]);
+    expect(await Bun.file(switchesPath(agent.stateDir)).exists()).toBe(false);
+  });
+});
+
+describe("decision 8 (the first full trick run, 2026-11-16): nothing the bridge refuses", () => {
+  test("the starter run with no config.toml prints nothing the bridge refuses", async () => {
+    const d = await deps();
+    await cmdTrickInit(d, ["hello"]);
+    const dir = join(d.configDir, "tricks", "hello");
+    await rm(join(dir, "config.toml"));
+    const before = d.out.length;
+    expect(await cmdTrickCheck(d, ["--run", "--json", dir])).toBe(EXIT.OK);
+    // SAFETY: `--json` prints exactly one TrickCheckReport, and the fields read below are checked by value.
+    const report = JSON.parse(d.out.slice(before).join("\n")) as TrickCheckReport;
+    expect(report.run?.problem).toBeNull();
+    expect(report.run?.refusals).toEqual([]);
+  });
+
+  test("the guide names the status limit, so a no-config message fits it", () => {
+    expect(trickGuide().join("\n")).toContain(`A status text is ${String(STATUS_TEXT_MAX)} characters at most.`);
+  });
+
+  test("check --run reports a printed status over its limit, and fails", async () => {
+    const d = await deps();
+    await cmdTrickInit(d, ["hello"]);
+    const dir = join(d.configDir, "tricks", "hello");
+    await writeFile(join(dir, "program.ts"), 'import { run } from "./trick.ts";\nrun((t) => t.status({ text: "no folder set", icon: "plug", tone: "warn" }));\n');
+    expect(await cmdTrickCheck(d, ["--run", dir])).toBe(EXIT.FAIL);
+    expect(d.err.join("\n")).toContain('error: output /parts/0/chip/text "text" is 13 characters. At most 12.');
+  });
+});
+
+describe("collie trick init, a draft outside the tricks folder", () => {
+  const PANE = DRAFT_PANE;
+  const inPane = inPaneDraft;
+
+  test("in an agent's pane the scaffold goes to ./<id>, not the tricks folder, and the output names the next commands", async () => {
+    const { d, work } = await inPane("agent");
+    expect(await cmdTrickInit(d, ["legs"])).toBe(EXIT.OK);
+    const dir = join(work, "legs");
+    expect(await readFile(join(dir, "trick.toml"), "utf8")).toContain('run = "program.ts"');
+    expect(await readFile(join(dir, "trick.ts"), "utf8")).toBe(TRICK_HELPER);
+    expect(await readFile(join(dir, "AGENTS.md"), "utf8")).toBe(sampleAgents("legs", "ts", true));
+    expect(await Bun.file(join(d.configDir, "tricks", "legs", "trick.toml")).exists()).toBe(false);
+    expect(await Bun.file(join(d.configDir, "tricks")).exists()).toBe(false);
+    expect(d.out).toEqual([
+      "Made your draft ./legs with trick.toml, program.ts, trick.ts (the helper), config.toml and AGENTS.md. It is outside the tricks folder: nothing is added to this machine's tricks before the person's yes.",
+      "Try it: collie trick dev ./legs",
+      "Check it: collie trick check --run ./legs",
+      "Hand it to the person: collie trick propose ./legs",
+    ]);
+  });
+
+  test("the draft's AGENTS.md ends the loop with propose, not with a switch-on, in both forms", () => {
+    for (const form of ["ts", "sh"] as const) {
+      const draft = sampleAgents("legs", form, true);
+      expect(draft, form).toContain("`collie trick propose .`");
+      expect(draft, form).toContain("nothing is added to this machine's tricks before the person's yes");
+      expect(draft, form).not.toContain("Ask a person to switch the trick on");
+      expect(sampleAgents("legs", form), form).toContain("Ask a person to switch the trick on (`collie trick on legs`");
+    }
+    expect(sampleAgents("legs", "ts", true)).toContain("`collie trick helper .` rewrites it");
+  });
+
+  test("a shell pane and a bare terminal still write to the tricks folder, as before", async () => {
+    const { d, work } = await inPane("shell");
+    expect(await cmdTrickInit(d, ["legs"])).toBe(EXIT.OK);
+    expect(await Bun.file(join(d.configDir, "tricks", "legs", "trick.toml")).exists()).toBe(true);
+    expect(await Bun.file(join(work, "legs", "trick.toml")).exists()).toBe(false);
+    expect(d.out.at(-1)).toBe("Switch it on: collie trick on legs");
+    // A pane the bridge does not answer for, and a process with no pane markers, are not an agent's.
+    const { d: unknown } = await inPane("agent");
+    expect(await cmdTrickInit({ ...unknown, paneKind: async () => Promise.reject(new Error("socket gone")) }, ["other"])).toBe(EXIT.OK);
+    expect(await Bun.file(join(unknown.configDir, "tricks", "other", "trick.toml")).exists()).toBe(true);
+    const bare = await deps();
+    expect(await cmdTrickInit({ ...bare, paneKind: async () => "agent", cwd: work }, ["third"])).toBe(EXIT.OK);
+    expect(await Bun.file(join(bare.configDir, "tricks", "third", "trick.toml")).exists()).toBe(true);
+  });
+
+  test("--dir writes <folder>/<id> for any caller, shell form too, and a relative folder is read from the working folder", async () => {
+    const d = await deps();
+    const work = await tempDir();
+    const dd = { ...d, cwd: work };
+    expect(await cmdTrickInit(dd, ["--dir", "drafts", "--sh", "plain"])).toBe(EXIT.OK);
+    expect(await Bun.file(join(work, "drafts", "plain", "program.sh")).exists()).toBe(true);
+    expect(await Bun.file(join(d.configDir, "tricks", "plain", "trick.toml")).exists()).toBe(false);
+    expect(d.out.at(-1)).toBe(`Hand it to the person: collie trick propose ./${join("drafts", "plain")}`);
+    const elsewhere = await tempDir();
+    expect(await cmdTrickInit(dd, [`--dir=${elsewhere}`, "legs"])).toBe(EXIT.OK);
+    expect(await Bun.file(join(elsewhere, "legs", "trick.toml")).exists()).toBe(true);
+    expect(d.out.at(-1)).toBe(`Hand it to the person: collie trick propose ${join(elsewhere, "legs")}`);
+    expect(await cmdTrickInit(dd, ["--dir"])).toBe(EXIT.USAGE);
+    expect(await cmdTrickInit(dd, ["legs", "--dir", "--sh"])).toBe(EXIT.USAGE);
+    expect(d.err.at(-1)).toContain("usage: collie trick init [--sh] [--dir <folder>] <id>");
+  });
+
+  test("it refuses a draft folder that holds files, and takes an empty one", async () => {
+    const { d, work } = await inPane("agent");
+    await mkdir(join(work, "legs"));
+    expect(await cmdTrickInit(d, ["legs"])).toBe(EXIT.OK);
+    expect(await Bun.file(join(work, "legs", "trick.toml")).exists()).toBe(true);
+    const before = await readFile(join(work, "legs", "trick.toml"), "utf8");
+    expect(await cmdTrickInit(d, ["legs"])).toBe(EXIT.FAIL);
+    expect(d.err.at(-1)).toContain(`${join(work, "legs")} exists and is not empty`);
+    expect(await readFile(join(work, "legs", "trick.toml"), "utf8")).toBe(before);
+    await writeFile(join(work, "plain"), "a file");
+    expect(await cmdTrickInit(d, ["plain"])).toBe(EXIT.FAIL);
+    expect(await readFile(join(work, "plain"), "utf8")).toBe("a file");
+  });
+
+  test("it refuses when the working folder is the tricks folder, a trick in it, or the approved copies", async () => {
+    const d = await deps();
+    const tricks = join(d.configDir, "tricks");
+    await mkdir(join(tricks, ".collie-approved", "legs"), { recursive: true });
+    await mkdir(join(tricks, "legs"), { recursive: true });
+    const before = await readdir(tricks);
+    for (const cwd of [tricks, join(tricks, "legs"), join(tricks, ".collie-approved"), join(tricks, ".collie-approved", "legs")]) {
+      const agent = { ...d, ctx: { ...d.ctx, env: { ...d.ctx.env, ...PANE } }, paneKind: async () => "agent" as const, cwd };
+      d.err.length = 0;
+      expect(await cmdTrickInit(agent, ["fresh"])).toBe(EXIT.FAIL);
+      expect(d.err.join("\n")).toContain("inside Collie's tricks folder");
+    }
+    // The flag cannot aim a draft into it either.
+    const flagged = { ...d, cwd: await tempDir() };
+    expect(await cmdTrickInit(flagged, ["--dir", tricks, "fresh"])).toBe(EXIT.FAIL);
+    expect(await readdir(tricks)).toEqual(before);
+    expect(await Bun.file(join(tricks, "fresh", "trick.toml")).exists()).toBe(false);
   });
 });
 
@@ -290,10 +447,10 @@ describe("collie trick check", () => {
     expect(d.err.join("\n")).toContain("trick.toml /places: The trick lists no place");
     // The manifest stays strict: an unknown key is a typo, and it refuses.
     expect(d.err.join("\n")).toContain("/colour");
-    const later = await folder('id = "later"\nname = "Later"\nrun = "./p.sh"\nwatch = ["~/x.log"]\nplaces = ["belt"]\n', { "p.sh": "#!/bin/sh\necho '{}'\n" });
+    const later = await folder('id = "later"\nname = "Later"\nrun = "./p.sh"\nmode = "serve"\nplaces = ["belt"]\n', { "p.sh": "#!/bin/sh\necho '{}'\n" });
     const e = await deps();
     expect(await cmdTrickCheck(e, [later])).toBe(EXIT.OK);
-    expect(e.out.join("\n")).toContain("note: trick.toml /watch");
+    expect(e.out.join("\n")).toContain("note: trick.toml /mode");
   });
 
   test("a manifest with no about gets one soft note; with an about it gets none; a long one is an error", async () => {
@@ -458,7 +615,8 @@ describe("collie trick check", () => {
   });
 
   test("--run runs the program with the env scrub: no COLLIE_ variable, no key", async () => {
-    const dir = await folder('id = "env"\nname = "Env"\nrun = "bun program.ts"\nplaces = ["belt"]\n', {
+    // The script form, which runs on every host (a shell line does not run on Windows, fault d).
+    const dir = await folder('id = "env"\nname = "Env"\nrun = "program.ts"\nplaces = ["belt"]\n', {
       "program.ts": [
         'const leaked = Object.keys(process.env).filter((k) => k.startsWith("COLLIE_") || k.includes("KEY"));',
         "const facts = JSON.parse(await Bun.stdin.text());",
@@ -476,7 +634,7 @@ describe("collie trick check", () => {
   });
 
   test("--run passes the TRICK_ test hooks of the environment; a manifest that lists one is told it is never passed", async () => {
-    const dir = await folder('id = "hook"\nname = "Hook"\nrun = "bun program.ts"\nplaces = ["belt"]\nenv = ["TRICK_FIXTURE"]\n', {
+    const dir = await folder('id = "hook"\nname = "Hook"\nrun = "program.ts"\nplaces = ["belt"]\nenv = ["TRICK_FIXTURE"]\n', {
       "program.ts": 'console.log(JSON.stringify({ v: 1, parts: [{ at: "belt", id: "belt", mark: { label: process.env.TRICK_NOW ?? "none" } }] }));\n',
     });
     const d = await deps();
@@ -610,6 +768,48 @@ describe("windows gate", () => {
   });
 });
 
+describe("a shell run line on Windows (fault d): refused, never ported", () => {
+  /** A trick folder under the tricks folder of `d`, with `run`. */
+  async function folder(d: { configDir: string }, id: string, run: string, program: [string, string]): Promise<string> {
+    const dir = join(d.configDir, "tricks", id);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "trick.toml"), `id = "${id}"\nname = "L"\nrun = "${run}"\nplaces = ["belt"]\n`);
+    await writeFile(join(dir, program[0]), program[1], { mode: 0o755 });
+    return dir;
+  }
+
+  test("collie trick check fails a shell line on Windows with the one sentence; a script passes; Linux keeps the shell line", async () => {
+    const win = { ...(await deps()), platform: "win32" as const };
+    const shell = await folder(win, "legs", "./legs.sh", ["legs.sh", "#!/bin/sh\necho '{}'\n"]);
+    expect(await cmdTrickCheck(win, [shell])).toBe(EXIT.FAIL);
+    expect(win.err).toContain(`error: ${TRICKS_WINDOWS_SHELL_LINE}`);
+    const script = await folder(win, "ts", "program.ts", ["program.ts", 'process.stdout.write("{}");\n']);
+    const report = await checkStatic(script, realFiles, { platform: "win32" });
+    expect(report.problems).toEqual([]);
+    const linux = { ...(await deps()), platform: "linux" as const };
+    const onLinux = await folder(linux, "legs", "./legs.sh", ["legs.sh", "#!/bin/sh\necho '{}'\n"]);
+    expect(await cmdTrickCheck(linux, [onLinux])).toBe(EXIT.OK);
+    expect(linux.err.join("\n")).not.toContain(TRICKS_WINDOWS_SHELL_LINE);
+  });
+
+  test("collie trick init --sh refuses on Windows and writes nothing; the TypeScript form is not refused for it", async () => {
+    const work = await tempDir();
+    const win = { ...(await deps()), platform: "win32" as const, cwd: work };
+    expect(await cmdTrickInit(win, ["--sh", "--dir", work, "legs"])).toBe(EXIT.FAIL);
+    expect(win.err[0]).toBe(`error: ${TRICKS_WINDOWS_SHELL_LINE}`);
+    expect(await readdir(work)).toEqual([]);
+    const linux = { ...(await deps()), platform: "linux" as const, cwd: work };
+    expect(await cmdTrickInit(linux, ["--sh", "--dir", work, "legs"])).toBe(EXIT.OK);
+  });
+
+  test("collie trick on: the Windows gate answers first today, before the shell-line rule", async () => {
+    const win = { ...(await deps()), platform: "win32" as const };
+    await folder(win, "legs", "./legs.sh", ["legs.sh", "#!/bin/sh\n"]);
+    expect(await cmdTrickSwitch(win, ["legs"], true)).toBe(EXIT.FAIL);
+    expect(win.err).toEqual([`error: ${TRICKS_WINDOWS_LINE}`]);
+  });
+});
+
 describe("collie trick on, off and list", () => {
   test("on writes the switch file at 0600, off removes the id; unknown or refused tricks stay off", async () => {
     const d = await deps();
@@ -655,8 +855,8 @@ describe("collie trick on, off and list", () => {
     expect(await cmdTrickSwitch(d, ["legs"], true)).toBe(EXIT.OK);
     const on = d.out.findIndex((l) => l.startsWith("legs is on."));
     const warns = d.out.slice(0, on);
-    expect(warns.some((l) => l.startsWith("warn: program.sh:2 reaches the network"))).toBe(true);
-    expect(warns.some((l) => l.startsWith("warn: program.sh:3 calls an agent program or a model API"))).toBe(true);
+    expect(warns.some((l) => l.startsWith("warning: program.sh:2 reaches the network"))).toBe(true);
+    expect(warns.some((l) => l.startsWith("warning: program.sh:3 calls an agent program or a model API"))).toBe(true);
     expect(warns.at(-1)).toContain("text search of the code, not a proof");
     expect(JSON.parse(await readFile(switchesPath(d.stateDir), "utf8")).on.legs).toBeDefined();
     // A clean trick prints no warning and no honesty line.
@@ -665,6 +865,63 @@ describe("collie trick on, off and list", () => {
     clean.out.length = 0;
     expect(await cmdTrickSwitch(clean, ["quiet"], true)).toBe(EXIT.OK);
     expect(clean.out[0]).toStartWith("quiet is on.");
+  });
+
+  // A5, then the lead's change (2026-11-18): the phone's switch refuses code it cannot show whole (service.test.ts, 409
+  // not-whole); a person at this machine may switch it on, in a plain terminal or a proven shell pane, and the verb says
+  // so in one line. An agent's pane is refused as ever.
+  describe("code the phone cannot show whole (A5)", () => {
+    const PANE = { HERDR_PANE_ID: "w1:p2", HERDR_SOCKET_PATH: "/run/user/1000/herdr.sock" };
+    const NOT_WHOLE_LINE = "The phone cannot show all of this trick's code. You switched it on at this machine.";
+
+    async function keyed(): Promise<Awaited<ReturnType<typeof deps>>> {
+      const d = await deps();
+      await cmdTrickInit(d, ["--sh", "legs"]);
+      await writeFile(join(d.configDir, "tricks", "legs", "program.sh"), `#!/bin/sh\nKEY="${KEY}"\n`);
+      d.out.length = 0;
+      return d;
+    }
+    const inPane = (d: Awaited<ReturnType<typeof deps>>, kind: "agent" | "shell" | "unknown"): Awaited<ReturnType<typeof deps>> => ({ ...d, ctx: { ...d.ctx, env: { ...d.ctx.env, ...PANE } }, paneKind: async () => kind });
+
+    test("a plain terminal switches it on, prints the one line, and approves the code as it is", async () => {
+      const d = await keyed();
+      expect(SWITCHED_ON_NOT_WHOLE).toBe(NOT_WHOLE_LINE);
+      expect(await cmdTrickSwitch(d, ["legs"], true)).toBe(EXIT.OK);
+      expect(d.err).toEqual([]);
+      expect(d.out.filter((line) => line === NOT_WHOLE_LINE)).toHaveLength(1);
+      expect(d.out.findIndex((line) => line === NOT_WHOLE_LINE)).toBeGreaterThan(d.out.findIndex((line) => line.startsWith("legs is on.")));
+      expect(JSON.parse(await readFile(switchesPath(d.stateDir), "utf8")).on.legs.hash).toMatch(/^[0-9a-f]{64}$/u);
+    });
+
+    test("a pane the bridge proves a shell does the same", async () => {
+      const d = await keyed();
+      expect(await cmdTrickSwitch(inPane(d, "shell"), ["legs"], true)).toBe(EXIT.OK);
+      expect(d.out.filter((line) => line === NOT_WHOLE_LINE)).toHaveLength(1);
+      expect(JSON.parse(await readFile(switchesPath(d.stateDir), "utf8")).on.legs).toBeDefined();
+    });
+
+    test("an agent's pane, and a pane that cannot be proven a shell, are refused as today: no line, no switch", async () => {
+      const d = await keyed();
+      for (const kind of ["agent", "unknown"] as const) {
+        d.err.length = 0;
+        expect(await cmdTrickSwitch(inPane(d, kind), ["legs"], true)).toBe(EXIT.REFUSED);
+        expect(d.err).toEqual(agentPaneRefusal("legs"));
+      }
+      expect(await cmdTrickSwitch({ ...inPane(d, "agent"), paneKind: async () => Promise.reject(new Error("socket gone")) }, ["legs"], true)).toBe(EXIT.REFUSED);
+      expect(d.out).not.toContain(NOT_WHOLE_LINE);
+      expect(await readFile(switchesPath(d.stateDir), "utf8").catch(() => null)).toBeNull();
+    });
+
+    test("code the phone shows whole prints no such line", async () => {
+      const clean = await deps();
+      await cmdTrickInit(clean, ["quiet"]);
+      clean.out.length = 0;
+      expect(await cmdTrickSwitch(clean, ["quiet"], true)).toBe(EXIT.OK);
+      expect(clean.out).not.toContain(NOT_WHOLE_LINE);
+      // The helper `init` writes for a TypeScript trick is larger than the phone shows of one file; it is
+      // Collie's own, byte for byte, so a fresh trick shows whole and switches on with no line.
+      expect((await stat(join(clean.configDir, "tricks", "quiet", "trick.ts"))).size).toBeGreaterThan(32 * 1024);
+    });
   });
 
   test("list shows the bridge's state, last run and error when it answers", async () => {
@@ -772,15 +1029,30 @@ describe("collie trick skill", () => {
   const TEXT = "# legs\n\nKeep the file notes.md up to date.\n";
 
   /** A trick folder `legs` with a SKILL.md, switched on. */
-  async function onTrick(skill: string | null = TEXT): Promise<Awaited<ReturnType<typeof deps>>> {
+  async function onTrick(skill: string | null = TEXT, approve: "verb" | "copy" = "verb"): Promise<Awaited<ReturnType<typeof deps>>> {
     const d = await deps();
     await cmdTrickInit(d, ["legs"]);
     if (skill !== null) await writeFile(join(d.configDir, "tricks", "legs", "SKILL.md"), skill);
-    expect(await cmdTrickSwitch(d, ["legs"], true)).toBe(EXIT.OK);
+    // A SKILL.md the phone cannot show as it is (a key, over 32 KiB) is refused by `trick on` (A5): such a
+    // case approves the copy itself, as an approval from before that rule left it.
+    if (approve === "copy") expect((await approveFolder({ stateDir: d.ctx.stateDir, configDir: d.ctx.configDir, id: "legs", by: "cli", at: "2026-11-17T10:00:00.000Z" })).ok).toBe(true);
+    else expect(await cmdTrickSwitch(d, ["legs"], true)).toBe(EXIT.OK);
+    // Tricks as a whole are on: a trick teaches an agent only then (bridge/tricks/feature-switch.ts).
+    writeTricksFeature(d.stateDir, true);
     d.out.length = 0;
     d.err.length = 0;
     return d;
   }
+
+  test("with tricks switched off as a whole, a trick that is on teaches nothing: one sentence, and where to switch them on", async () => {
+    const d = await onTrick();
+    writeTricksFeature(d.stateDir, false);
+    expect(await cmdTrickSkill(d, ["legs"])).toBe(EXIT.FAIL);
+    expect(d.err).toEqual([`error: ${TRICKS_OFF_LINE}`]);
+    expect(d.out).toEqual([]);
+    // The brief with no id is for an agent that writes a trick: it reads the same with tricks off.
+    expect(await cmdTrickSkill(d, [])).toBe(EXIT.OK);
+  });
 
   test("is a verb of the tree, and the list marks which tricks have a SKILL.md", async () => {
     expect(TRICK_SUBCOMMANDS).toContain("skill");
@@ -873,7 +1145,7 @@ describe("collie trick skill", () => {
     expect(link.out).toEqual([]);
     expect(link.err[0]).toBe("legs has no SKILL.md");
 
-    const big = await onTrick("x".repeat(SKILL_BYTES_MAX + 1));
+    const big = await onTrick("x".repeat(SKILL_BYTES_MAX + 1), "copy");
     expect(await cmdTrickSkill(big, ["legs"])).toBe(EXIT.FAIL);
     expect(big.err).toEqual(["legs has a SKILL.md larger than 32 KiB, so it is not read"]);
     expect(big.out).toEqual([]);
@@ -884,7 +1156,7 @@ describe("collie trick skill", () => {
   });
 
   test("the text goes through the secret mask", async () => {
-    const d = await onTrick(`Use the key ${KEY} for the call.\n`);
+    const d = await onTrick(`Use the key ${KEY} for the call.\n`, "copy");
     expect(await cmdTrickSkill(d, ["legs"])).toBe(EXIT.OK);
     expect(d.out.join("\n")).not.toContain(KEY);
     expect(d.out.join("\n")).toContain("Use the key ");
@@ -897,7 +1169,12 @@ describe("collie trick skill", () => {
     const text = d.out.join("\n");
     expect(text).toContain("collie trick init <id>");
     expect(text).toContain("AGENTS.md");
-    expect(text).toContain("collie trick check --run <folder>");
+    expect(text).toContain("collie trick check --run ./<id>");
+    expect(text).toContain("collie trick dev ./<id>");
+    expect(text).toContain("collie trick propose ./<id>");
+    expect(text).toContain("Nothing is added to this machine's tricks before the person's yes.");
+    expect(text).not.toContain("<config dir>/tricks/<id>/");
+    expect(text).not.toContain("<folder>");
     expect(await cmdTrickSkill(d, ["Bad Id"])).toBe(EXIT.USAGE);
   });
 });
@@ -965,11 +1242,18 @@ describe("approving from inside an agent's pane, auto, and a version waiting", (
     // A shell pane in the multiplexer is a person's terminal: the yes goes through.
     expect(await cmdTrickSwitch(inPane("shell"), ["legs"], true)).toBe(EXIT.OK);
     await writeFile(join(d.configDir, "tricks", "legs", "program.sh"), "#!/bin/sh\necho again\n");
-    // No bridge answers, or it does not know the pane: a speed bump, not a wall, so allowed.
-    expect(await cmdTrickSwitch(inPane("unknown"), ["legs"], true)).toBe(EXIT.OK);
+    // Counsel A2, fail closed: markers present and the bridge does not prove a shell (no bridge answers, or it
+    // does not know the pane, or the check throws) refuses with the same sentence and changes nothing.
     await writeFile(join(d.configDir, "tricks", "legs", "program.sh"), "#!/bin/sh\necho thrice\n");
+    const waiting = await readFile(switchesPath(d.stateDir), "utf8");
+    d.err.length = 0;
+    expect(await cmdTrickSwitch(inPane("unknown"), ["legs"], true)).toBe(EXIT.REFUSED);
+    expect(d.err).toEqual(agentPaneRefusal("legs"));
     const broken: typeof d = { ...inPane("agent"), paneKind: async () => Promise.reject(new Error("socket gone")) };
-    expect(await cmdTrickSwitch(broken, ["legs"], true)).toBe(EXIT.OK);
+    d.err.length = 0;
+    expect(await cmdTrickSwitch(broken, ["legs"], true)).toBe(EXIT.REFUSED);
+    expect(d.err).toEqual(agentPaneRefusal("legs"));
+    expect(await readFile(switchesPath(d.stateDir), "utf8")).toBe(waiting);
     expect(asked).toEqual(["agent", "shell", "unknown"]);
     // Outside any pane the bridge is not asked at all. A pane marker without its scope variable is no marker (cli/beacon.ts).
     const half: typeof d = { ...inPane("agent"), ctx: { ...d.ctx, env: { ...d.ctx.env, HERDR_PANE_ID: "w1:p2" } } };
@@ -997,6 +1281,8 @@ describe("approving from inside an agent's pane, auto, and a version waiting", (
     expect(JSON.parse(await readFile(switchesPath(d.stateDir), "utf8")).on.legs.auto).toBe(true);
     const inPane: typeof d = { ...d, ctx: { ...d.ctx, env: { ...d.ctx.env, ...PANE } }, paneKind: async () => "agent" };
     expect(await cmdTrickAuto(inPane, ["legs", "on"])).toBe(EXIT.REFUSED);
+    expect(await cmdTrickAuto({ ...inPane, paneKind: async () => Promise.reject(new Error("socket gone")) }, ["legs", "on"])).toBe(EXIT.REFUSED);
+    expect(await cmdTrickAuto({ ...inPane, paneKind: async () => "unknown" }, ["legs", "on"])).toBe(EXIT.REFUSED);
     expect(await cmdTrickAuto({ ...inPane, paneKind: async () => "shell" }, ["legs", "on"])).toBe(EXIT.OK);
     expect(await cmdTrickAuto(inPane, ["legs", "off"])).toBe(EXIT.OK);
     expect(JSON.parse(await readFile(switchesPath(d.stateDir), "utf8")).on.legs.auto).toBe(false);
@@ -1014,7 +1300,7 @@ describe("approving from inside an agent's pane, auto, and a version waiting", (
     await cmdTrickList(d, []);
     expect(d.out[0]).toContain("VERSION");
     expect(d.out[1]).toMatch(/ NEW +on, not seen by the bridge/);
-    expect(d.out).toContain("NEW: a new version waits for your yes. Approve it on the Hill, or with collie trick on <id>.");
+    expect(d.out).toContain("NEW: a new version waits for your yes. Approve it in Settings, Tricks, on the phone, or with collie trick on <id>.");
     d.out.length = 0;
     await cmdTrickList(d, ["--json"]);
     // SAFETY: `list --json` prints one document, checked by value below.
@@ -1100,5 +1386,58 @@ describe("review 8 V-N1: collie trick on names the rules it approves", () => {
     const out = d.out.join("\n");
     expect(out).toContain(`It gives your agents instructions: rules.md, sha256 ${sha}.`);
     expect(out).toMatch(/Read them before an agent view uses them: .*\.collie-approved.*rules\.md/u);
+  });
+});
+
+// ── The local key's view of GET /api/tricks (bridge/local-key.ts) prints what the full reply prints ──
+
+describe("trick list and the doctor's tricks row over the local key's view", () => {
+  // The phone's reply, with text the view leaves out: a part's output, the About, the rules, a value.
+  const FULL: JsonObject = {
+    rev: 7,
+    tricks: [
+      {
+        host: "lodge",
+        id: "legs",
+        name: "legs",
+        icon: "plug",
+        on: true,
+        state: "failing",
+        places: ["belt"],
+        error: "The program exited with 1",
+        lastRunAt: "2026-11-08T09:41:00.000Z",
+        pending: { version: "abc1234", code: "a new version an agent wrote" },
+        about: "PLANTED trick output: 42 widgets sold",
+        description: "leak.person@example.org",
+        values: { token: "a value a person typed" },
+      },
+      { host: "lodge", id: "arms", name: "arms", icon: "plug", on: false, state: "off", places: ["status"] },
+    ],
+    parts: [{ host: "lodge", trick: "legs", at: "belt", id: "p1", text: "PLANTED trick output: 42 widgets sold" }],
+    present: ["lodge/legs/belt/p1"],
+    runsOn: { lead: "desk" },
+    path: "/usr/local/bin:/usr/bin",
+  };
+
+  test("the table, the --json document and the doctor row are the same from either answer", async () => {
+    const d = await deps();
+    await cmdTrickInit(d, ["legs"]);
+    await cmdTrickInit(d, ["arms"]);
+    await cmdTrickSwitch(d, ["legs"], true);
+    const printed = async (answer: JsonObject): Promise<{ table: string[]; doc: string[]; doctor: string }> => {
+      const over: TrickDeps & Captured = { ...d, fetch: async () => new Response(JSON.stringify(answer), { status: 200 }) };
+      d.out.length = 0;
+      await cmdTrickList(over, []);
+      const table = [...d.out];
+      d.out.length = 0;
+      await cmdTrickList(over, ["--json"]);
+      const doc = [...d.out];
+      return { table, doc, doctor: JSON.stringify(await tricksFindings(over)) };
+    };
+    const said = await printed(FULL);
+    expect(said.table.join("\n")).toContain("The program exited with 1");
+    expect(said.table.join("\n")).toContain("NEW");
+    expect(said.doctor).toContain("PATH /usr/local/bin:/usr/bin");
+    expect(await printed(localTricksView(FULL))).toEqual(said);
   });
 });

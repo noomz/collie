@@ -67,6 +67,7 @@ const NOT_REACHED_BY_WINDOWS: readonly Allowed[] = [
   { file: "bridge/worktree-branch.ts", pattern: "splitOnSlash", count: 1, why: "the same branch name, cut into its components" },
   { file: "bridge/config.ts", pattern: "splitOnSlash", count: 1, why: "COLLIE_BASE_PATH is a URL mount, always slashes" },
   { file: "bridge/crew/forward.ts", pattern: "splitOnSlash", count: 3, why: "crew route names, URL paths" },
+  { file: "bridge/inside/wire.ts", pattern: "startsWithSlash", count: 1, why: "a hello's cwd: an absolute POSIX path or a drive path, both forms checked on every host" },
   { file: "bridge/files-view.ts", pattern: "startsWithSlash", count: 1, why: "the wire's relative path, `/`-separated on every host; joined with host.path" },
   { file: "bridge/math/tar.ts", pattern: "splitOnSlash", count: 2, why: "tar entry names, `/`-separated in every archive; written through path.join" },
   { file: "scripts/math-pack.ts", pattern: "splitOnSlash", count: 1, why: "pack paths: tar entry names and the pack's relative imports, `/`-separated on every host" },
@@ -85,6 +86,7 @@ const NOT_REACHED_BY_WINDOWS: readonly Allowed[] = [
   { file: "bridge/tricks/code-hash.ts", pattern: "splitOnSlash", count: 1, why: "`isCodePath` reads a git tree path or a `walkTrickCode` path, both written with `/` on every host (official update)" },
   { file: "cli/trick-add.ts", pattern: "splitOnSlash", count: 2, why: "a folder inside a git repository and the paths of a git tree, which git writes with `/` on every host (M94 review 15)" },
   { file: "bridge/crew/standby-tricks.ts", pattern: "splitOnSlash", count: 3, why: "a carried trick's wire path, written with `/` on every host (crew slice 10, CREW_PROTOCOL §25), cut into its steps and folders to check them, and its top folder read" },
+  { file: "bridge/changes.ts", pattern: "splitOnSlash", count: 2, why: "a path git listed in a repo, which git writes with `/` on every host, cut into names before host.path.join (M103)" },
   { file: "bridge/tricks/fetch.ts", pattern: "splitOnSlash", count: 2, why: "the paths of a fetched git tree, which git writes with `/` on every host (M94 review 15, moved from cli/trick-add.ts)" },
 ];
 

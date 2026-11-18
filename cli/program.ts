@@ -40,6 +40,7 @@ import {
   cmdSkillUninstall,
   cmdSkillVerb,
   type SkillDeps,
+  skillFollowsSwitch,
 } from "./skill-install.ts";
 import { asksForHelp, EXIT, type Io, realIo } from "./io.ts";
 import {
@@ -54,6 +55,7 @@ import {
   type LifecycleDeps,
 } from "./lifecycle.ts";
 import { cmdLink, cmdUnlink, type LinkDeps, realLinkFs } from "./link.ts";
+import { HARNESS_SUBCOMMANDS, bareLinkRefusal, cmdHarnessLink, cmdHarnessStatus, cmdHarnessSync, cmdHarnessUnlink, harnessUsage, installWordAny, isLinkHarness, type HarnessLinkDeps } from "./harness-link.ts";
 import { cmdTrickDev } from "./trick-dev.ts";
 import { cmdTrickGuide } from "./trick-guide.ts";
 import { cmdTrickPropose } from "./trick-propose.ts";
@@ -136,8 +138,10 @@ import {
   WALKY_SUBCOMMANDS,
   type WalkyDeps,
 } from "./walky.ts";
-import { cmdHill, cmdHillClear, cmdHillList, cmdHillPost, cmdHillState, cmdHillStatus, cmdHillSwitch, cmdHillWithdraw, HILL_SUBCOMMANDS, hillPostHelp, type HillDeps } from "./hill.ts";
+import { apiHelp, cmdApi, declaredOperations, type ApiDeps } from "./api.ts";
+import { cmdHill, cmdHillClear, cmdHillList, cmdHillPost, cmdHillState, cmdHillOn, cmdHillStatus, cmdHillSwitch, cmdHillWithdraw, HILL_SUBCOMMANDS, hillPostHelp, type HillDeps } from "./hill.ts";
 import { cmdTrickView, viewTopLines, type ViewDeps } from "./trick-view.ts";
+import { cmdTricks, cmdTricksOn, cmdTricksStatus, cmdTricksSwitch, TRICKS_SUBCOMMANDS } from "./tricks-switch.ts";
 import { cmdUpdateCheck, updateCheckDeps, wantsCheck } from "./update-check.ts";
 import { cmdTheme, cmdThemeCheck, realThemeFiles, THEME_SUBCOMMANDS } from "./theme-check.ts";
 import { cmdThemeSkill } from "./theme-skill.ts";
@@ -194,6 +198,8 @@ export interface Command {
    * and an unknown subcommand, with the usage block those two have always printed.
    */
   readonly subcommands?: readonly Subcommand[];
+  /** The lines `collie <verb> --help` prints in place of the one-line summary, for a verb with two meanings (`link`). */
+  readonly usage?: () => readonly string[];
   run(args: readonly string[], session: Session): number | Promise<number>;
 }
 
@@ -278,6 +284,48 @@ function linkDeps(io: Io): LinkDeps {
   return { ctx: loadContext(io.err), io, files: realFiles, fs: realLinkFs };
 }
 
+/** `harness link` and kin (M99 spec 09): the context, the filesystem and the harness CLI. Nothing restarts. */
+function harnessLinkDeps(io: Io): HarnessLinkDeps {
+  const ctx = loadContext(io.err);
+  return { ctx, io, files: realFiles, exec: realExec(ctx.env, ctx.home) };
+}
+
+/**
+ * The bare `link` and `unlink`: the name on PATH (ADR 0021), with no argument. An argument is refused with
+ * the line that names `collie harness link` (M99 spec 09): an older build read `unlink claude` as the
+ * PATH verb and removed the name.
+ */
+function runLink(args: readonly string[], io: Io, unlink: boolean): number {
+  if (args.length > 0) {
+    io.err(bareLinkRefusal(unlink ? "unlink" : "link"));
+    return EXIT.USAGE;
+  }
+  return unlink ? cmdUnlink(linkDeps(io)) : cmdLink(linkDeps(io));
+}
+
+/** `harness link <harness>` and `harness unlink <harness>`: one harness word, nothing else. */
+function runHarnessLink(args: readonly string[], io: Io, unlink: boolean): number {
+  const [word, ...rest] = args;
+  if (word === undefined || rest.length > 0) {
+    io.err(harnessUsage());
+    return EXIT.USAGE;
+  }
+  if (!isLinkHarness(word)) {
+    io.err(`error: no ${installWordAny()} for "${word}". ${harnessUsage()}`);
+    return EXIT.USAGE;
+  }
+  return unlink ? cmdHarnessUnlink(harnessLinkDeps(io), word) : cmdHarnessLink(harnessLinkDeps(io), word);
+}
+
+/** `harness status` and `harness sync` take no argument. */
+function runHarnessBare(args: readonly string[], io: Io, verb: (deps: HarnessLinkDeps) => number): number {
+  if (args.length > 0) {
+    io.err(harnessUsage());
+    return EXIT.USAGE;
+  }
+  return verb(harnessLinkDeps(io));
+}
+
 /**
  * `hooks`: the same three seams as `link` — it edits the agent's `settings.json` and reads the
  * published PATH name to decide what command to write into it (ADR 0021). No service manager, no
@@ -318,6 +366,11 @@ function walkyDeps(io: Io): WalkyDeps {
     stdinIsTty: process.stdin.isTTY === true,
     ask: (path, line, ms) => askSocket(path, line, ms),
   };
+}
+
+/** `api` (M105): the state dir, the files that vouch for the socket, and the socket itself. */
+function apiDeps(io: Io): ApiDeps {
+  return { io };
 }
 
 /** `hill` (M96): walky's own deps, since the hill speaks over the walky socket. */
@@ -363,13 +416,13 @@ const HILL_TREE: readonly Subcommand[] = [
   // The Hill's switch: a file in this instance's state folder, read again by the running bridge.
   {
     name: "on",
-    summary: "switch the Hill on for this Collie (it is on unless switched off)",
-    run: (args, s) => cmdHillSwitch(hillDeps(s.io), "on", args),
+    summary: "switch the Hill on for this Collie (it is off until switched on)",
+    run: (args, s) => cmdHillOn({ ...hillDeps(s.io), followSkill: (on) => skillFollowsSwitch(skillDeps(s.io))(on) }, args),
   },
   {
     name: "off",
     summary: "switch the Hill off: agents and tricks cannot post, the open decisions stay",
-    run: (args, s) => cmdHillSwitch(hillDeps(s.io), "off", args),
+    run: (args, s) => cmdHillSwitch({ ...hillDeps(s.io), followSkill: (on) => skillFollowsSwitch(skillDeps(s.io))(on) }, "off", args),
   },
 ];
 
@@ -829,12 +882,12 @@ export const COMMANDS: readonly Command[] = [
   {
     name: "link",
     summary: "put `collie` on your PATH: ~/.local/bin/collie → this checkout's binary",
-    run: (_args, s) => cmdLink(linkDeps(s.io)),
+    run: (args, s) => runLink(args, s.io, false),
   },
   {
     name: "unlink",
     summary: "remove that name again (only when it points at THIS checkout)",
-    run: (_args, s) => cmdUnlink(linkDeps(s.io)),
+    run: (args, s) => runLink(args, s.io, true),
   },
   // ── Agent beacons (M11) ────────────────────────────────────────────────────
   // Declared beside `link` because they share its subject: `hooks install` writes the published PATH
@@ -848,8 +901,8 @@ export const COMMANDS: readonly Command[] = [
       {
         name: "install",
         summary:
-          "register the beacon hooks: `hooks install claude` (add `--hold-permissions` to hold permissions, and `--statusline` to also wrap your statusLine" +
-          " so the phone shows the 5-hour and 7-day windows; your command still runs and prints as before), or `hooks install codex`",
+          "register the beacon hooks: `hooks install claude` (add `--hold-permissions` to hold permissions; it also wraps your statusLine, if you have one," +
+          " so the phone shows the context in percent and the 5-hour and 7-day windows, and your command still prints exactly as before; `--no-statusline` keeps it as it is), or `hooks install codex`",
         run: (args, s) => cmdHooksInstall(hooksDeps(s.io), args),
       },
       {
@@ -1114,7 +1167,7 @@ export const COMMANDS: readonly Command[] = [
       },
       {
         name: "init",
-        summary: "make a new trick folder with a TypeScript program and the helper: <id> (--sh for a shell provider)",
+        summary: "make a new trick folder with a TypeScript program and the helper: <id> (--sh for a shell provider; --dir <folder> or an agent's pane makes a draft outside the tricks folder)",
         run: async (args, s) => await cmdTrickInit(trickVerbDeps(s.io), args),
       },
       {
@@ -1145,6 +1198,31 @@ export const COMMANDS: readonly Command[] = [
       },
     ],
     run: (args, s) => cmdTrick({ io: s.io }, args),
+  },
+  // The switch for tricks as a whole (bridge/tricks/feature-switch.ts): the plural is the feature, `trick on
+  // <id>` the one trick. A file in this instance's state folder, read again by the running bridge; tricks are
+  // an experiment and off until switched on.
+  {
+    name: "tricks",
+    summary: `switch tricks as a whole on or off for this machine (off until switched on): ${TRICKS_SUBCOMMANDS.join(", ")}`,
+    subcommands: [
+      {
+        name: "on",
+        summary: "switch tricks on for this machine; each trick still has its own switch",
+        run: (args, s) => cmdTricksOn(trickVerbDeps(s.io), args),
+      },
+      {
+        name: "off",
+        summary: "switch tricks off: no trick runs or draws, and each trick keeps its own switch",
+        run: (args, s) => cmdTricksSwitch(trickVerbDeps(s.io), "off", args),
+      },
+      {
+        name: "status",
+        summary: "whether tricks are on for this machine (--json)",
+        run: (args, s) => cmdTricksStatus(trickVerbDeps(s.io), args),
+      },
+    ],
+    run: (args, s) => cmdTricks({ io: s.io }, args),
   },
   // ── Durable programs (M55, ADR 0104) ───────────────────────────────────────
   // Declared beside `config` because it is the same shape of verb: a tree the operator's own
@@ -1187,6 +1265,39 @@ export const COMMANDS: readonly Command[] = [
     ],
     run: async (args, s) => await cmdMux(muxListDeps(s.io), args),
   },
+  // ── Harness parts (M99 spec 09) ────────────────────────────────────────────
+  // The opt-in for the data path: a part of Collie inside the agent program. Declared beside `mux`: both
+  // are about the programs Collie drives. Nothing links by itself, and nothing restarts.
+  {
+    name: "harness",
+    summary: `experimental, opt-in: link Claude Code so Collie can send to it by data: ${HARNESS_SUBCOMMANDS.join(", ")}`,
+    subcommands: [
+      {
+        name: "link",
+        summary: `link a harness: write its ${installWordAny()}, so Collie can send to it by data; an experiment, Claude Code only (available: claude)`,
+        run: (args, s) => runHarnessLink(args, s.io, false),
+      },
+      {
+        name: "unlink",
+        summary: `remove a harness's ${installWordAny()}; Collie then uses the screen path for it, as it does with no link`,
+        run: (args, s) => runHarnessLink(args, s.io, true),
+      },
+      {
+        name: "status",
+        summary: "say which harnesses are linked",
+        run: (args, s) => runHarnessBare(args, s.io, cmdHarnessStatus),
+      },
+      {
+        name: "sync",
+        summary: `rewrite each linked ${installWordAny()} with this build's (\`collie update\` runs it); never a newer one`,
+        run: (args, s) => runHarnessBare(args, s.io, cmdHarnessSync),
+      },
+    ],
+    run: (_args, s) => {
+      s.io.err(harnessUsage());
+      return EXIT.USAGE;
+    },
+  },
   // ── Agent sessions (M76 spec 03) ───────────────────────────────────────────
   // One read of this bridge's own snapshot, printed as a table. The name is `SESSIONS_VERB`, in one place.
   {
@@ -1212,6 +1323,15 @@ export const COMMANDS: readonly Command[] = [
     summary: `the hill, decisions an agent asks its person: ${HILL_SUBCOMMANDS.join(", ")}`,
     subcommands: HILL_TREE,
     run: (args, s) => cmdHill({ io: s.io }, args),
+  },
+  // ── The local API (M105 spec 03) ───────────────────────────────────────────
+  // EXPERIMENTAL. One verb, its help generated from the operation table. The local API answers a trick's
+  // own run (ADR 0155), so `collie api <operation>` prints one line and reads nothing in this release.
+  {
+    name: "api",
+    summary: "experimental: the operations of the local API a trick reads with t.api; it answers a trick's own run in this release",
+    usage: () => apiHelp(declaredOperations()),
+    run: (args, s) => cmdApi(apiDeps(s.io), args),
   },
   // ── Themes (M59 spec 05) ───────────────────────────────────────────────────
   // `theme check` runs the app's own theme parser and contrast report over files on disk, for a
@@ -1491,7 +1611,7 @@ function buildProgram(
       .helpOption(false)
       .argument("[args...]");
     if (c.subcommands === undefined) {
-      leaf.action(async (args: string[]) => setCode(await helpGuard(session, helpAsked, c.name, c.summary, c.name.startsWith("_"), args, c.run)));
+      leaf.action(async (args: string[]) => setCode(await helpGuard(session, helpAsked, c.name, c.summary, c.name.startsWith("_"), args, c.run, c.usage)));
       continue;
     }
     // A parent with children: commander matches a child by name, and anything else — including

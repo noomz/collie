@@ -16,6 +16,10 @@ turn.
 
 "Hill" is the view's name, and it stays the same in every language. "Decision" is a plain word.
 
+The Hill is an experiment. It is off until you switch it on in Settings → Experiments, or with
+`collie hill on`. Until then no agent or trick can post, and the Hill is not in the bottom bar. See
+[Switch the Hill on or off](#switch-the-hill-on-or-off).
+
 ## What the Hill shows
 
 The Hill is the fourth item of the Dashboard's bottom bar. It opens a page of cards, grouped by how
@@ -26,7 +30,7 @@ soon each one needs you.
 | Now | Needs you now. A Decision marked `now` also sends a notification |
 | Today | The default |
 | Later | Can wait |
-| Answered | The Decisions that are closed, newest first, up to 20 |
+| Answered | The closed Decisions, newest first, up to 20 |
 
 Above the cards, the Crew state control says how much you want to hear now
 ([Here, Quiet and Away](#here-quiet-and-away)). The header says how many Decisions are open and how
@@ -38,7 +42,7 @@ A card holds, from top to bottom:
 - who asked, with their mark, the machine and how old the card is,
 - the title and the summary,
 - the pictures, as one sideways row,
-- the poster's own facts, in a quiet frame captioned "From <sender>",
+- the poster's own facts, in a quiet frame captioned "From `<sender>`",
 - the recommendation, with the reason, between two rules,
 - "More", which opens the longer text and the links, and "Add a note",
 - the options, numbered 1, 2, 3, and
@@ -49,7 +53,14 @@ and Next, and its options show on the last card. The yes stays off until every c
 ([A trick an agent proposes](#a-trick-an-agent-proposes)).
 
 When you wrote to a session after its agent asked, the card says "You wrote to this session after it
-asked." ([Clear](#clear) takes such cards away.)
+asked." ([Clear](#clear) takes such cards away.) When your message from the phone started that
+session's next turn, its cards close by themselves
+([When a card closes by itself](#when-a-card-closes-by-itself)).
+
+Answered keeps the cards you answered or dismissed until you clear them. A card your own message
+closed, "You wrote in the session", is yours too: it stays with its title, its summary and that line
+until you clear it. A card that closed without you, because it expired, was withdrawn or replaced, or
+could not be delivered, stays there for one minute with its state, and then leaves by itself.
 
 The recommended option carries a star. Collie never preselects it, and never focuses it. A
 recommendation that you do not read must not become the answer by default.
@@ -66,8 +77,8 @@ Three kinds of sender post a Decision.
 - **An agent** posts with `collie hill post`, and the bridge names the agent from its pane.
 - **A trick** posts with its `decisions` list
   ([A program trick](tricks-authoring.md#a-program-trick)).
-- **Collie itself** posts its own cards. "Use the new version of <name>?" asks about a trick's new
-  code ([A new version of a trick](tricks.md#a-new-version-of-a-trick)). "Switch on the trick <id>?"
+- **Collie itself** posts its own cards. "Use the new version of `<name>`?" asks about a trick's new
+  code ([A new version of a trick](tricks.md#a-new-version-of-a-trick)). "Switch on the trick `<id>`?"
   asks about a trick an agent proposed ([A trick an agent proposes](#a-trick-an-agent-proposes)).
 
 A Decision is in one of seven states. A closed one keeps its state and shows it.
@@ -78,7 +89,7 @@ A Decision is in one of seven states. A closed one keeps its state and shows it.
 | `answered` | "Answered" |
 | `dismissed` | "Dismissed" |
 | `expired` | "Expired" |
-| `withdrawn` | "Withdrawn by the poster" |
+| `withdrawn` | "Withdrawn by the poster", or "You wrote in the session" |
 | `superseded` | "Replaced by a newer Decision" |
 | `undeliverable` | "Could not be delivered" |
 
@@ -98,9 +109,9 @@ state, where the answer goes, and the answer when there is one. It works for the
 session the answer goes to, and nobody else. `withdraw` takes an open Decision back, and `list` lists
 your own Decisions, open first. `state` reads the crew state.
 
-`collie hill --help` prints every verb, how to word a card, and the rules. Every verb and flag is in
+`collie hill --help` prints the verbs an agent runs, how to word a card, and the rules. Every verb and flag is in
 [`collie hill`](tricks-reference.md#collie-hill) of the Tricks reference. `clear`, `on`, `off`, and
-`state` with a word are the person's ([Clear](#clear), [Switch the Hill off](#switch-the-hill-off),
+`state` with a word are the person's ([Clear](#clear), [Switch the Hill on or off](#switch-the-hill-on-or-off),
 [Here, Quiet and Away](#here-quiet-and-away)).
 
 `status` prints the format below. This is the output on a Decision that is answered, with a test
@@ -151,25 +162,27 @@ The person opens the card cold, between other things.
 
 ### The rules an agent gets
 
-Every agent that has the Collie skill installed reads these rules, and `collie hill --help` prints
-them ([Install the skill](walky-talky.md#install-the-skill)).
+The skill an agent has installed holds a short Hill section while the Hill is on: one example and a
+pointer to `collie hill --help` ([Install the skill](walky-talky.md#install-the-skill)). The rules are in that
+help, in at most 1,500 bytes, so an agent reads them only when it runs it. `collie hill post --help`
+prints the same text.
 
-1. Post a decision only for what needs the person.
-2. Always write the summary in plain words, and recommend one option with a why.
-3. One question per decision. To change one, post again with `--supersedes`. Never repost.
-4. Do not wait in a loop. The answer arrives as a WalkyTalky message and starts your next turn.
-5. If no answer arrived, read it with `collie hill status <id>`.
-6. An answer typed into your session for a decision you did not post carries only the id and the
-   option word. Read the rest with `collie hill status <id>`.
-7. A worker with a lead asks its lead first.
-8. A `--view` only shows facts. No buttons: the options are the taps.
-9. When your operator settles the question in your session, take the card back:
-   `collie hill withdraw <id>`.
-10. Before you post, read the crew state: `collie hill state`. here: post as usual. quiet: post, but
-    do not wait for a fast answer. away: post nothing that needs an answer now; do work that needs no
-    answer, then end your turn.
-11. A typed answer or a post result can end with a line such as "Crew state: away." It is the state
-    at that moment.
+1. Post only what needs your person. A worker with a lead asks its lead first.
+2. One question per post. To change it, post again with `--supersedes <id>`.
+3. Do not wait or poll. The answer starts your next turn as "Answer to `<id>` ...". None arrived:
+   `collie hill status <id>`.
+4. Settled in your session: `collie hill withdraw <id>`.
+5. A result that ends "Crew state: quiet." or "Crew state: away.": your person is not there. Ask
+   nothing that needs an answer now.
+
+The help also has two lines on wording. The title is the decision as a question, in about 8 words,
+with no inner ids. The summary is one or two plain sentences, and the first says what the
+recommendation does. Each option starts with a verb, never a bare Yes or No, and the agent
+recommends one with `--recommend <intent> --why "<reason>"`. A `--view` shows facts only. No buttons:
+the options are the taps.
+
+The agent no longer reads the crew state before each post. A post result that ends with "Crew state:
+quiet." or "Crew state: away." tells it. `collie hill state` stays as a verb.
 
 ### Pictures
 
@@ -192,8 +205,10 @@ the facts, and not again in the row above.
 
 ### When a post fails
 
-A refusal prints `hill: <reason> (<code>)` on stderr, then the request id and the command that sends
-the same post once.
+A refusal prints one line on stderr: `hill: <reason> (<code>)`. It does not repeat the command.
+When the same post can pass on a retry, a second line follows:
+`hill: send it again with --request-id <uuid>`. That is exit 5, and exit 3 when the Hill is not
+the cause. With the Hill off (`hill_off`), or after exit 4, there is no second line.
 
 | Exit | Meaning |
 | --- | --- |
@@ -206,7 +221,33 @@ the same post once.
 
 A session holds at most 20 open Decisions. The agents of one machine hold at most 40 together, and the
 Hill at most 200. With the Hill off, every post is refused with: "the Hill is off on this Collie; your
-person can switch it on in Settings, Alerts, on the phone, or with: collie hill on".
+person can switch it on in Settings, Experiments, on the phone, or with: collie hill on".
+
+### When a card closes by itself
+
+The bridge looks at the open cards every 15 seconds. It closes a card only on a fact it read, never
+on a guess.
+
+| What it read | The card closes as |
+| --- | --- |
+| The card's expiry passed | `expired` |
+| The session the answer goes to is gone, at two looks in a row | `undeliverable` |
+| The machine the answer goes to was removed from the crew | `undeliverable` |
+| Your message from the phone started that session's next turn | `withdrawn`, "You wrote in the session" |
+
+A session counts as gone only when the multiplexer answered the look and did not list it. A look
+that failed, a bridge that just started, and a crew machine that does not answer close nothing. A
+machine whose last agent left closes its cards in 15 to 30 seconds.
+
+Your message closes a card only when the session waited for you, and the message started a new turn.
+Nothing is typed for that card: your message already started the turn its answer would have started.
+A steer, or a message queued behind a running turn, only marks the card. Typing in the terminal is
+not seen, and a card waits there as before.
+Such a card stays under Answered until you clear it, so you can still read what was asked.
+
+A crew machine counts as removed only when the lead's roster no longer lists its member id, after
+`collie crew remove` or the machine's own `collie crew leave`. A member id stays the same through
+`collie crew rename`, a re-join with the same machine, and a takeover, so none of them closes a card.
 
 ## How you answer
 
@@ -230,8 +271,8 @@ Go ahead after the e2e gate.
 
 That message goes to the session that posted. When the answer goes to another session, because the
 post named `--reply-to`, or because a trick asked, the message does not quote the title or the label.
-It holds only the id, the option's word, your words and the line "Read the decision with: collie hill
-status <id>". Another session must not carry the poster's own words with your authority.
+It holds only the id, the option's word, your words and the line
+`"Read the decision with: collie hill status <id>"`. Another session must not carry the poster's own words with your authority.
 
 ## Receipts
 
@@ -239,24 +280,30 @@ After a tap the card says "Sending…", then one line that says what came of it.
 
 | The card says | What happened |
 | --- | --- |
-| "Sent to <session>" | The answer was typed into the session |
-| "Sent. <session> gets it when its turn ends" | The session was busy, and the message waits for its turn |
+| "Sent to `<session>`" | The answer was typed into the session |
+| "Sent. `<session>` gets it when its turn ends" | The session was busy, and the message waits for its turn |
 | "Sent, not confirmed" | The send did not confirm. The session can read the answer with `collie hill status` |
 | "Dismissed" | The card is closed, and nothing was sent |
-| "Recorded by <trick>" | A trick took your answer |
+| "Recorded by `<trick>`" | A trick took your answer |
 | "Now running the new version." | You said yes to a trick's new version or to a proposed trick |
 | "Kept the old version." | You kept the version that runs |
-| "Sent, but <trick> did not take it" | The message went, and the trick's program failed on the answer. Collie does not retry it |
-| "Not accepted" or "Not accepted: <reason>" | The bridge refused it. For example "an answer in words is required" |
+| "Sent, but `<trick>` did not take it" | The message went, and the trick's program failed on the answer. Collie does not retry it |
+| "Not accepted" or "Not accepted: `<reason>`" | The bridge refused it. For example "an answer in words is required" |
 | "This Decision was already answered" | Someone answered first |
 | "The session that asked has ended" | There is no session to send to. The Decision closes as undeliverable |
 | "This Decision is closed" | It expired or was withdrawn |
 | "This device may not answer" | The device is read-only |
-| "<machine> is not answering. Your answer was not sent." | A crew machine is down. The card stays open, and you can answer again |
+| "`<machine>` is not answering. Your answer was not sent." | A crew machine is down. The card stays open, and you can answer again |
 | "Not sent." with "Try again" | The answer did not reach the bridge |
 
+When the line Collie typed was not confirmed, the answered card under Answered also says "Your
+answer may not have arrived. Check the session." Collie does not send it again. A line that waits in
+the session's box or inbox does not get this note.
+
 When a Decision closes before your answer lands, the card keeps your words under "Your answer, not
-delivered" and offers "Copy your answer", so you do not lose them.
+delivered" and offers "Copy your answer", so you do not lose them. The same holds for a note you were
+still writing when its card closed. The words stay under Answered until you leave the page, also
+after the card itself left the Hill.
 
 The same record is in `status` as `delivery`: `typed`, `held`, `unknown` or `none`. A Decision is
 never closed because a crew machine went away. Dismiss still closes it, and the phone then says the
@@ -279,32 +326,58 @@ it is `collie hill clear --spoken`, which refuses in a pane where an agent works
 each cleared Decision, so a repeated post with the same request id is refused and not posted twice,
 and a late answer still reads as gone.
 
-## Switch the Hill off
+A card that closed without you needs no Clear. One minute after it expired, was withdrawn or replaced,
+or could not be delivered, the bridge clears it the same way. Collie's own cards wait for your Clear.
+The agent that posted still reads the state of a cleared card: `collie hill status <id>` prints, for
+example, "dc_k3f9x2m8q1a0 is expired; it has left the Hill".
+
+## Switch the Hill on or off
 
 ```sh
-collie hill off
 collie hill on
+collie hill off
 ```
 
-In Settings → Alerts, the first card is the switch **The Hill**: "Agents and tricks ask you here.
-Off: they cannot post, and the Hill leaves the bar." Settings → Tricks shows the Hill too, as its
-first row, tagged "Built in". The row opens an About sheet with the same switch, and it has no Remove.
-If a question waits, the first tap on the switch asks you to tap again before it switches off. The
-commands move the same switch, for every phone of this Collie, and the bridge reads it with no
-restart.
+The Hill is an experiment, and it is off by default. A Collie with no switch file has the Hill off.
+In Settings → Experiments, the card **The Hill** holds the one switch: "Agents and tricks ask you
+here. Off: they cannot post, and the Hill leaves the bar." If a question waits, the first tap on the
+switch asks you to tap again before it switches off. The commands move the same switch, for every
+phone of this Collie, and the bridge reads it with no restart.
+
+The installed WalkyTalky skill names the Hill only while it is on: each change of the switch
+rewrites the skill as `collie skill sync` does. In our tests, a running Claude Code or
+Codex session read the new skill text. If a session does not know the Hill, tell it, or start a new
+session.
+
+A Collie that used the Hill before it became an experiment has the Hill off after the update. Its
+open Decisions stay stored, and their expiry still runs. They show again when you switch the Hill on.
+
+A crew member with no switch file of its own follows the lead. It does not refuse a post or an image
+on its own: it sends them to the lead, and the lead's switch decides. If the lead has the Hill off,
+the post is refused with: "the Hill is off on the lead of this crew; your person can switch it on in
+Settings, Experiments, on the phone". A member whose own switch says off still refuses on its own
+machine. See [Decisions from any machine](crew.md#decisions-from-any-machine).
+
+On a crew member, the installed skill follows that machine's own switch, not the lead's. To give the
+agents on a member the Hill text, run `collie hill on` on that member.
 
 With the Hill off:
 
-- Agents and tricks cannot post, and agents cannot propose a trick. Nothing about a Decision is
-  pushed.
-- The phone takes no answer, so no message is typed and no trick runs.
+- Agents and tricks cannot post. Nothing about a Decision is pushed.
+- The phone takes no answer to their Decisions, so no message is typed and no trick runs.
 - The Hill leaves the bar. Its page says "The Hill is off." and offers "Switch the Hill on".
 - The open Decisions stay, and their expiry still runs. They show again when you switch it on.
 - An agent can still run `status`, `list` and `withdraw`, so it can clean up.
 - The crew state and "Tell all sessions now" are off too.
 
+Collie's own cards about a trick are not Decisions of an agent or a trick, so they need no Hill. The
+switch does not stop them: a proposed trick, a new version, a trick's changed rights and a carried
+trick still get their card, and your answer still acts and reaches the agent that asked. With the Hill
+off they are under **Waiting for your yes** in Settings → Tricks, and the Dashboard shows "A trick
+waits for your yes." with a button to the oldest card. Every limit on proposals still holds.
+
 A post is refused with: "the Hill is off on this Collie; your person can switch it on in Settings,
-Alerts, on the phone, or with: collie hill on".
+Experiments, on the phone, or with: collie hill on".
 
 Notifications for Decisions marked `now` are in
 [Voice input and Web Push](voice-and-push.md#web-push-optional).
@@ -353,22 +426,31 @@ before your yes.
 collie trick propose ~/work/disk-space
 ```
 
-The card's title is "Switch on the trick <id>?". Its summary is Collie's own facts: who proposed it,
+The card's title is "Switch on the trick `<id>`?". Its summary is Collie's own facts: who proposed it,
 how many files it has, and what it asks for. Below come the powers it asks for, the warnings of the
 text search, the author's words under "Its author's words. Collie did not check them.", and then
 every file of its code, as a group of cards.
 
-- **Switch it on** asks for a second tap, "Yes, switch on". Collie reads the stored files again and
+- **Switch it on** is one tap, once every card of the code was on screen. Collie reads the stored files again and
   installs them only when their hash matches the card. The trick is then on, approved as exactly that
   code.
 - **Not now** drops the stored copy. So do Dismiss, an expiry, and a newer proposal from the same
   session.
 
+Your answer is typed into the session that proposed the trick, and it starts a turn there. After the
+option, one line says what happened: the trick is installed and on, or you declined, the proposal is
+closed and nothing was installed. A Dismiss types nothing.
+
+The first card names the files Collie ships, byte for byte: the helper `trick.ts` and the
+`AGENTS.md` that `collie trick init` writes. No card shows them. Notes the agent changed show only the
+change. A proposal never carries `config.toml`. When the trick drew nothing without it, the first card
+says the trick may show nothing until you add its settings file on the machine.
+
 Collie never recommends either option. A proposal is code from an agent, and your own reading is the
 whole check. So the yes stays off until every card of the code was on screen.
 
 A trick that a proposal made can get a new version the same way. Its card asks "Use the new version
-of <id>?" and replaces the code only on your yes.
+of `<id>`?" and replaces the code only on your yes.
 
 An agent cannot propose a trick that has rules or an agent view: "A trick that gives agents
 instructions cannot be proposed by an agent. Ask your person to add it on the machine." The limits on

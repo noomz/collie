@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 
 import { parseJson } from "../../web/src/lib/json.ts";
 import { HILL_SUMMARY_MAX, type HillCollieRef, type HillDecision, type HillPostInput } from "../../web/src/lib/hill/wire.ts";
+import { viewHasCode } from "../../web/src/lib/hill/code-card.ts";
 import {
+  ACCESS_LINES,
   AGENT_VIEW_PLACE,
   AGENT_VIEW_TAP_WORDS,
   AGENT_VIEW_WORDS,
@@ -16,10 +18,12 @@ import {
   RULES_CHIP,
   RULES_NEVER_AUTO,
   RULES_WORDS,
+  runsWithNoPhone,
   TABLE_LIMITS,
   TEXT_MAX,
   VIEW_LIMITS,
   type PlaceKind,
+  type TrickAccess,
   type TrickManifest,
   type View,
   type ViewNode,
@@ -54,7 +58,13 @@ import { rulesChange, rulesDiffRows } from "./rules-diff.ts";
 // masked in it, and git's output not cut. Collie recommends `use` only when every changed file is
 // shown, the rights did not change and a text search finds nothing new. Otherwise the summary says how
 // much is shown ("1 of 3 files shown."), and a card with no view at all says "The change is too large
-// to show here. Read it on the machine before you say yes." A file name is cleaned for the view (a
+// to show here. Read it on the machine before you say yes." A card whose view shows no code offers
+// "Keep" only (2026-11-17): the yes is then on the machine.
+//
+// EVERY NEW RIGHT SHOWS, OR THERE IS NO "USE" (security read 2, item 1). When the new rights, the inputs
+// sentence, the new instructions and the warnings do not fit one view together, the card offers "Keep"
+// only, its view is the honest line, and its summary says the new version asks for more than the card can
+// show and to read it on the machine (`collie trick check`). A file name is cleaned for the view (a
 // character the view refuses becomes `?`); the walk refuses such names anyway (code-hash.ts).
 //
 // A LINE THE MASK CHANGED IS COUNTED AND NAMED. A file with lines the mask changed (a key, or a hidden
@@ -100,6 +110,8 @@ export interface VersionCardDeps {
   tricks: () => VersionCardTricks | null;
   /** The diff of two folders. Default: version-diff.ts `versionDiff`. */
   diff?: (base: string | null, next: string) => Promise<VersionDiff>;
+  /** The platform of the default diff: on Windows no file keeps a mode (version-diff.ts `keepsFileModes`). Default `HOST.platform`. */
+  platform?: NodeJS.Platform;
   /** Whether this bridge leads a crew: a new `inputs` glob then reads on every machine, and the card says so. */
   crew?: () => boolean;
   warn?: (line: string) => void;
@@ -108,10 +120,11 @@ export interface VersionCardDeps {
 /** A place a trick draws in, as the card says it. */
 const PLACE_WORDS = {
   belt: "the belt",
-  session: "a session of its own",
+  session: "a page of its own",
   dashboard: "the Dashboard",
   status: "the status line",
   tabbar: "the bottom bar",
+  menu: "session settings",
 } as const satisfies Readonly<Record<PlaceKind, string>>;
 
 /** The chip word of the place `agent-view` (contract 2): a view of a session that its own agent draws. */
@@ -130,19 +143,115 @@ export const WARN_VERBS = {
   write: "writes files outside its state folder",
   model: "starts an agent or calls a model",
   import: "imports a package Collie does not install",
+  api: "talks to Collie's local API directly, past its helper",
 } as const satisfies Readonly<Record<keyof typeof WARN_PLAIN, string>>;
 
-/** The rights a manifest asks for past the base: its environment names and its places, an agent view among them. */
-function rightsOf(manifest: Pick<TrickManifest, "env" | "places" | "agentView"> | undefined): Set<string> {
+/** The chip of the right `decides = "reply"`: its Decisions may type your answer into a session. */
+export const DECIDES_REPLY_CHIP = "answers go to a session";
+
+/**
+ * The chips of the right `access` (M105 spec 04): the level the trick declares for Collie's local API, in the
+ * plain words of spec 05 (decision 10), since the bridge holds the level for the API. In a summary they
+ * follow "asks for", as `ON_CHIP` does.
+ */
+export const ACCESS_CHIPS = {
+  see: "the state of your machines and sessions",
+  read: "your sessions' screens",
+} as const satisfies Readonly<Record<TrickAccess, string>>;
+
+/**
+ * The card's honest line (Altan, 2026-11-17): a trick with a program (a `run` line) runs unsandboxed as
+ * the person, so the proposal card and the version card say so before the list of what Collie does for
+ * it. A trick that is only an agent view runs no program and gets no such line. Bridge-built English, as
+ * every word of these cards is.
+ */
+export const RUNS_AS_YOU = "This trick runs as you on this machine. It can do there what you can do.";
+
+/** The honest line as the head's first paragraph, for a manifest with a program; nothing for one without. */
+export function runsAsYou(manifest: Pick<TrickManifest, "run"> | undefined): ViewNode[] {
+  return manifest?.run === undefined ? [] : [{ kind: "para", text: RUNS_AS_YOU }];
+}
+
+/** The line of a trick that reacts (`on`, `watch`): it starts with no phone open. Bridge-built English, as every word of these cards is (2026-11-17). */
+export const KEEPS_RUNNING = "It keeps running with no phone open.";
+
+/** {@link KEEPS_RUNNING} as one paragraph, for a manifest that has a program and an `on` or `watch`; nothing for one without. */
+export function keepsRunning(manifest: Pick<TrickManifest, "run" | "on" | "watch"> | undefined): ViewNode[] {
+  return manifest !== undefined && runsWithNoPhone(manifest) ? [{ kind: "para", text: KEEPS_RUNNING }] : [];
+}
+
+/**
+ * The paragraph of the level a trick declares, after the honest line: the one line of decision 3, or nothing
+ * for `none`. Never the words "permission" or "can only": a level is what the trick declares, not a wall.
+ */
+export function accessLine(access: TrickAccess | undefined): ViewNode[] {
+  return access === undefined ? [] : [{ kind: "para", text: ACCESS_LINES[access] }];
+}
+
+/**
+ * The level a version raises, or undefined: `see` when it adds `see` to none, `read` when it adds `read` to none
+ * or to `see`. A version that keeps the level or lowers it raises nothing, so no line and no new right.
+ */
+export function raisedAccess(base: Pick<TrickManifest, "access"> | undefined, next: Pick<TrickManifest, "access"> | undefined): TrickAccess | undefined {
+  const order = { see: 1, read: 2 } as const satisfies Readonly<Record<TrickAccess, number>>;
+  const was = base?.access === undefined ? 0 : order[base.access];
+  const now = next?.access === undefined ? 0 : order[next.access];
+  return now > was ? next?.access : undefined;
+}
+
+/** The chip of the right `on` (M105 step one): the trick runs when a session's state changes. */
+export const ON_CHIP = "runs when a session changes state";
+
+/** The chip of the right `watch` (M105 step one): the trick runs when one of these files changes. */
+export function watchChip(paths: readonly string[]): string {
+  return `runs when these files change: ${paths.join(", ")}`;
+}
+
+type RightsManifest = Pick<TrickManifest, "env" | "places" | "agentView" | "decides" | "on" | "watch" | "access">;
+
+/**
+ * The rights a manifest asks for past the base: its environment names, its places (an agent view among
+ * them), `decides`, each event of `on` and each path of `watch`. A key per right, so a version that names
+ * one more event or path shows as new.
+ */
+function rightsOf(manifest: RightsManifest | undefined): Set<string> {
   if (manifest === undefined) return new Set();
   const places: string[] = [...manifest.places, ...(manifest.agentView === true ? [AGENT_VIEW_PLACE] : [])];
-  return new Set([...(manifest.env ?? []).map((name) => `env:${name}`), ...places.map((place) => `place:${place}`)]);
+  const decides = manifest.decides === undefined ? [] : [`decides:${manifest.decides}`];
+  // `read` holds `see`: a version that lowers `read` to `see` asks for nothing new.
+  const access = manifest.access === undefined ? [] : manifest.access === "read" ? ["access:see", "access:read"] : ["access:see"];
+  return new Set([
+    ...access,
+    ...(manifest.env ?? []).map((name) => `env:${name}`),
+    ...places.map((place) => `place:${place}`),
+    ...decides,
+    ...(manifest.on ?? []).map((event) => `event:${event}`),
+    ...(manifest.watch ?? []).map((path) => `watch:${path}`),
+  ]);
+}
+
+/** One right as its chip says it. `event:` and `watch:` rights are grouped by {@link newRights}, never here. */
+function rightWords(right: string): string {
+  if (right.startsWith("env:")) return right.slice(4);
+  if (right.startsWith("decides:")) return DECIDES_REPLY_CHIP;
+  if (right.startsWith("access:")) return right === "access:read" ? ACCESS_CHIPS.read : ACCESS_CHIPS.see;
+  return placeWords(right.slice(6));
+}
+
+/** The chips of a set of rights: the plain ones, then one for the events and one that lists the paths. */
+function chipsOf(rights: readonly string[]): string[] {
+  const events = rights.some((right) => right.startsWith("event:")) ? [ON_CHIP] : [];
+  const paths = rights.filter((right) => right.startsWith("watch:")).map((right) => right.slice(6));
+  // `access:see` beside `access:read` is one right: the higher level says it.
+  const higher = rights.includes("access:read");
+  const plain = rights.filter((right) => !right.startsWith("event:") && !right.startsWith("watch:") && !(higher && right === "access:see")).map(rightWords);
+  return [...plain, ...events, ...(paths.length > 0 ? [watchChip(paths)] : [])];
 }
 
 /** What the new version asks for that the approved one did not, as chip words. */
-export function newRights(base: Pick<TrickManifest, "env" | "places" | "agentView"> | undefined, next: Pick<TrickManifest, "env" | "places" | "agentView"> | undefined): string[] {
+export function newRights(base: RightsManifest | undefined, next: RightsManifest | undefined): string[] {
   const was = rightsOf(base);
-  return [...rightsOf(next)].filter((right) => !was.has(right)).map((right) => (right.startsWith("env:") ? right.slice(4) : placeWords(right.slice(6))));
+  return chipsOf([...rightsOf(next)].filter((right) => !was.has(right)));
 }
 
 /** The `inputs` globs the new version reads that the approved one did not (contract 2, M99). */
@@ -177,6 +286,20 @@ export function filesSentence(count: number): string {
 
 /** The summary's sentence for a card whose view could not be made at all. */
 export const VERSION_NOT_SHOWN = "The change is too large to show here. Read it on the machine before you say yes.";
+
+/**
+ * The summary's sentence for a card that cannot show every new right (security read 2, item 1). Such a card
+ * offers "Keep" only: the version is read and taken on the machine.
+ */
+export const VERSION_TOO_MUCH_START = "The new version asks for more than this card can show.";
+export function versionTooMuch(id: string): string {
+  return `${VERSION_TOO_MUCH_START} Read it on the machine with collie trick check, then take it there with collie trick on ${id}.`;
+}
+
+/** Whether a list of nodes fits one Decision's view whole, as the schema reads it back. */
+function fitsWhole(nodes: readonly ViewNode[]): boolean {
+  return bytesOf([...nodes]) <= DECISION_VIEW_LIMITS.bytes && checked([...nodes]) !== undefined;
+}
 
 /** "1 of 3 files shown." */
 export function shownSentence(shown: number, total: number): string {
@@ -216,20 +339,60 @@ export function versionCard(subject: TrickVersionSubject, diff: VersionDiff, cre
   // The head of the view: the rights as chips (the new instructions as one more), then each new right in
   // the words a person reads, then the inputs and the warnings.
   const lines = [...(viewNew ? [AGENT_VIEW_WORDS, AGENT_VIEW_TAP_WORDS] : []), ...(newRules ? [RULES_WORDS] : [])];
-  const facts = [...rightsHead("New rights", newRules ? [...rights, RULES_CHIP] : rights, warnings, reads.length > 0 ? inputsSentence(reads, crew) : null), ...maskedNotes(diff.files), ...lines.map((text): ViewNode => ({ kind: "para", text }))];
+  // The level the version raises, in its one line right after the honest line (M105 spec 04).
+  const accessNodes = accessLine(raisedAccess(base, next));
+  // The one line of a trick that reacts, right after the rights lines (Altan, 2026-11-17).
+  const reactNodes = keepsRunning(next);
+  const plainFacts = [...accessNodes, ...rightsHead("New rights", newRules ? [...rights, RULES_CHIP] : rights, warnings, reads.length > 0 ? inputsSentence(reads, crew) : null), ...reactNodes, ...maskedNotes(diff.files), ...lines.map((text): ViewNode => ({ kind: "para", text }))];
   // The code the card shows beside the rules: every changed file but the rules file, which shows whole on its own.
   const code = rules === null ? diff : { ...diff, files: diff.files.filter((file) => file.rel !== rules.rel) };
   const rulesNodes = rules === null ? [] : rulesView(rules);
+  // The honest line opens every head this card builds: the single view, the group's first card and the
+  // rules fallbacks below.
+  const honest = runsAsYou(next);
+  const facts = [...honest, ...plainFacts];
+  // Contract 3: a new or changed field is named, so the yes covers what the trick will ask the person for.
+  facts.push(...asksForChange(base, next));
+  // Every new right and power shows, or there is no "Use" (security read 2, item 1): when the facts do not
+  // fit one view, the card offers "Keep" only, its view is the honest line, and its summary sends the person
+  // to the machine. The same holds for every right the head lists: environment names, places, `decides`,
+  // `on`, `watch`, the `inputs` sentence, new instructions and the warnings.
+  // A changed field list is something new too: it changes what the trick asks the person for (review G, point 2).
+  const somethingNew = rights.length > 0 || newRules || viewNew || reads.length > 0 || warnings.length > 0 || fieldsChanged(base, next);
+  if (somethingNew && !fitsWhole(facts)) {
+    const tooMuch = keepOnly({
+      title: versionTitle(subject.name),
+      summary: `${filesSentence(fileCount)} ${versionTooMuch(subject.id)}`,
+      options: [{ intent: "keep", label: "Keep the old version" }],
+      text: "none",
+      priority: "today",
+      recommends: null,
+    });
+    return honest.length > 0 ? { ...tooMuch, view: honest } : tooMuch;
+  }
   const oneHead = [...facts, ...rulesNodes];
   const rulesFit = rules === null || (oneHead.length <= VIEW_LIMITS.root.max && bytesOf(oneHead) <= DECISION_VIEW_LIMITS.bytes && checked(oneHead) !== undefined);
   // The view is what the person reads before the yes: how much of the change it holds decides the rest.
-  const shown = rulesFit ? fitView(oneHead, code) : fitView([...facts, rulesNote(1)], code);
-  const shownFiles = shown.shown + (rules !== null && rulesFit && shown.view !== null ? 1 : 0);
+  // It is fitted twice. Without the honest line, as before it existed: when that fit is no view, the
+  // change is "not shown". With the line first, for the view itself, so its bytes count. The honest line
+  // is never left out: when no view fits (the guard above has made sure the facts do), the card's view is
+  // the line alone and the summary says to read the change on the machine.
+  const bare = rulesFit ? fitView([...plainFacts, ...rulesNodes], code) : fitView([...plainFacts, rulesNote(1)], code);
+  const withLine = rulesFit ? fitView(oneHead, code) : fitView([...facts, rulesNote(1)], code);
+  const notShown = bare.view === null || withLine.view === null;
+  const shown: VersionViewShown = notShown ? { view: honest.length > 0 ? honest : null, shown: 0, headFits: withLine.headFits } : withLine;
+  const shownFiles = notShown ? 0 : shown.shown + (rules !== null && rulesFit ? 1 : 0);
   const total = Math.max(fileCount, diff.files.length);
-  const whole = shown.view !== null && shownFiles >= total;
-  const tail = shown.view === null ? ` ${VERSION_NOT_SHOWN}` : whole ? "" : ` ${shownSentence(shownFiles, total)}`;
-  // A long list of new rights is cut to its gist so the summary stays within the Hill's cap; the view lists every one.
-  const short = rights.length > 0 || newRules ? "It asks for new rights, listed below." : "It does something new, listed below.";
+  const whole = !notShown && shownFiles >= total;
+  // A5: whether the card holds every byte of the change as it is. No line masked or turned into `?`, no file
+  // left out for its size or for not being text, and every changed file in the diff. {@link yesWhenWhole}.
+  // The rules file shows from its own text (`rulesView`, the rules' cards), not from a hunk.
+  const asItIs = diff.files.length >= fileCount && diff.files.every((file) => file.cut !== true && file.big !== true && (file.hunk !== null || file.rel === rules?.rel));
+  const tail = notShown ? ` ${VERSION_NOT_SHOWN}` : whole ? "" : ` ${shownSentence(shownFiles, total)}`;
+  // A long list of new rights is cut to its gist so the summary stays within the Hill's cap; the view lists
+  // every one (the guard above). "listed below" only when the head lists something.
+  const listed = plainFacts.length > reactNodes.length;
+  const short = rights.length > 0 || newRules ? (listed ? "It asks for new rights, listed below." : "It asks for new rights.") : listed ? "It does something new, listed below." : "It does something new.";
   const full = `${filesSentence(fileCount)} ${fact}${tail}`;
   const summary = [...full].length <= HILL_SUMMARY_MAX ? full : `${filesSentence(fileCount)} ${short}${tail}`;
   const options: HillPostInput["options"] = [{ intent: "use", label: "Use the new version" }];
@@ -244,7 +407,11 @@ export function versionCard(subject: TrickVersionSubject, diff: VersionDiff, cre
     priority: "today",
     recommends: powersChanged || warnings.length > 0 || !whole ? null : recommend,
   };
-  const single = shown.view === null ? card : { ...card, view: shown.view };
+  // A card whose view shows no code offers no yes (the lead's decision, 2026-11-17), and neither does one that
+  // does not show every changed file whole and as it is (A5): the phone shows such a card with "Keep" only,
+  // so the bridge makes it that way. Its summary sends the person to the machine.
+  const viewed = shown.view === null ? card : { ...card, view: shown.view };
+  const single = yesWhenWhole(viewed, whole && asItIs && shown.view !== null && viewHasCode(shown.view));
   if (rulesFit && (whole || fileCount > diff.files.length)) return single;
   // Not whole on one card: every line on a group of cards (card-group.ts), the rules first. A line the mask
   // changed shows masked, its card says so, and Collie recommends nothing. More than 8 cards, a file that is
@@ -260,12 +427,15 @@ export function versionCard(subject: TrickVersionSubject, diff: VersionDiff, cre
     const masked = files.some((file) => file.cut === true);
     const many = ` It shows on ${String(group.cards.length + 1)} cards.`;
     const fullGroup = `${filesSentence(fileCount)} ${fact}${many}`;
-    return {
-      ...card,
-      summary: [...fullGroup].length <= HILL_SUMMARY_MAX ? fullGroup : `${filesSentence(fileCount)} ${short}${many}`,
-      recommends: powersChanged || warnings.length > 0 || masked ? null : recommend,
-      group: { decline: "keep", parts: [first, ...group.cards] },
-    };
+    return yesWhenWhole(
+      {
+        ...card,
+        summary: [...fullGroup].length <= HILL_SUMMARY_MAX ? fullGroup : `${filesSentence(fileCount)} ${short}${many}`,
+        recommends: powersChanged || warnings.length > 0 || masked ? null : recommend,
+        group: { decline: "keep", parts: [first, ...group.cards] },
+      },
+      asItIs,
+    );
   }
   if (rules === null || rulesFit) return single;
   // The rules never fall back to "not shown" (review 8 V-S1): the change line by line on cards of their own;
@@ -284,21 +454,22 @@ export function versionCard(subject: TrickVersionSubject, diff: VersionDiff, cre
     const aloneTail = aloneShown >= total ? "" : ` ${shownSentence(aloneShown, total)}`;
     const many = ` It shows on ${String(alone.cards.length + 1)} cards.`;
     const fullAlone = `${filesSentence(fileCount)} ${fact}${aloneTail}${many}`;
-    return {
-      ...card,
-      summary: [...fullAlone].length <= HILL_SUMMARY_MAX ? fullAlone : `${filesSentence(fileCount)} ${short}${many}`,
-      recommends: null,
-      group: { decline: "keep", parts: [fitted.view, ...alone.cards] },
-    };
+    return yesWhenWhole(
+      {
+        ...card,
+        summary: [...fullAlone].length <= HILL_SUMMARY_MAX ? fullAlone : `${filesSentence(fileCount)} ${short}${many}`,
+        recommends: null,
+        group: { decline: "keep", parts: [fitted.view, ...alone.cards] },
+      },
+      aloneShown >= total && asItIs,
+    );
   }
   const fullMachine = `${filesSentence(fileCount)} ${fact} ${RULES_ON_MACHINE}`;
   const machineView = checked([...facts, { kind: "line", text: rulesOnMachineLine(subject.id), attrs: { role: "note" } }]);
-  const machine: Omit<HillPostInput, "requestId"> = {
+  const machine = keepOnly({
     ...card,
     summary: [...fullMachine].length <= HILL_SUMMARY_MAX ? fullMachine : `${filesSentence(fileCount)} ${RULES_ON_MACHINE}`,
-    options: [{ intent: "keep", label: "Keep the old version" }],
-    recommends: null,
-  };
+  });
   if (machineView !== undefined) machine.view = machineView;
   return machine;
 }
@@ -399,6 +570,27 @@ export function versionViewShown(rights: readonly string[], warnings: readonly (
   return fitView(rightsHead("New rights", rights, warnings, reads), diff);
 }
 
+/** The words a card names a trick's fields with (contract 3): "Asks you for: Repository, Branch." */
+export function asksForSentence(fields: NonNullable<TrickManifest["fields"]>): string {
+  return `Asks you for: ${fields.map((field) => field.label).join(", ")}.`;
+}
+
+/** The line "Asks you for: <labels>" of a trick with `[[field]]`, as paragraphs, or none. The proposal card's line. */
+export function asksForLines(manifest: Pick<TrickManifest, "fields"> | undefined): ViewNode[] {
+  const fields = manifest?.fields ?? [];
+  return fields.length === 0 ? [] : factParas(asksForSentence(fields)).map((text): ViewNode => ({ kind: "para", text }));
+}
+
+/** Whether the new version's field list differs from the approved copy's (a new, changed or removed field). */
+export function fieldsChanged(base: Pick<TrickManifest, "fields"> | undefined, next: Pick<TrickManifest, "fields"> | undefined): boolean {
+  return JSON.stringify(base?.fields ?? []) !== JSON.stringify(next?.fields ?? []);
+}
+
+/** The version card's line: the new version's fields, when they are new or changed against the approved copy's. */
+export function asksForChange(base: Pick<TrickManifest, "fields"> | undefined, next: Pick<TrickManifest, "fields"> | undefined): ViewNode[] {
+  return fieldsChanged(base, next) ? asksForLines(next) : [];
+}
+
 /**
  * Text in paragraphs of at most {@link TEXT_MAX} characters, split only after ", ": every part shows, none
  * is cut (crew slice 8 review F1). A part is a right or a glob, which the manifest keeps far shorter.
@@ -465,8 +657,8 @@ function fitCode(head: readonly ViewNode[], diff: VersionDiff): VersionViewShown
     if (rows > 0) view.push(filesTable(files, rows));
     let shown = 0;
     const listed = new Set(files.slice(0, rows).map((file) => file.rel));
-    // A row whose bit alone moved has no line to show: the row is the whole change.
-    shown += files.slice(0, rows).filter((file) => file.hunk !== null && file.hunk.length === 0 && file.mode !== undefined).length;
+    // A file counts as shown only by a diff node of its own: a bit that alone moved has its one line
+    // (version-diff.ts `noLineChange`), so no card counts a file whose code part shows nothing (2026-11-17).
     for (const [i, file] of largest.slice(0, hunks).entries()) {
       const hunk = hunkNode(file, i === hunks - 1 ? lines : DIFF_LIMITS.lines);
       if (hunk === null) continue;
@@ -519,7 +711,7 @@ export class VersionCards implements TrickVersionsPort {
 
   constructor(deps: VersionCardDeps) {
     this.deps = deps;
-    this.diff = deps.diff ?? ((base, next) => versionDiff({ base, next, filesMax: GROUP_FILES_MAX }));
+    this.diff = deps.diff ?? ((base, next) => versionDiff({ base, next, filesMax: GROUP_FILES_MAX, platform: deps.platform }));
     this.warn = deps.warn ?? (() => undefined);
   }
 
@@ -605,6 +797,23 @@ export class VersionCards implements TrickVersionsPort {
   }
 }
 
+/** A card with "Keep" alone and no recommendation: what a version card with no code to show offers. */
+function keepOnly(card: Omit<HillPostInput, "requestId">): Omit<HillPostInput, "requestId"> {
+  return { ...card, options: (card.options ?? []).filter((option) => option.intent === "keep"), recommends: null };
+}
+
+/**
+ * THE ONE RULE OF A VERSION CARD'S YES (A5): a card that cannot show every byte of the change as it is offers
+ * no yes. `whole` is true only when the card shows code, every changed file is on it whole, and no line was
+ * masked (a key) or turned into `?` (a hidden character), no file was left out for its size or for not being
+ * text. Otherwise "Keep" only ({@link keepOnly}), with the card's own words for why. Every card
+ * {@link versionCard} makes with a yes passes here; the cards with "Keep" only from the start (too many new
+ * rights, rules that cannot show) go through {@link keepOnly} as well.
+ */
+function yesWhenWhole(card: Omit<HillPostInput, "requestId">, whole: boolean): Omit<HillPostInput, "requestId"> {
+  return whole ? card : keepOnly(card);
+}
+
 /** A version change's answer as the card's verdict, its refusal in the card's words. */
 function verdictOf(answer: VersionAnswer): HillCollieVerdict {
   if (answer.ok) return { ok: true };
@@ -621,6 +830,7 @@ function verdictOf(answer: VersionAnswer): HillCollieVerdict {
     case "copy-failed":
     case "has-rules":
     case "windows":
+    case "tricks-off":
       return { ok: false, reason: answer.message };
     default:
       return answer.code satisfies never;

@@ -9,11 +9,11 @@ import { parseWalkyRequest } from "../walky/parse.ts";
 import { isCodePath, officialExtrasHash, trickCodeHash } from "./code-hash.ts";
 import { folderBytes, spawnGit, type GitRunner } from "./fetch.ts";
 import { OFFICIAL_FETCH_BYTES_MAX, OFFICIAL_GIT, OFFICIAL_LINES, OfficialTricks, type OfficialTricksDeps } from "./official-install.ts";
-import { DESCRIPTION_MAX } from "../../web/src/lib/tricks/schema.ts";
-import { isListedOrigin, isUnlistedOfficialOrigin, officialStanding, officialStateOf, officialWire, parseOfficialList, renderOfficialList, shippedOfficialList, OFFICIAL_ENTRIES_MAX, OFFICIAL_PREVIOUS_MAX, OFFICIAL_REPOS, type OfficialEntry } from "./official.ts";
+import { DESCRIPTION_MAX, TRICK_CONTRACT, TRICKS_WINDOWS_SHELL_LINE } from "../../web/src/lib/tricks/schema.ts";
+import { isListedOrigin, isUnlistedOfficialOrigin, officialStanding, officialStateOf, officialWire, parseOfficialList, pinnedPlaces, renderOfficialList, shippedOfficialList, OFFICIAL_ENTRIES_MAX, OFFICIAL_PREVIOUS_MAX, OFFICIAL_REPOS, type OfficialEntry } from "./official.ts";
 import { canonicalRepoUrl, ORIGIN_FILE, parseOrigin, renderOrigin, renderProposalOrigin, sameRepo } from "./origin.ts";
 import { caseClash } from "./proposal-install.ts";
-import { APPROVED_DIR, approvedCopyDir, switchesPath, TRICKS_DIR } from "./paths.ts";
+import { APPROVED_DIR, approvedCopyDir, approvedTrickDir, switchesPath, TRICKS_DIR, trickStateDir, tricksStateDir } from "./paths.ts";
 import { tricksOfficialRoute } from "./routes.ts";
 import { PENDING_SETTLE_MS, TricksService } from "./service.ts";
 import { parseSwitches, withSwitch, writeSwitches } from "./switches.ts";
@@ -40,7 +40,7 @@ const C1 = "1".repeat(40);
 const H1 = "a".repeat(64);
 
 function entryFields(over: Partial<Record<keyof OfficialEntry, JsonValue>> = {}) {
-  return { id: "legs", name: "Legs", description: "Counts legs.", repo: REPO, dir: "legs", commit: C1, hash: H1, extras: H1, rules: null, contract: 1, previous: [], ...over };
+  return { id: "legs", name: "Legs", description: "Counts legs.", repo: REPO, dir: "legs", commit: C1, hash: H1, extras: H1, rules: null, contract: 1, places: ["belt"], previous: [], ...over };
 }
 const entry = (over: Partial<Record<keyof OfficialEntry, JsonValue>> = {}): JsonValue => entryFields(over);
 const listOf = (...tricks: JsonValue[]): JsonValue => ({ v: 1, tricks });
@@ -51,10 +51,10 @@ describe("the list this release carries", () => {
   test("it parses, lists the four tricks and not release-gates, and names only the official repository", () => {
     const list = shippedOfficialList();
     if (!list.ok) throw new Error(list.reason);
-    expect(list.entries.map((e) => e.id)).toEqual(["design-review", "pr-inbox", "running-builds", "morph"]);
-    expect(list.entries.map((e) => e.name)).toEqual(["Design Review", "PR Inbox", "Running Builds", "Morph"]);
-    // One commit of the tricks repository's main pins them all (collie-tricks 0c1e5d8, the helper at v4).
-    expect(new Set(list.entries.map((e) => e.commit))).toEqual(new Set(["0c1e5d82346486815073fedcdb994bc4c2041b55"]));
+    expect(list.entries.map((e) => e.id)).toEqual(["morph", "design-review", "pr-inbox", "running-builds"]);
+    expect(list.entries.map((e) => e.name)).toEqual(["Morph", "Design Review", "PR Inbox", "Running Builds"]);
+    // One commit of the tricks repository's main pins them all (collie-tricks 270e386, the helper v8; Design Review and PR Inbox decide with "reply").
+    expect(new Set(list.entries.map((e) => e.commit))).toEqual(new Set(["270e38621edba959fd1e0acbc4df8dd3de8cbdcb"]));
     expect(list.entries.some((e) => e.id === "release-gates")).toBe(false);
     for (const e of list.entries) {
       expect(OFFICIAL_REPOS).toContain(e.repo);
@@ -67,11 +67,11 @@ describe("the list this release carries", () => {
     }
   });
 
-  test("morph is an agent view with no program: contract 2, its rules pinned by sha256, nothing before it to update from", () => {
+  test("morph is an agent view with no program: contract 2, its rules pinned by sha256, its two earlier commits carrying the same hash", () => {
     const list = shippedOfficialList();
     if (!list.ok) throw new Error(list.reason);
     const morph = list.entries.find((e) => e.id === "morph");
-    expect(morph).toMatchObject({ repo: REPO, dir: "morph", contract: 2, rules: "9ee603082182156a4dd0160b7b8eafbf6e83ceba02b8be6cda2f80f6b71d050f", previous: [] });
+    expect(morph).toMatchObject({ repo: REPO, dir: "morph", contract: 2, rules: "9ee603082182156a4dd0160b7b8eafbf6e83ceba02b8be6cda2f80f6b71d050f", previous: [{ commit: "9473ce07c1ce1a11ca49510671c71badbe2857ac", hash: morph?.hash }, { commit: "0c1e5d82346486815073fedcdb994bc4c2041b55", hash: morph?.hash }] });
     expect(morph?.description).toBe("Your agent answers with one screen you can tap, not a wall of text.");
   });
 
@@ -111,7 +111,7 @@ describe("the strict reader", () => {
     ["a description with a direction mark", listOf(entry({ description: "Counts ‮legs." }))],
     ["a description past the cap", listOf(entry({ description: "x".repeat(141) }))],
     ["an empty name", listOf(entry({ name: "" }))],
-    ["a contract this Collie does not speak", listOf(entry({ contract: 3 }))],
+    ["a contract this Collie does not speak", listOf(entry({ contract: TRICK_CONTRACT + 1 }))],
     ["a contract that is no whole number", listOf(entry({ contract: 1.5 }))],
     ["an unknown key", listOf({ ...entryFields(), url: REPO })],
     ["a missing key", listOf({ id: "legs", name: "Legs", description: "x", repo: REPO, dir: "legs", commit: C1, contract: 1, previous: [] })],
@@ -221,6 +221,7 @@ async function rig(entries: OfficialEntry[], extra: Partial<OfficialTricksDeps> 
   };
   const held = { entries };
   const service = new TricksService({
+    feature: { on: () => true },
     configDir,
     stateDir,
     memberId: "lodge",
@@ -282,7 +283,7 @@ const EXTRAS = extrasOf({ "config.toml": { text: "rows = 8\n" } });
 
 /** A list entry for the fixture: its file URL, a commit, and the hashes the tree's folder has. */
 function fixtureEntry(url: string, commit: string, hash: string, id = "legs", extras = EXTRAS): OfficialEntry {
-  return { id, name: `Trick ${id}`, description: "Counts legs.", repo: url, dir: id, commit, hash, extras, rules: null, contract: 1, previous: [] };
+  return { id, name: `Trick ${id}`, description: "Counts legs.", repo: url, dir: id, commit, hash, extras, rules: null, contract: 1, places: ["belt"], previous: [] };
 }
 
 /** The list's entry moved to another commit, as the maintainer script moves it: the old version goes first into `previous`. */
@@ -301,7 +302,7 @@ const V2_LEGS = { "trick.toml": V2["legs/trick.toml"], "program.sh": V2["legs/pr
 
 describe("an entry's state on this machine", () => {
   const C0 = "0".repeat(40);
-  const e = { id: "legs", repo: REPO, dir: "legs", commit: C1, hash: H1, extras: H1, rules: null, previous: [{ commit: C0, hash: "b".repeat(64) }] };
+  const e = { id: "legs", repo: REPO, dir: "legs", commit: C1, hash: H1, extras: H1, rules: null, places: ["belt"], previous: [{ commit: C0, hash: "b".repeat(64) }] };
   test("absent, added, update and taken", async () => {
     const configDir = await tempDir();
     const dir = join(configDir, TRICKS_DIR, "legs");
@@ -493,6 +494,26 @@ describe.if(posix)("adding from the list", () => {
     }
   });
 
+  test("every git run of an add has an empty temp HOME and CURL_HOME, so no ~/.netrc is read, and the folder goes", async () => {
+    const repo = await fixtureRepo([V1]);
+    const r = await rig([fixtureEntry(repo.url, repo.shas[0] ?? "", await hashOf(V1_LEGS))]);
+    await r.official.install("legs", "add");
+    expect(r.gitEnvs.length).toBeGreaterThan(2);
+    const homes = new Set<string | undefined>();
+    for (const env of r.gitEnvs) {
+      expect(env.HOME).toBeDefined();
+      expect(env.CURL_HOME).toBe(env.HOME);
+      expect(env.XDG_CONFIG_HOME).toBe(env.HOME);
+      expect(env.USERPROFILE).toBe(env.HOME);
+      homes.add(env.HOME);
+    }
+    expect(homes.size).toBe(1);
+    const [home] = [...homes];
+    // It lived under the fetch's temp folder, not the unit's own HOME (the rig sets one), and the folder went.
+    expect(home?.startsWith(tricksStateDir(r.stateDir))).toBe(true);
+    expect(await stat(home ?? "/nonexistent").catch(() => null)).toBeNull();
+  });
+
   test("another hash than the list's installs nothing, removes what was fetched, and says so plainly", async () => {
     const repo = await fixtureRepo([V1]);
     const r = await rig([fixtureEntry(repo.url, repo.shas[0] ?? "", "b".repeat(64))]);
@@ -615,6 +636,74 @@ describe.if(posix)("adding from the list", () => {
     expect(parseSwitches(await readFile(switchesPath(r.stateDir), "utf8")).switches.on.has("legs")).toBe(false);
   });
 
+  test("review J note: a copy left under .collie-approved by a removed trick never carries to a new trick of the same id", async () => {
+    const repo = await fixtureRepo([V1, V2]);
+    const [c1, c2] = [repo.shas[0] ?? "", repo.shas[1] ?? ""];
+    const [h1, h2] = [await hashOf(V1_LEGS), await hashOf(V2_LEGS)];
+    const r = await rig([fixtureEntry(repo.url, c1, h1)]);
+    expect((await r.official.install("legs", "add")).status).toBe(200);
+    expect((await r.service.setSwitch("lodge", "legs", true)).status).toBe(200);
+    const first = approvedCopyDir(r.configDir, "legs", h1);
+    expect((await stat(first)).isDirectory()).toBe(true);
+    // The old trick leaves: switched off, its folder removed by hand (`collie trick remove` would clear the copies itself).
+    await mkdir(join(first, "inputs"), { recursive: true });
+    await writeFile(join(first, "inputs", "stale.txt"), "left by the old trick");
+    expect((await r.service.setSwitch("lodge", "legs", false)).status).toBe(200);
+    await rm(trickDir(r, "legs"), { recursive: true, force: true });
+    expect((await stat(first)).isDirectory()).toBe(true);
+    // A different trick of the same id is added: the old copy goes, and the switch must ask for the new code.
+    r.entries = [fixtureEntry(repo.url, c2, h2)];
+    expect((await r.official.install("legs", "add")).status).toBe(200);
+    expect(await stat(first).catch(() => null)).toBeNull();
+    expect(await stat(approvedTrickDir(r.configDir, "legs")).catch(() => null)).toBeNull();
+    // The phone showed the old code's hash: refused, nothing approved.
+    const moved = await r.service.setSwitch("lodge", "legs", true, h1);
+    expect(moved).toMatchObject({ status: 409, body: { error: "moved" } });
+    expect(parseSwitches(await readFile(switchesPath(r.stateDir), "utf8")).switches.on.has("legs")).toBe(false);
+    // The new code's hash: approved, and what runs is the new bytes only.
+    expect((await r.service.setSwitch("lodge", "legs", true, h2)).status).toBe(200);
+    const kept = parseSwitches(await readFile(switchesPath(r.stateDir), "utf8")).switches.on.get("legs");
+    expect(kept?.hash).toBe(h2);
+    expect(await readFile(join(approvedCopyDir(r.configDir, "legs", h2), "program.sh"), "utf8")).toContain("# two");
+    expect(await readdir(approvedTrickDir(r.configDir, "legs"))).toEqual([h2.slice(0, 16)]);
+    // The same code again from another add: a copy of equal code hashes the same and would be kept as it is,
+    // with whatever its writable folders hold, so nothing may be there to keep.
+    const second = approvedCopyDir(r.configDir, "legs", h2);
+    await mkdir(join(second, "inputs"), { recursive: true });
+    await writeFile(join(second, "inputs", "stale.txt"), "left by the second trick");
+    expect((await r.service.setSwitch("lodge", "legs", false)).status).toBe(200);
+    await rm(trickDir(r, "legs"), { recursive: true, force: true });
+    expect((await r.official.install("legs", "add")).status).toBe(200);
+    expect((await r.service.setSwitch("lodge", "legs", true, h2)).status).toBe(200);
+    expect(await stat(join(second, "inputs", "stale.txt")).catch(() => null)).toBeNull();
+    expect(await readFile(join(second, "program.sh"), "utf8")).toContain("# two");
+  });
+
+  test("review J note: a stale switch entry with its auto flag and its copies are cleared by an add, and a folder that is there is left alone", async () => {
+    const repo = await fixtureRepo([V1]);
+    const r = await rig([fixtureEntry(repo.url, repo.shas[0] ?? "", await hashOf(V1_LEGS))]);
+    const old = "c".repeat(64);
+    await writeSwitches(r.stateDir, { on: new Map([["legs", { at: "2026-11-09T09:00:00Z", hash: old, auto: true, by: "phone", powers: null }]]), version: 3 });
+    await mkdir(approvedCopyDir(r.configDir, "legs", old), { recursive: true });
+    expect((await r.official.install("legs", "add")).status).toBe(200);
+    expect(parseSwitches(await readFile(switchesPath(r.stateDir), "utf8")).switches.on.has("legs")).toBe(false);
+    expect(await stat(approvedTrickDir(r.configDir, "legs")).catch(() => null)).toBeNull();
+  });
+
+  test("review J, last read: the state folder a removed trick left is gone when the official add lands, and the views and Hill keys are forgotten", async () => {
+    const repo = await fixtureRepo([V1]);
+    const forgotten: string[] = [];
+    const r = await rig([fixtureEntry(repo.url, repo.shas[0] ?? "", await hashOf(V1_LEGS))], { forgetTrick: (id) => void forgotten.push(id) });
+    const state = trickStateDir(r.stateDir, "legs");
+    await mkdir(join(state, ".collie"), { recursive: true });
+    await writeFile(join(state, ".collie", "values.json"), '{"v":1,"values":{"rows":9}}\n');
+    await writeFile(join(state, "saved.json"), '{"old":true}\n');
+    expect((await r.official.install("legs", "add")).status).toBe(200);
+    expect(await stat(join(state, ".collie", "values.json")).catch(() => null)).toBeNull();
+    expect(await stat(join(state, "saved.json")).catch(() => null)).toBeNull();
+    expect(forgotten).toEqual(["legs"]);
+  });
+
   test("a fetch past the time cap is the network line, and nothing stays", async () => {
     const repo = await fixtureRepo([V1]);
     const r = await rig([fixtureEntry(repo.url, repo.shas[0] ?? "", await hashOf(V1_LEGS))], { timeoutMs: 100 });
@@ -662,6 +751,7 @@ describe.if(posix)("adding from the list", () => {
     expect(none.service.rev()).toBeUndefined();
     // A crew member runs no tricks: no folder means no card there, list or not.
     const member = new TricksService({
+      feature: { on: () => true },
       configDir: await tempDir(),
       stateDir: await tempDir(),
       memberId: "workshop",
@@ -823,7 +913,7 @@ describe.if(posix)("updating an added trick to the list's commit", () => {
     const stateDir = join(root, "state");
     await mkdir(configDir, { recursive: true });
     await mkdir(stateDir, { recursive: true });
-    const service = new TricksService({ configDir, stateDir, memberId: "lodge", world: () => ({ machine: "desk", sessions: [], spaces: [] }), env: { PATH: process.env.PATH ?? "" }, warn: () => {}, now: () => clock.t });
+    const service = new TricksService({ feature: { on: () => true }, configDir, stateDir, memberId: "lodge", world: () => ({ machine: "desk", sessions: [], spaces: [] }), env: { PATH: process.env.PATH ?? "" }, warn: () => {}, now: () => clock.t });
     const held = { entries: [fixtureEntry(repo.url, repo.shas[0] ?? "", h1)] };
     const official = new OfficialTricks({ configDir, stateDir, env: { PATH: process.env.PATH ?? "" }, entries: () => held.entries, lane: (w) => service.officialLane(w), allowFile: true, now: () => clock.t });
     expect((await official.install("legs", "add")).status).toBe(200);
@@ -1037,12 +1127,12 @@ describe("the list pins the rules of a trick that gives agents instructions", ()
     if (!list.ok) throw new Error(list.reason);
     for (const e of list.entries) expect(e.rules).toBe(e.id === "morph" ? "9ee603082182156a4dd0160b7b8eafbf6e83ceba02b8be6cda2f80f6b71d050f" : null);
     expect(parseOfficialList(listOf(entry({ rules: null })))).toMatchObject({ ok: true });
-    expect(parseOfficialList(listOf(entry({ rules: SHA, contract: 2 })))).toMatchObject({ ok: true, entries: [{ rules: SHA }] });
+    expect(parseOfficialList(listOf(entry({ rules: SHA, contract: 2, places: ["agent-view"] })))).toMatchObject({ ok: true, entries: [{ rules: SHA }] });
     const { rules: _gone, ...without } = entryFields();
     expect(parseOfficialList(listOf(without))).toEqual({ ok: false, reason: "legs: the rules are not null or a sha256 of 64 hex digits" });
-    expect(parseOfficialList(listOf(entry({ rules: "nope", contract: 2 })))).toEqual({ ok: false, reason: "legs: the rules are not null or a sha256 of 64 hex digits" });
+    expect(parseOfficialList(listOf(entry({ rules: "nope", contract: 2, places: ["agent-view"] })))).toEqual({ ok: false, reason: "legs: the rules are not null or a sha256 of 64 hex digits" });
     expect(parseOfficialList(listOf(entry({ rules: SHA })))).toEqual({ ok: false, reason: "legs: a trick of contract 1 gives agents no instructions" });
-    const round = parseOfficialList(parseJson(renderOfficialList([{ ...fixtureEntry(REPO, C1, H1), rules: SHA, contract: 2 }])));
+    const round = parseOfficialList(parseJson(renderOfficialList([{ ...fixtureEntry(REPO, C1, H1), rules: SHA, contract: 2, places: ["agent-view"] }])));
     expect(round).toMatchObject({ ok: true, entries: [{ rules: SHA }] });
   });
 
@@ -1050,7 +1140,7 @@ describe("the list pins the rules of a trick that gives agents instructions", ()
     const files = { "morph/trick.toml": { text: VIEW("morph") }, "morph/rules.md": { text: RULES }, "morph/README.md": { text: "# Morph\n" } };
     const repo = await fixtureRepo([files]);
     const code = await hashOf({ "trick.toml": files["morph/trick.toml"], "rules.md": files["morph/rules.md"], "README.md": files["morph/README.md"] });
-    const listed: OfficialEntry = { ...fixtureEntry(repo.url, repo.shas[0] ?? "", code, "morph", extrasOf({})), rules: SHA, contract: 2 };
+    const listed: OfficialEntry = { ...fixtureEntry(repo.url, repo.shas[0] ?? "", code, "morph", extrasOf({})), rules: SHA, contract: 2, places: ["agent-view"] };
     const r = await rig([listed]);
     expect((await r.official.install("morph", "add")).status).toBe(200);
     expect((await readdir(trickDir(r, "morph"))).filter((name) => !name.startsWith(".")).toSorted()).toEqual(["README.md", "rules.md", "trick.toml"]);
@@ -1059,7 +1149,7 @@ describe("the list pins the rules of a trick that gives agents instructions", ()
 
   test("the phone learns that the trick gives instructions, without their text: nothing is fetched before Add", async () => {
     const configDir = await tempDir();
-    const wire = await officialWire(configDir, [{ ...fixtureEntry(REPO, C1, H1), rules: SHA, contract: 2 }, fixtureEntry(REPO, C1, H1, "other")]);
+    const wire = await officialWire(configDir, [{ ...fixtureEntry(REPO, C1, H1), rules: SHA, contract: 2, places: ["agent-view"] }, fixtureEntry(REPO, C1, H1, "other")]);
     expect(wire.map((w) => w.givesRules)).toEqual([true, undefined]);
     expect(wire.some((w) => "rules" in w)).toBe(false);
   });
@@ -1069,7 +1159,7 @@ describe("the list pins the rules of a trick that gives agents instructions", ()
     const repo = await fixtureRepo([files]);
     const code = await hashOf({ "trick.toml": files["morph/trick.toml"], "rules.md": files["morph/rules.md"] });
     const none = extrasOf({});
-    const pinned = (rules: string | null): OfficialEntry => ({ ...fixtureEntry(repo.url, repo.shas[0] ?? "", code, "morph", none), rules, contract: 2 });
+    const pinned = (rules: string | null): OfficialEntry => ({ ...fixtureEntry(repo.url, repo.shas[0] ?? "", code, "morph", none), rules, contract: 2, places: ["agent-view"] });
     for (const wrong of [null, "c".repeat(64)]) {
       const r = await rig([pinned(wrong)]);
       expect(await r.official.install("morph", "add")).toEqual({ status: 422, body: { error: "mismatch", message: OFFICIAL_LINES.mismatch } });
@@ -1079,5 +1169,146 @@ describe("the list pins the rules of a trick that gives agents instructions", ()
     const right = await rig([pinned(SHA)]);
     expect((await right.official.install("morph", "add")).status).toBe(200);
     expect(await readFile(join(trickDir(right, "morph"), "rules.md"), "utf8")).toBe(RULES);
+  });
+});
+
+describe("the list pins the places of each trick (contract 2, the menu place)", () => {
+  const MENU = (id: string, places: string): string => `id = "${id}"\nname = "Trick ${id}"\nrun = "./program.sh"\ncontract = 2\nplaces = ${places}\n`;
+
+  test("every shipped entry pins the places its manifest lists at its commit, and none adds rows to a session's settings yet", () => {
+    const list = shippedOfficialList();
+    if (!list.ok) throw new Error(list.reason);
+    expect(Object.fromEntries(list.entries.map((e) => [e.id, e.places]))).toEqual({
+      "design-review": ["belt", "dashboard", "session", "status", "tabbar"],
+      "pr-inbox": ["belt", "dashboard", "session", "status", "tabbar"],
+      "running-builds": ["dashboard", "session", "status"],
+      morph: ["agent-view"],
+    });
+  });
+
+  test("the pin is read strictly: a list of known place words, sorted, once each, menu and agent-view only at contract 2", () => {
+    expect(parseOfficialList(listOf(entry({ places: ["belt", "menu"], contract: 2 })))).toMatchObject({ ok: true, entries: [{ places: ["belt", "menu"] }] });
+    const { places: _gone, ...without } = entryFields();
+    for (const [places, reason] of [
+      [undefined, "the places are not a list of 1 to 16 place words"],
+      [[], "the places are not a list of 1 to 16 place words"],
+      [["belt", "sidebar"], "the places hold a word that is not a place this Collie draws"],
+      [["menu:*"], "the places hold a word that is not a place this Collie draws"],
+      [["session", "belt"], "the places are not sorted, once each"],
+      [["belt", "belt"], "the places are not sorted, once each"],
+      [["menu"], "a trick of contract 1 adds no rows to a session's settings"],
+      [["agent-view"], "a trick of contract 1 adds no agent view"],
+    ] as const) {
+      const raw = places === undefined ? without : entryFields({ places: [...places] });
+      expect(parseOfficialList(listOf(raw)), JSON.stringify(places)).toEqual({ ok: false, reason: `legs: ${reason}` });
+    }
+    expect(pinnedPlaces({ places: ["session", "belt", "menu"] })).toEqual(["belt", "menu", "session"]);
+    expect(pinnedPlaces({ places: [], agentView: true })).toEqual(["agent-view"]);
+  });
+
+  test("the phone learns that the trick adds rows to a session's settings before Add, from the pin alone", async () => {
+    const configDir = await tempDir();
+    const wire = await officialWire(configDir, [{ ...fixtureEntry(REPO, C1, H1), contract: 2, places: ["belt", "menu"] }, fixtureEntry(REPO, C1, H1, "other")]);
+    expect(wire.map((w) => w.addsMenu)).toEqual([true, undefined]);
+    // The pinned places this Collie draws ride along (2026-11-12), so the row before Add has the places line an
+    // added trick's row has, and Add moves nothing. The add still holds the folder to the pin.
+    expect(wire.map((w) => w.places)).toEqual([["belt", "menu"], ["belt"]]);
+    expect(wire.some((w) => "agentView" in w)).toBe(false);
+    const view = await officialWire(configDir, [{ ...fixtureEntry(REPO, C1, H1, "morph"), contract: 2, places: ["agent-view"] }]);
+    expect(view[0]?.agentView).toBe(true);
+    expect(view[0] !== undefined && "places" in view[0]).toBe(false);
+  });
+
+  test.if(posix)("an add takes only the places the list pins: a folder whose manifest lists other places installs nothing", async () => {
+    const files = { "ci/trick.toml": { text: MENU("ci", '["belt", "menu"]') }, "ci/program.sh": PROGRAM("one") };
+    const repo = await fixtureRepo([files]);
+    const code = await hashOf({ "trick.toml": files["ci/trick.toml"], "program.sh": files["ci/program.sh"] });
+    const pinned = (places: string[]): OfficialEntry => ({ ...fixtureEntry(repo.url, repo.shas[0] ?? "", code, "ci", extrasOf({})), contract: 2, places });
+    for (const wrong of [["belt"], ["belt", "menu", "session"]]) {
+      const r = await rig([pinned(wrong)]);
+      expect(await r.official.install("ci", "add")).toEqual({ status: 422, body: { error: "mismatch", message: OFFICIAL_LINES.mismatch } });
+      expect(await readdir(join(r.configDir, TRICKS_DIR)).catch(() => [])).not.toContain("ci");
+      await expectNoLeftovers(r);
+    }
+    const right = await rig([pinned(["belt", "menu"])]);
+    expect((await right.official.install("ci", "add")).status).toBe(200);
+  });
+
+  test("decides = reply (2026-11-12): the list carries it, the phone learns it before Add, and the add holds the folder to it", async () => {
+    // The reader takes the one word, refuses another and an agent view that carries it, and renders it back.
+    const read = parseOfficialList(listOf(entry({ decides: "reply" })));
+    if (!read.ok) throw new Error(read.reason);
+    expect(read.entries[0]?.decides).toBe("reply");
+    expect(parseOfficialList(parseJson(renderOfficialList(read.entries)))).toEqual(read);
+    expect(renderOfficialList(read.entries)).toContain('"decides": "reply"');
+    expect(parseOfficialList(listOf(entry({ decides: "replies" }))).ok).toBe(false);
+    expect(parseOfficialList(listOf(entry({ contract: 2, places: ["agent-view"], rules: "a".repeat(64), decides: "reply" }))).ok).toBe(false);
+    const plain = parseOfficialList(listOf(entry()));
+    if (!plain.ok) throw new Error(plain.reason);
+    expect(renderOfficialList(plain.entries)).not.toContain("decides");
+    // The wire: `decidesReply` on the pinned entry only.
+    const configDir = await tempDir();
+    const wire = await officialWire(configDir, [{ ...fixtureEntry(REPO, C1, H1), decides: "reply" }, fixtureEntry(REPO, C1, H1, "other")]);
+    expect(wire.map((w) => w.decidesReply)).toEqual([true, undefined]);
+    if (!posix) return;
+    // The add: a folder whose manifest says otherwise than the pin installs nothing.
+    const files = { "inbox/trick.toml": { text: MANIFEST("inbox", 'decides = "reply"\n') }, "inbox/program.sh": PROGRAM("one") };
+    const repo = await fixtureRepo([files]);
+    const code = await hashOf({ "trick.toml": files["inbox/trick.toml"], "program.sh": files["inbox/program.sh"] });
+    const plainPin = fixtureEntry(repo.url, repo.shas[0] ?? "", code, "inbox", extrasOf({}));
+    const wrong = await rig([plainPin]);
+    expect(await wrong.official.install("inbox", "add")).toEqual({ status: 422, body: { error: "mismatch", message: OFFICIAL_LINES.mismatch } });
+    await expectNoLeftovers(wrong);
+    const right = await rig([{ ...plainPin, decides: "reply" }]);
+    expect((await right.official.install("inbox", "add")).status).toBe(200);
+  });
+});
+
+describe("a POSIX trick on the list (fault d of the Windows milestone)", () => {
+  test("posix is true or absent; the list carries it after the places and a Windows bridge adds nothing from it", async () => {
+    const read = parseOfficialList(listOf(entry({ posix: true })));
+    if (!read.ok) throw new Error(read.reason);
+    expect(read.entries[0]?.posix).toBe(true);
+    expect(renderOfficialList(read.entries)).toContain('"posix": true');
+    expect(parseOfficialList(listOf(entry({ posix: false }))).ok).toBe(false);
+    expect(parseOfficialList(listOf(entry({ posix: "yes" }))).ok).toBe(false);
+    const plain = parseOfficialList(listOf(entry()));
+    if (!plain.ok) throw new Error(plain.reason);
+    expect(renderOfficialList(plain.entries)).not.toContain("posix");
+    // The shipped list has no POSIX trick today: every official program is a script.
+    expect(shippedOfficialList()).toMatchObject({ ok: true });
+    const shipped = shippedOfficialList();
+    if (shipped.ok) expect(shipped.entries.filter((e) => e.posix === true).map((e) => e.id)).toEqual([]);
+    // Windows: no fetch, the one sentence. Linux: the add goes on (here to an unreachable source).
+    let fetched = 0;
+    const git: GitRunner = async () => {
+      fetched += 1;
+      return { code: 128, stdout: new Uint8Array(0), stderr: "no", timedOut: false, capped: false };
+    };
+    const pin = { ...fixtureEntry(REPO, C1, H1), posix: true as const };
+    const win = await rig([pin], { platform: "win32", git });
+    expect(await win.official.install("legs", "add")).toEqual({ status: 409, body: { error: "windows-shell", message: TRICKS_WINDOWS_SHELL_LINE } });
+    expect(fetched).toBe(0);
+    const linux = await rig([pin], { platform: "linux", git });
+    expect((await linux.official.install("legs", "add")).status).not.toBe(409);
+    expect(fetched).toBeGreaterThan(0);
+  });
+});
+
+describe("the list's repository facts", () => {
+  test("a read of the list asks for each repository once and carries what the cache holds, stars and a date only", async () => {
+    const url = "https://github.com/AltanS/collie-tricks";
+    const asked: string[][] = [];
+    let held: { stars: number; pushedAt: string } | undefined;
+    const repoFacts = { facts: (u: string) => (u === url ? held : undefined), want: (urls: Iterable<string>) => void asked.push([...urls]) };
+    const commit = "3f2a91c0d4e5f60718293a4b5c6d7e8f90a1b2c3";
+    const r = await rig([fixtureEntry(url, commit, "a".repeat(64)), fixtureEntry(url, commit, "b".repeat(64), "pals")], { repoFacts });
+    const first = (await r.official.reply()).tricks;
+    expect(asked).toEqual([[url]]);
+    expect(first.map((t) => t.repoFacts)).toEqual([undefined, undefined]);
+    held = { stars: 12, pushedAt: "2026-11-10T08:30:00Z" };
+    const second = (await r.official.reply()).tricks;
+    expect(second.map((t) => t.repoFacts)).toEqual([held, held]);
+    expect(Object.keys(second[0]?.repoFacts ?? {}).toSorted()).toEqual(["pushedAt", "stars"]);
   });
 });

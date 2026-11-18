@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import { gitBinary, gitEnv, HARDENING, looksBinary } from "../changes.ts";
+import { HOST } from "../host.ts";
 import { redactText } from "../redact.ts";
 import { CODE_BYTES_MAX, diskTrickFs, unsafeText, walkTrickCode, type TrickFs } from "./code-hash.ts";
 
@@ -60,6 +61,8 @@ export interface ChangedFile {
   gap?: true;
   /** The file became executable (`+x`) or stopped being so (`-x`), its bytes changed or not (review 7). */
   mode?: "+x" | "-x";
+  /** Set when the file is text larger than {@link DIFF_FILE_BYTES_MAX}: it gets no hunk, and a proposal with it is refused as too large (A5). */
+  big?: true;
 }
 
 export interface VersionDiff {
@@ -95,6 +98,18 @@ export interface VersionDiffOptions {
    * its bits kept apart). Absent: read off the disk.
    */
   nextExec?: ReadonlySet<string>;
+  /** The platform: on Windows no file keeps a mode, so the x bit never counts as a change. Default `HOST.platform` (bridge/host.ts). */
+  platform?: NodeJS.Platform;
+}
+
+/**
+ * Whether the platform keeps a file's executable bit. Windows does not: a copy written there reads back with
+ * another mode than a proposal carries, and `chmod` does nothing. So on Windows the x bit is never part of
+ * "changed", no card says a file can or can no longer run as a program, and a version whose only change is
+ * a mode is no change at all.
+ */
+export function keepsFileModes(platform: NodeJS.Platform): boolean {
+  return platform !== "win32";
 }
 
 /** The sums of a folder's code entries, and which of its files are executable. */
@@ -116,6 +131,33 @@ async function sums(dir: string, fs: TrickFs): Promise<Sums> {
     if (entry.kind === "file" && (((await fs.lstat(join(dir, entry.rel)))?.mode ?? 0) & 0o111) !== 0) out.exec.add(entry.rel);
   }
   return out;
+}
+
+/**
+ * The line a card's code shows for a file whose change has no line of its own, so no card of a new version is
+ * ever without code to read (the lead's decision, 2026-11-17). The file's path leads, as git's own header does.
+ */
+export function noLineChange(rel: string, what: "+x" | "-x" | "added" | "removed"): string {
+  switch (what) {
+    case "+x":
+      return `${rel}: mode +x, it can now run as a program`;
+    case "-x":
+      return `${rel}: mode -x, it can no longer run as a program`;
+    case "added":
+      return `${rel}: an empty file, added`;
+    case "removed":
+      return `${rel}: an empty file, removed`;
+    default:
+      return what satisfies never;
+  }
+}
+
+/**
+ * The line a new trick's card carries for a file the proposal marks executable (A5), in the words of the mode
+ * line above: a new trick has no old mode to change from, so it says what the file can do.
+ */
+export function canRunLine(rel: string): string {
+  return `${rel}: mode +x, it can run as a program`;
 }
 
 /** `+x` or `-x` when a file in both folders changed its executable bit. */
@@ -238,10 +280,11 @@ export function readPatch(patch: string): PatchRead {
   return { plus, minus, hunk };
 }
 
-/** Whether a path names a text file small enough to count. */
-async function countable(fs: TrickFs, path: string): Promise<boolean> {
+/** Whether a path names a text file small enough to count, a text file too large to count, or anything else. */
+async function countable(fs: TrickFs, path: string): Promise<"text" | "big" | "other"> {
   const bytes = await fs.read(path, DIFF_FILE_BYTES_MAX + 1);
-  return bytes !== null && bytes.byteLength <= DIFF_FILE_BYTES_MAX && !looksBinary(bytes);
+  if (bytes === null || looksBinary(bytes)) return "other";
+  return bytes.byteLength <= DIFF_FILE_BYTES_MAX ? "text" : "big";
 }
 
 /**
@@ -253,19 +296,20 @@ export async function versionDiff(opts: VersionDiffOptions): Promise<VersionDiff
   const none: Sums = { sum: new Map(), exec: new Set() };
   const [old, now] = await Promise.all([opts.base === null ? Promise.resolve(none) : sums(opts.base, fs), sums(opts.next, fs)]);
   const nowExec = opts.nextExec ?? now.exec;
+  const modes = keepsFileModes(opts.platform ?? HOST.platform);
   const rels = [...new Set([...old.sum.keys(), ...now.sum.keys()])].toSorted();
   const files: ChangedFile[] = [];
   let modeOnly = false;
   for (const rel of rels) {
     const was = old.sum.get(rel);
     const is = now.sum.get(rel);
-    const mode = is === undefined ? undefined : modeChange(rel, old, nowExec);
+    const mode = is === undefined || !modes ? undefined : modeChange(rel, old, nowExec);
     if (was === is && mode === undefined) continue;
     const change: FileChange = was === undefined ? "added" : is === undefined ? "removed" : "changed";
-    // Only the bit moved: nothing to count and no line to show, so it is whole as it is.
+    // Only the bit moved: nothing to count, and one line that says so, so it is whole as it is.
     if (was === is && mode !== undefined) {
-      files.push({ rel, change, plus: 0, minus: 0, hunk: [], mode });
-        modeOnly = true;
+      files.push({ rel, change, plus: 0, minus: 0, hunk: [noLineChange(rel, mode)], mode });
+      modeOnly = true;
       continue;
     }
     const file: ChangedFile = { rel, change, plus: null, minus: null, hunk: null };
@@ -282,12 +326,27 @@ export async function versionDiff(opts: VersionDiffOptions): Promise<VersionDiff
     const left = file.change === "added" || opts.base === null ? "/dev/null" : join(opts.base, file.rel);
     const right = file.change === "removed" ? "/dev/null" : join(opts.next, file.rel);
     // A symlink or a binary is listed, not counted: git would print a link target or "Binary files differ".
-    const isText = (left === "/dev/null" || (await countable(fs, left))) && (right === "/dev/null" || (await countable(fs, right)));
-    if (!isText) continue;
+    const kinds = new Set([left === "/dev/null" ? "text" : await countable(fs, left), right === "/dev/null" ? "text" : await countable(fs, right)]);
+    if (kinds.has("other")) continue;
+    // Text too large to count: no hunk, and a card says it is too large, not that it is no text (A5).
+    if (kinds.has("big")) {
+      file.big = true;
+      continue;
+    }
     const answer = await run(diffArgv(git, left, right)).catch((): DiffRun => ({ code: null, stdout: "", timedOut: false }));
     // `--no-index` exits 1 when the files differ, 0 when they are the same, and anything else on an error.
     if (answer.timedOut || (answer.code !== 0 && answer.code !== 1)) continue;
     const read = readPatch(answer.stdout);
+    // An empty file added or removed: git prints its header and no hunk. One line says what happened. A changed
+    // file with no hunk has nothing a card could show, so it stays unread and no card counts it as shown.
+    if (read.hunk.length === 0) {
+      if (file.change === "changed") continue;
+      file.plus = 0;
+      file.minus = 0;
+      file.hunk = [noLineChange(file.rel, file.change)];
+      counted = true;
+      continue;
+    }
     const lines = read.hunk.map(readViewLine);
     file.plus = read.plus;
     file.minus = read.minus;

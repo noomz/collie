@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MutableRefObject, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MutableRefObject, type ReactNode, type RefObject } from "react";
 import { Icon } from "@/components/icons/icon";
 
 import { AgentIcon } from "@/components/agent-icon";
@@ -17,9 +17,10 @@ import { finished, itemsOf, type ChatItem } from "@/lib/chat-items";
 import { useChatLook, type ChatLook } from "@/lib/chat-look";
 import type { ChatStatus } from "@/lib/chat-window";
 import { stopLeaves, type StopLeaves } from "@/lib/door-queue";
-import { dropPending, unmatched, usePending } from "@/lib/durable-pending";
+import { HANDOVER_KEEP_MS, dropPending, unmatched, usePending } from "@/lib/durable-pending";
 import { clockTime } from "@/lib/format";
 import { t, type MessageKey } from "@/lib/i18n";
+import { holdsMask } from "@/lib/masked-text";
 import { blockOfPin, isPinnable, writingItemId } from "@/lib/message-pins";
 import type { Ask, PinRow, QueuedSendRow } from "@/lib/types";
 import { AskCard, type AskCardProps } from "@/components/ask-card";
@@ -62,6 +63,22 @@ import { cn } from "@/lib/utils";
  */
 const STREAM_BLOCK = "flex min-w-0 flex-col [content-visibility:auto] [contain-intrinsic-size:auto_64px] -m-3 p-3";
 
+/**
+ * A block near the tail (M104): the same box with no `content-visibility`, so a row that arrives there is drawn once,
+ * at its own height, and never first at the 64px placeholder and one frame later at its size. It keeps the intrinsic
+ * size's `auto`, which records the drawn height, so a block that later moves far up and turns `content-visibility:
+ * auto` keeps that height while it is skipped.
+ */
+const NEAR_BLOCK = "flex min-w-0 flex-col [contain-intrinsic-size:auto_64px] -m-3 p-3";
+
+/** How many blocks at the tail are {@link NEAR_BLOCK}s: more than a phone screen holds of new rows. */
+const NEAR_TAIL_BLOCKS = 8;
+
+/** The box of the block at `index` of `count`: skipped while off screen only far above the tail. */
+function blockBox(index: number, count: number): string {
+  return index < count - NEAR_TAIL_BLOCKS ? STREAM_BLOCK : NEAR_BLOCK;
+}
+
 /** A group that is the person's own turn. */
 function isUserGroup(group: readonly ChatItem[] | undefined): boolean {
   return group !== undefined && group.length === 1 && group[0]!.kind === "user";
@@ -77,12 +94,16 @@ function isUserGroup(group: readonly ChatItem[] | undefined): boolean {
  */
 function rhythmClass(rhythm: ChatLook["rhythm"], blocks: readonly (readonly ChatItem[])[], index: number): string {
   if (rhythm === "today" || index === 0) return "";
-  if (isUserGroup(blocks[index])) {
-    return rhythm === "rule"
-      ? "relative mt-3 before:pointer-events-none before:absolute before:inset-x-3 before:top-0 before:h-px before:bg-rule"
-      : "mt-2";
-  }
+  if (isUserGroup(blocks[index])) return userRhythm(rhythm, index);
   return isUserGroup(blocks[index - 1]) ? "" : "-mt-4";
+}
+
+/** The margin of a user turn at `index`, so a pending line stands where the person's turn will stand (M104). */
+function userRhythm(rhythm: ChatLook["rhythm"], index: number): string {
+  if (rhythm === "today" || index === 0) return "";
+  return rhythm === "rule"
+    ? "relative mt-3 before:pointer-events-none before:absolute before:inset-x-3 before:top-0 before:h-px before:bg-rule"
+    : "mt-2";
 }
 
 /**
@@ -212,11 +233,19 @@ function QueuedCard({ queued, sendNow }: { queued: readonly string[]; sendNow: (
 
 /**
  * What a receipt card's buttons ask of the pane view: send the box (`submit`) or empty it (`discard`)
- * on a returned card, or drop an unconfirmed card and press nothing (`dismiss`).
+ * on a returned card, drop an unconfirmed card and press nothing (`dismiss`), or drop it and send its text again
+ * as a new send (`sendAgain`, M102 spec 04).
  */
-export type QueuedCardAction = "submit" | "discard" | "dismiss";
+export type QueuedCardAction = "submit" | "discard" | "dismiss" | "sendAgain";
 
-type QueuedCardAct = ((requestId: string, action: QueuedCardAction) => Promise<boolean>) | null;
+/**
+ * How a card's act ended: true when it was done, false when nothing was (the pane view has said why), and `"gone"` when
+ * the card was no longer waiting, so nothing was sent again (the card says so itself).
+ */
+export type QueuedCardResult = boolean | "gone";
+
+/** A card's act: its request id, the action, and the card's own text (what a `sendAgain` sends again). */
+type QueuedCardAct = ((requestId: string, action: QueuedCardAction, text: string) => Promise<QueuedCardResult>) | null;
 
 /**
  * THE RECEIPT QUEUE (ADR 0122): the sends Collie itself queued behind a running turn, for a harness
@@ -229,8 +258,9 @@ type QueuedCardAct = ((requestId: string, action: QueuedCardAction) => Promise<b
  *   - Returned: the agent holds the text as a draft in its box, so the card says so and offers Send (a
  *     submit of what the box holds) and Discard (the box emptied). A run of texts a Stop gave back
  *     together is ONE card, with one Send and one Discard.
- *   - Unconfirmed: Collie cannot tell where the message went. The card says so, and its one button,
- *     Discard, drops the card and presses nothing.
+ *   - Unconfirmed: Collie cannot tell where the message went. The card says so. Discard drops the card and
+ *     presses nothing; Send again, on its right, drops the card and only then sends its text again as a new send,
+ *     by the person's tap (M102 spec 04). A card that is no longer waiting sends nothing and says so.
  *   - Merged (ADR 0141): the agent's log shows a door's send only inside a longer or changed prompt.
  *     The card says so, with the same one Discard as an unconfirmed card.
  *
@@ -243,7 +273,7 @@ type QueuedCardAct = ((requestId: string, action: QueuedCardAction) => Promise<b
  * PENDING, NEVER RETRYING, like the queue card: a tap disables the card's buttons until the card goes
  * away (the next answer drops it) or {@link SEND_NOW_PENDING_MS} pass, or the act itself failed.
  */
-function ReceiptQueueCards({ rows, act }: { rows: readonly QueuedSendRow[]; act: QueuedCardAct }) {
+export function ReceiptQueueCards({ rows, act }: { rows: readonly QueuedSendRow[]; act: QueuedCardAct }) {
   const waiting = rows.filter((row) => row.state === "queued");
   return (
     <>
@@ -295,7 +325,8 @@ function stopLines(waiting: readonly QueuedSendRow[]): MessageKey[] {
 interface CardButton {
   readonly action: QueuedCardAction;
   readonly word: MessageKey;
-  readonly aria: MessageKey;
+  /** The accessible name, which starts with the word. Absent: the visible word is the name. */
+  readonly aria?: MessageKey;
   readonly variant: "outline" | "ghost";
   readonly slot: string;
 }
@@ -307,6 +338,8 @@ const RETURNED_BUTTONS: readonly CardButton[] = [
 ];
 const UNCONFIRMED_BUTTONS: readonly CardButton[] = [
   { action: "dismiss", word: "chat.stream.unconfirmedDiscard", aria: "chat.stream.unconfirmedDiscardAria", variant: "outline", slot: "stream-unconfirmed-discard" },
+  // Beside Discard, on its right as on the "cannot tell" card (M102 spec 04).
+  { action: "sendAgain", word: "composer.step.sendAgain", variant: "outline", slot: "stream-unconfirmed-send-again" },
 ];
 /** A send that left a door's inbox unrun is in no box: its one Discard drops the card and presses nothing. */
 const LEFT_INBOX_BUTTONS: readonly CardButton[] = [
@@ -332,6 +365,10 @@ function ReceiptCard({
   buttons: readonly CardButton[];
 }) {
   const [pending, setPending] = useState<QueuedCardAction | null>(null);
+  // The card's one line under its words: a Send again that found the card gone says nothing was sent.
+  const [gone, setGone] = useState(false);
+  // A text the bridge masked is dots, not the message: sending it again would type the dots, so no Send again.
+  const shown = buttons.filter((button) => button.action !== "sendAgain" || !holdsMask(row.text));
   useEffect(() => {
     if (pending === null) return;
     const timer = setTimeout(() => setPending(null), SEND_NOW_PENDING_MS);
@@ -342,8 +379,13 @@ function ReceiptCard({
     if (pending !== null || act === null) return;
     setPending(action);
     // A refusal or a failed write has already told the operator why (the pane view's status line).
-    void act(row.requestId, action).then(
-      (done) => (done ? undefined : setPending(null)),
+    setGone(false);
+    void act(row.requestId, action, row.text).then(
+      (done) => {
+        if (done === "gone") setGone(true);
+        if (done !== true) setPending(null);
+        return done;
+      },
       () => setPending(null),
     );
   };
@@ -354,7 +396,7 @@ function ReceiptCard({
         <p className={QUEUED_LABEL}>{t(label)}</p>
         {act !== null && (
           <div className="flex items-center gap-1">
-            {buttons.map((button) => (
+            {shown.map((button) => (
               <Button
                 key={button.action}
                 type="button"
@@ -365,7 +407,7 @@ function ReceiptCard({
                 disabled={pending !== null}
                 aria-busy={pending === button.action}
                 // The accessible name STARTS with the visible word (WCAG 2.5.3, Label in Name).
-                aria-label={t(button.aria)}
+                aria-label={button.aria === undefined ? undefined : t(button.aria)}
                 onClick={() => onTap(button.action)}
               >
                 {pending === button.action ? (
@@ -381,6 +423,11 @@ function ReceiptCard({
       </div>
       <p className="text-xs text-muted-foreground">{t(why)}</p>
       <p className={QUEUED_TEXT}>{row.text}</p>
+      {gone && (
+        <p data-slot="stream-receipt-line" role="status" className="text-xs text-muted-foreground">
+          {t("cannotTell.queuedGone")}
+        </p>
+      )}
     </div>
   );
 }
@@ -398,6 +445,8 @@ const PIN_SEEK_PAGES = 10;
 const JUMP_SETTLE_MS = [100, 250, 500] as const;
 /** The reader's own moves, on the scroller's parent, which end a jump or a walk to a prompt. */
 const JUMP_STOP_INPUTS = ["pointerdown", "click", "wheel", "touchstart", "keydown"] as const;
+/** The reader's own moves on the list that end the room a working row left behind (M104). */
+const ROOM_DROP_INPUTS = ["pointerdown", "wheel", "touchstart"] as const;
 
 /**
  * The topmost block the reader can see, or -1 while the stream's top edge is on screen.
@@ -550,6 +599,9 @@ export function SessionStream({
   questionPending = false,
   agent,
   pins,
+  clearBottom,
+  tail,
+  hasNew = false,
 }: {
   /** The held window plus its one control, from `useChatWindow`. */
   feed: ChatFeed;
@@ -574,6 +626,8 @@ export function SessionStream({
   fontSize: number;
   /** The pane view's one list handle: a send snaps the body it is looking at back to the tail. */
   listRef: RefObject<ChatMessageListHandle | null>;
+  /** What floats over the stream's bottom edge, in px (ChatMessageList `clearBottom`). */
+  clearBottom?: number;
   /**
    * The saved-copy sentence while this window is the phone's saved copy, else `null`. It takes the
    * top slot in place of "Load older" and "Start of the conversation" (see {@link SavedCopyRow}).
@@ -591,7 +645,7 @@ export function SessionStream({
    * Discard on an unconfirmed one. Passed ONLY where this device may write to this pane; leave it out
    * and the cards have no buttons. Resolves false when nothing was done.
    */
-  onReturned?: (requestId: string, action: QueuedCardAction) => Promise<boolean>;
+  onReturned?: (requestId: string, action: QueuedCardAction, text: string) => Promise<QueuedCardResult>;
   /**
    * The open asks of a pane that carries them as data (ADR 0100), and the props every card shares. Each card sits
    * under the block that shows its item, or at the tail when that item is not on screen. The list holds
@@ -627,6 +681,13 @@ export function SessionStream({
     /** Filled with a function that scrolls to the block a pin came from, and says whether the stream holds it (M90). */
     reveal?: MutableRefObject<((pin: Pick<PinRow, "itemId" | "anchor">) => boolean) | null>;
   };
+  /**
+   * What stands last in the thread, after everything else, in the stream's own scroll: a trick this session
+   * proposed (components/session-trick-card.tsx), so it reads like a message and never takes a band of its own.
+   */
+  tail?: ReactNode;
+  /** Something waits below for the person (a trick proposal at the tail): the jump-to-latest arrow wears its dot. */
+  hasNew?: boolean;
 }) {
   // The subscription every `t()` caller owes, plus the counter the memo below needs.
   const { revision } = useLocale();
@@ -661,10 +722,26 @@ export function SessionStream({
   // THE PERSON'S OWN LINES THE PROGRAM HAS NOT WRITTEN BACK YET (lib/durable-pending.ts). Only a durable pane's composer
   // puts any, so every other pane has none and draws nothing here. A line goes when an item of the program's matches it.
   const pending = usePending(address);
-  const { open: lines, done: answered } = useMemo(
-    () => unmatched(pending, window.entries, Date.now()),
-    [pending, window.entries],
+  // The texts the queue cards show: a line the bridge queued goes in the frame its card arrives (M104).
+  const queuedTexts = useMemo(
+    () => (window.status.kind === "live" ? [...window.queued, ...window.queuedSends.map((row) => row.text)] : []),
+    [window.status.kind, window.queued, window.queuedSends],
   );
+  // A line handed over goes at the latest after HANDOVER_KEEP_MS, also when no answer comes in between.
+  const [handoverTick, setHandoverTick] = useState(0);
+  const { open: lines, done: answered } = useMemo(
+    () => {
+      void handoverTick;
+      return unmatched(pending, window.entries, Date.now(), queuedTexts);
+    },
+    [pending, window.entries, queuedTexts, handoverTick],
+  );
+  const handoverAt = lines.find((line) => line.handover === true)?.at;
+  useEffect(() => {
+    if (handoverAt === undefined) return;
+    const timer = setTimeout(() => setHandoverTick((n) => n + 1), Math.max(0, handoverAt + HANDOVER_KEEP_MS - Date.now()) + 50);
+    return () => clearTimeout(timer);
+  }, [handoverAt]);
   const answeredKey = answered.join("\n");
   useEffect(() => {
     if (answeredKey !== "") dropPending(address, answeredKey.split("\n"));
@@ -903,6 +980,50 @@ export function SessionStream({
   // what the stream draws is the thread, and the thread may be running or empty.
   const reading = status.kind === "live" || (starting && (status.kind === "empty" || missing));
 
+  // ── ONE MOVE AT THE TAP (M104) ──────────────────────────────────────────────
+  // A line the composer of a pane with a screen put here (`seen`) is drawn only where the thread is read: a pane whose
+  // journal cannot be read has no thread to put it in. Under it, from the same frame, the working row's room: empty
+  // until the pane works, then "Still working" in the same box, so neither the line's arrival from the log nor the
+  // turn's start moves the tail. The room stays until the answer has landed and the turn has ended.
+  const drawnLines = lines.filter((line) => line.seen === undefined || reading);
+  const composerLines = drawnLines.filter((line) => line.seen !== undefined && line.handover !== true).length;
+  const [roomHeld, setRoomHeld] = useState(false);
+  if (composerLines > 0 && !roomHeld) setRoomHeld(true);
+  if (roomHeld && composerLines === 0 && !working && newest?.kind !== "user") setRoomHeld(false);
+  const liveShown = staticRow && reading;
+  const roomShown = !liveShown && roomHeld && !durable && reading && !questionPending;
+  const slotOn = liveShown || roomShown;
+  // WHEN THE ROW GOES, THE TAIL DOES NOT DROP: its height joins the list's one tail room (`holdRoom`) until the next
+  // row arrives or the reader moves the list.
+  const slotRef = useRef<HTMLDivElement>(null);
+  const slotPx = useRef(0);
+  const wasSlotOn = useRef(slotOn);
+  const [linger, setLinger] = useState<{ px: number; blocks: number; lines: number } | null>(null);
+  if (linger !== null && (slotOn || blocks.length !== linger.blocks || drawnLines.length > linger.lines)) setLinger(null);
+  useLayoutEffect(() => {
+    const was = wasSlotOn.current;
+    wasSlotOn.current = slotOn;
+    const el = slotRef.current;
+    if (slotOn && el !== null) {
+      slotPx.current = el.offsetHeight + (Number.parseFloat(getComputedStyle(el).marginTop) || 0);
+      return;
+    }
+    if (!was || slotOn || slotPx.current <= 0) return;
+    const scroller = listRef.current?.getScrollElement();
+    const pad = scroller ? Number.parseFloat(getComputedStyle(scroller).paddingBottom) || 0 : 0;
+    setLinger({ px: slotPx.current + pad, blocks: blocks.length, lines: drawnLines.length });
+  }, [slotOn, blocks.length, drawnLines.length, listRef]);
+  const lingering = linger !== null;
+  useEffect(() => {
+    const area = listRef.current?.getScrollElement()?.parentElement;
+    if (!lingering || area === null || area === undefined) return;
+    const drop = () => setLinger(null);
+    for (const type of ROOM_DROP_INPUTS) area.addEventListener(type, drop, { passive: true });
+    return () => {
+      for (const type of ROOM_DROP_INPUTS) area.removeEventListener(type, drop);
+    };
+  }, [lingering, listRef]);
+
   return (
     <ChatMessageList
       ref={listRef}
@@ -917,7 +1038,10 @@ export function SessionStream({
       // watching the tail", and it also freezes the mirror text the card dock is built from — so
       // scrolling back through a conversation would stop a permission dialog appearing. Reading
       // older turns is an ordinary act in this body and a rare one in that one.
-      className={look.gutter === "16" ? "px-4 pt-0 pb-3" : "px-3 pt-0 pb-3"}
+      className={look.gutter === "16" ? "px-4 pt-0 pb-[max(0.75rem,var(--tail-room,0px))]" : "px-3 pt-0 pb-[max(0.75rem,var(--tail-room,0px))]"}
+      clearBottom={clearBottom}
+      hasNew={hasNew}
+      holdRoom={linger?.px ?? 0}
       style={textTokens(fontSize)}
       // The pin sits beside the scrollport, so it takes the gutter and the chat font size from here. Only the
       // hugging look does: the look before it keeps the overlay as it was.
@@ -972,7 +1096,7 @@ export function SessionStream({
             item={pinnable ? item : null}
             pinned={item !== null && pins?.pinned.has(item.id) === true}
             onActions={pinnable ? pins?.onActions : undefined}
-            className={rhythm === "" ? STREAM_BLOCK : `${STREAM_BLOCK} ${rhythm}`}
+            className={rhythm === "" ? blockBox(index, blocks.length) : `${blockBox(index, blocks.length)} ${rhythm}`}
           >
             {opensRun && <AgentHead agent={agent} ts={first.ts} />}
             {drawn ? <ItemView item={group[0]!} /> : <ToolGroup items={group} liveOpens={showToolCalls} />}
@@ -1007,9 +1131,9 @@ export function SessionStream({
 
       {/* THE LINES THE PERSON SENT THAT THE PROGRAM HAS NOT WRITTEN BACK (durable panes only), after the program's own
           items and before the working row. Each is replaced in place by the program's item (lib/durable-pending.ts). */}
-      {lines.map((line) => (
-        <div key={line.requestId} data-slot="stream-pending" className={STREAM_BLOCK}>
-          <PendingTurn text={line.text} state={line.state} />
+      {drawnLines.map((line, i) => (
+        <div key={line.requestId} data-slot="stream-pending" className={cn(NEAR_BLOCK, userRhythm(look.rhythm, blocks.length + i))}>
+          <PendingTurn text={line.text} state={line.state} at={line.at} />
         </div>
       ))}
 
@@ -1019,15 +1143,22 @@ export function SessionStream({
       {/* A turn is running. Last of the thread, because that is where its answer will arrive. Drawn
           only where the window is actually being read: a pane whose journal cannot be read is busy
           in the chrome, and saying so HERE would promise a turn this body will never show. */}
-      {staticRow && reading && (
-        <div data-slot="stream-live" className={LIVE_ROW}>
+      {liveShown ? (
+        <div ref={slotRef} data-slot="stream-live" className={LIVE_ROW}>
           {/* The same mark a running step wears inside a card (`chat-cards.tsx` § StepStatus), so
               "still going" looks the same wherever the stream says it. UNNAMED: it leads the word,
               and a name here is the state announced twice (status-badge.tsx § label). */}
           <StatusDot status="working" live className="size-2.5" />
           <span>{t("chat.stream.working")}</span>
         </div>
-      )}
+      ) : roomShown ? (
+        // The working row's room before the pane works (M104): the same box and the same contents, unseen and unread,
+        // so the row that comes in its place moves nothing. It never says "Still working" before the agent works.
+        <div ref={slotRef} data-slot="stream-live-room" aria-hidden className={cn(LIVE_ROW, "invisible")}>
+          <StatusDot status="working" className="size-2.5" />
+          <span>{t("chat.stream.working")}</span>
+        </div>
+      ) : null}
 
       {/* A question waits in the terminal and no card answers it (OmO's banner). One line, the
           needs-you mark and the words, no control: the banner prints no keys a card could send, and
@@ -1078,9 +1209,10 @@ export function SessionStream({
           was wrong for one frame. A NEW pane is the exception, because there nothing was expected:
           Codex has no session before its first prompt, and pi writes no log before its first reply.
           A running turn says so on the row above instead, so the two never stand together. */}
-      {empty && explain === null && reading && !working && lines.length === 0 && (
+      {empty && explain === null && reading && !working && drawnLines.length === 0 && (
         <div className="py-16 text-center text-sm text-muted-foreground">{t("chat.stream.empty")}</div>
       )}
+      {tail}
     </ChatMessageList>
   );
 }

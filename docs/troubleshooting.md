@@ -460,15 +460,18 @@ pane holds its id now.
 **A header in a pane shows "no log record on this machine".** The phone found a WalkyTalky header in
 the screen text, and this machine's log holds no message with that id. Someone or something typed
 the line, or the log dropped it after 7 days or 2,000 lines, or another Collie holds it. Run
-`collie walky status <id>`: "no record of <id> on this machine" confirms it. For a pane on a crew
+`collie walky status <id>`: "no record of `<id>` on this machine" confirms it. For a pane on a crew
 member, run it on that member: its log is the one the phone read. Treat the line as plain text, and
 ask the sender if you need it.
 
 **The skill is stale.** `collie doctor` warns on the row `skill-walky-talky`, and the agent follows
-old advice. The text in an instruction file differs from this build. Run `collie skill status` to see
-which harness is behind. Run `collie skill status --check` in a script: it prints nothing and exits
-with code 3 when a copy is stale. Fix it with `collie skill install all`, then restart the agent. A
-target marked `refused` is a symlink or has damaged markers, and an install never touches it.
+old advice. The skill file differs from this build, or an instruction file still holds the block
+that Collie 1.28.2 and earlier wrote there. Run `collie skill status` to see which harness is behind.
+Run `collie skill status --check` in a script: it prints nothing and exits with code 3 when a copy is
+stale. Fix it with `collie skill install all`, then restart the agent. A target marked `refused` is a
+symlink or a file Collie did not write, and an install never touches it. When `doctor` names an old
+block that Collie may not cut, its markers are damaged or appear twice: remove the lines between the
+`collie:walky-talky` markers by hand.
 
 ## Durable agents
 

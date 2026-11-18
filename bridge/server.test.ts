@@ -6,6 +6,8 @@ import { encodeStyledRegion, styledRegionLines } from "../web/src/lib/styled-reg
 import {
   afterPaneInput,
   isHeldCancel,
+  arrivedRoute,
+  SEND_OFF_TEXT,
   isPaneInput,
   isTopologyWrite,
   freeSpaceName,
@@ -97,11 +99,17 @@ import {
   PAIR_WINDOW_MS,
 } from "./pair-limit.ts";
 import { readFileSync } from "node:fs";
+import { API_VERSION } from "../web/src/lib/api-version.ts";
 import { mkdir, mkdtemp, realpath, rm, symlink, truncate, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { AuditLog, type AuditEntry } from "./audit.ts";
+import { KeyGate } from "./surface/key-gate.ts";
+import { RowRing, SendProtocol, SessionLocks } from "./surface/protocol.ts";
+import { RequestStore } from "./surface/requests.ts";
+import type { SendReceipt } from "../web/src/lib/surface/send.ts";
+import type { JsonValue } from "../web/src/lib/json.ts";
 import { answerPane, memoryAnswerReceipts, NO_ANSWERS } from "./durable/answer.ts";
 import { withOpenAsks, withTurn } from "./durable/pane-asks.ts";
 import { controlPane, memoryControlReceipts, NO_CONTROLS, NO_RAW_INPUT, rawInputRefusal } from "./durable/control.ts";
@@ -173,6 +181,11 @@ import {
 import type { StateEngine } from "./state-engine.ts";
 import { HEAD_CASES, NOT_HEAD_CASES } from "./agent-view/testdata/head-cases.ts";
 import { BAD_HEAD } from "../web/src/lib/agent-view/wire.ts";
+import { readFileSync as readFixture } from "node:fs";
+import { parseAnsi } from "../web/src/lib/ansi.ts";
+import { splitLines } from "../web/src/lib/blocks.ts";
+import { detectPromptSelect } from "../web/src/lib/harness/claude/prompt-select.ts";
+import { DIALOG_CONTRACT } from "../web/src/lib/harness/dialog-contract.ts";
 
 // checkAccess is the API security gate (same-origin/CSRF + optional Tailscale identity). A
 // regression here silently opens remote shell access, so it gets the most direct coverage.
@@ -232,6 +245,7 @@ function cfg(overrides: Partial<Config> = {}): Config {
       openclaw: ["/nope/openclaw"],
       kiro: ["/nope/kiro"],
       "dsh-tui": ["/nope/dsh"],
+      mcode: ["/nope/mcode"],
     },
     submitKeys: ["Enter"],
     commandsFile: "/nope/commands.toml",
@@ -263,9 +277,10 @@ function cfg(overrides: Partial<Config> = {}): Config {
     stateDir: "/tmp/state",
     multiSession: true,
     surfaceShadow: false,
+    inside: false,
     sendProtocol: false,
     walky: true,
-    walkyPairLimit: 6,
+    walkyPairLimit: 12,
     skipServe: false,
     basePath: "/",
     maxUploadBytes: DEFAULT_MAX_UPLOAD_BYTES,
@@ -553,13 +568,15 @@ describe("sendReplySteps — two-step send & partial-failure clarity", () => {
   // A fake client that records calls and can be told to fail either step.
   class FakeClient implements ReplySender {
     readonly calls: string[] = [];
-    constructor(private readonly failOn?: "text" | "keys") {}
+    constructor(private readonly failOn?: "text" | "keys" | "text-late" | "keys-late") {}
     typeText(_paneId: string, _text: string): Promise<MuxAck> {
       this.calls.push("text");
+      if (this.failOn === "text-late") return Promise.resolve(muxUnconfirmed("the text may still arrive"));
       return this.failOn === "text" ? Promise.reject(new Error("text rejected")) : Promise.resolve(muxAck());
     }
     writeKeys(_paneId: string, _keys: readonly string[]): Promise<MuxAck> {
       this.calls.push("keys");
+      if (this.failOn === "keys-late") return Promise.resolve(muxUnconfirmed("the keys may still arrive"));
       return this.failOn === "keys" ? Promise.reject(new Error("keys rejected")) : Promise.resolve(muxAck());
     }
   }
@@ -596,6 +613,22 @@ describe("sendReplySteps — two-step send & partial-failure clarity", () => {
       detail: { reason: "text rejected" },
     });
     expect(client.calls).toEqual(["text"]); // never reached the keys step
+  });
+
+  // M100 spec 03: a write not confirmed in time may still land. Never "not submitted" (which asks for a
+  // second submit by hand), never "nothing delivered" (which lets a screen resend), and never a second key.
+  test("a submit not confirmed in time answers keys.unconfirmed, the text delivered, the key pressed once", async () => {
+    const client = new FakeClient("keys-late");
+    const out = await sendReplySteps(client, "p1", "hello", true, ["Enter"]);
+    expect(out).toMatchObject({ ok: false, textDelivered: true, code: "keys.unconfirmed", detail: { reason: "the keys may still arrive" } });
+    expect(client.calls).toEqual(["text", "keys"]);
+  });
+
+  test("text not confirmed in time: no submit follows, and it is flagged delivered", async () => {
+    const client = new FakeClient("text-late");
+    const out = await sendReplySteps(client, "p1", "hello", true, ["Enter"]);
+    expect(out).toMatchObject({ ok: false, textDelivered: true, code: "reply.send_failed", detail: { reason: "the text may still arrive" } });
+    expect(client.calls).toEqual(["text"]);
   });
 
   test("submit-only (empty text) failure is a plain failure, not the partial-delivery message", async () => {
@@ -708,7 +741,7 @@ describe("pane write prompt binding", () => {
     text?: string;
     submit?: boolean;
     id?: string;
-    expected_prompt?: string | number | null;
+    expected_prompt?: string | readonly string[] | number | null;
     expected_styled?: string | number | null;
     expected_columns?: { start: number; end: number } | number[] | string | null;
     expected_tail_lines?: number | string | null;
@@ -1540,6 +1573,81 @@ describe("pane write prompt binding", () => {
           expect(client.keys).toEqual([]);
           expect(client.texts).toEqual([]);
         }
+      }
+    });
+  });
+
+  // A Claude permission with its self-answer countdown inside the dialog. The phone binds the rows
+  // above the clock sentence and the rows below it as two literal parts; the bridge checks both.
+  describe("a dialog whose own rows hold a self-answer countdown", () => {
+    const BG = readFixture(new URL("../web/src/fixtures/panes/claude--v2303-permission-bash-bg-agent-rm--w160.txt", import.meta.url), "utf8");
+    const sentence = (clock: string) =>
+      `⚠ Claude Code will automatically deny this request in ${clock}, to avoid blocking progress on an unattended session`;
+    /** The capture with the countdown under its explanation row; `other` swaps the command. */
+    function screen(clock: string, other = false): string {
+      const rows = (other ? BG.replace("level.py;", "level.sh;") : BG).split("\n");
+      const at = rows.findIndex((row) => row.includes("Dangerous rm operation"));
+      rows.splice(at + 1, 0, ` \u001b[0m\u001b[2m│\u001b[0m \u001b[38;2;255;193;7m${sentence(clock)}\u001b[0m\r`);
+      return rows.join("\n");
+    }
+    /** What the phone puts in `expected_prompt` for the dialog it showed (dialog-guard `sendBoundKeys`). */
+    function phoneBinding(text: string): string | readonly string[] {
+      const model = detectPromptSelect(splitLines(parseAnsi(text)));
+      expect(model).not.toBeNull();
+      const contract = DIALOG_CONTRACT["prompt-select"];
+      return contract.parts?.(model!) ?? contract.region(model!);
+    }
+    async function tapOn(shown: string, onScreen: string) {
+      const client = new FakePaneClient();
+      client.text = onScreen;
+      const { audit, entries } = auditEntries();
+      const res = await keysPane(asMux(client), cfg(), "w1:p1", request({ keys: ["1"], expected_prompt: phoneBinding(shown) }), audit, "phone", "default");
+      return { res, client, entries };
+    }
+
+    test("the tap in A's last moment does not answer B, another command under the same question and options", async () => {
+      expect(screen("1:20", true)).not.toBe(screen("1:20"));
+      const { res, client, entries } = await tapOn(screen("0:01"), screen("1:20", true));
+      expect(res.status).toBe(409);
+      expect(client.keys).toEqual([]);
+      expect(entries[0]?.detail).toMatchObject({ promptBinding: { checked: true, passed: false } });
+    });
+
+    test("the same dialog a second later, only the clock moved, takes the tap", async () => {
+      for (const clock of ["1:19", "0:59", "0:05"]) {
+        const { res, client } = await tapOn(screen("1:20"), screen(clock));
+        expect(res.status).toBe(200);
+        expect(client.keys).toEqual([["w1:p1", ["1"]]]);
+      }
+    });
+
+    test("the binding is a list only with a clock in the dialog; without one it stays the one string", () => {
+      const parts = phoneBinding(screen("1:20"));
+      expect(Array.isArray(parts)).toBe(true);
+      expect(parts).toHaveLength(2);
+      expect(parts[0]).toContain("level.py;");
+      for (const part of parts) expect(part).not.toContain("automatically deny");
+      expect(Array.isArray(phoneBinding(BG))).toBe(false);
+    });
+
+    test("a list this bridge cannot check is refused with nothing typed", async () => {
+      const [head, rest] = phoneBinding(screen("1:20"));
+      const bad: PaneActionBody[] = [
+        { keys: ["1"], expected_prompt: [rest!] },
+        { keys: ["1"], expected_prompt: [head!, ""] },
+        { keys: ["1"], expected_prompt: [head!, rest!, rest!, rest!, rest!] },
+        { keys: ["1"], expected_prompt: [head!, rest!], expected_styled: "x" },
+        { keys: ["1"], expected_prompt: [head!, rest!], expected_columns: { start: 0, end: 80 } },
+      ];
+      for (const body of bad) {
+        const client = new FakePaneClient();
+        client.text = screen("1:20");
+        const { audit } = auditEntries();
+        const res = await keysPane(asMux(client), cfg(), "w1:p1", request(body), audit, null, "default");
+        expect(res.status).toBe(400);
+        expect(await res.text()).toBe("bad expected_prompt");
+        expect(client.reads).toEqual([]);
+        expect(client.keys).toEqual([]);
       }
     });
   });
@@ -3080,6 +3188,19 @@ describe("bridgeConfigBody — /api/config reports the crew mode", () => {
   });
 });
 
+// M102 spec 14 decision 4: the API number, appended last, so the phone can tell its bundle from the bridge.
+describe("bridgeConfigBody — the API number", () => {
+  const base = { push: true, vapidPublicKey: "BKey", build: "abc123", mode: "solo" } as const;
+
+  test("rides last when passed, the handler's own number, and is absent otherwise", () => {
+    const body = bridgeConfigBody({ ...base, redact: false, apiVersion: API_VERSION });
+    expect(body.apiVersion).toBe(API_VERSION);
+    expect(Object.keys(body).at(-1)).toBe("apiVersion");
+    expect("apiVersion" in bridgeConfigBody(base)).toBe(false);
+    expect(readFileSync(join(import.meta.dir, "server.ts"), "utf8")).toContain("apiVersion: API_VERSION,");
+  });
+});
+
 // The masking switch is published read-only so Settings can show it; the phone never sets it. The
 // handler passes `cfg.redact` for the lead's own answer and nothing for a member-scoped one.
 describe("bridgeConfigBody — the masking switch is reported, and omitted when unknown", () => {
@@ -3704,7 +3825,7 @@ describe("the host gate — `?host=` selects among enrolled members and nothing 
     // The load-bearing claim: `?h=laptop` + `w1:p1` must never be served the DESK's `w1:p1`, and
     // pane ids collide across machines, so a fall-through here is a cross-host write.
     //
-    // All TWENTY-SEVEN session-scoped route handlers (tab create, workspace create, launch, this host's launcher
+    // All TWENTY-NINE session-scoped route handlers (tab create, workspace create, launch, this host's launcher
     // rows, this host's folder list and a star on it, one journal blob, a Claude subagent transcript, a workspace's Changes list,
     // a workspace's Files view, the Files existence check by pane or workspace, the Files image read
     // by pane or workspace (ADR 0090), the Claude commands a pane would load, tab action, the space rename (M53 spec 05), the pane family, "look now", the New sheet's
@@ -3714,12 +3835,13 @@ describe("the host gate — `?host=` selects among enrolled members and nothing 
     // read that checks a typed line before it runs (ADR 0095, amendment), and a durable program's
     // conversation list and the items or reopen of one (M53 spec 11), and Sent's read and its two
     // writes, served by one function with one resolve for the read and one for the writes (ADR 0107),
-    // and the New page's folder browser (#467), and a session's walky talky off switch (M89 spec 04), and an
+    // and the New page's folder browser (#467), and a session's walky talky off switch (M89 spec 04), and the two routes of this machine's "Worktree folder" setting (ADR 0093, note of 2026-11-13), and
+    // this machine's accounts, one resolve for the read and one for the two writes (M101), and an
     // answer to an ask by id, the hook hold card's tap on a member's pane (M56 spec 12)) reach their runtime through the caller's resolver and
     // nothing else. One of them, the launcher rows, hands the resolver the lead's merge (ADR 0127), and
     // two, the launch and the branch create, hand it the lead's row carry (ADR 0127 point 3).
     const carry = String.raw`undefined, leadRowCarry\(allowedLaunchers, homedir\(\)\)`;
-    expect([...src.matchAll(new RegExp(String.raw`await caller\.resolve\((?:leadRows|${carry})?\);`, "g"))]).toHaveLength(29);
+    expect([...src.matchAll(new RegExp(String.raw`await caller\.resolve\((?:leadRows|${carry})?\);`, "g"))]).toHaveLength(33);
     expect([...src.matchAll(/await caller\.resolve\(leadRows\);/g)]).toHaveLength(1);
     expect([...src.matchAll(new RegExp(String.raw`await caller\.resolve\(${carry}\);`, "g"))]).toHaveLength(2);
     // Exactly eight `registry.get(` calls remain, and each is a sanctioned one, named here rather
@@ -3988,8 +4110,41 @@ describe("the update write gate — POST api/update rides the pane path's own ga
         const ping = telemetryIn(dir);
         expect(telemetryTroubleRoute(ping, { ...SIGNAL }).status).toBe(204);
         expect(telemetryTroubleRoute(ping, { ...SIGNAL }).status).toBe(204);
-        expect(readTelemetryRecord(dir).trouble).toEqual([{ ...SIGNAL, count: 2 }]);
-        expect(ping.view().next?.trouble).toEqual([{ ...SIGNAL, count: 2 }]);
+        expect(readTelemetryRecord(dir).trouble).toEqual([{ ...SIGNAL, linked: false, count: 2 }]);
+        expect(ping.view().next?.trouble).toEqual([{ ...SIGNAL, linked: false, count: 2 }]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("a body with a pane asks the link reader about that pane and stores only whether it was linked", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "collie-trouble-route-"));
+      try {
+        const asked: unknown[] = [];
+        const ping = createTelemetry({
+          stateDir: dir,
+          env: {},
+          origin: "env",
+          version: "1.27.0+fd5a796587",
+          installKind: "binary",
+          line: () => "stable",
+          crewMode: () => "solo",
+          now: () => Date.UTC(2026, 10, 6, 12),
+          fetch: async () => new Response("ok"),
+          os: "linux",
+          arch: "x64",
+          newId: () => "1".repeat(32),
+          linked: (where) => {
+            asked.push(where);
+            return where.paneId === "w1:p1";
+          },
+        });
+        expect(telemetryTroubleRoute(ping, { ...SIGNAL, pane: "w1:p1", session: "default" }).status).toBe(204);
+        expect(telemetryTroubleRoute(ping, { ...SIGNAL, pane: "w1:p2" }).status).toBe(204);
+        expect(asked).toEqual([{ paneId: "w1:p1", session: "default" }, { paneId: "w1:p2", session: null }]);
+        const text = readFileSync(telemetryPath(dir), "utf8");
+        expect(text).not.toContain("w1:p1");
+        expect(readTelemetryRecord(dir).trouble.map((row) => row.linked)).toEqual([true, false]);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
@@ -4023,8 +4178,8 @@ describe("the update write gate — POST api/update rides the pane path's own ga
           expect(await res.text()).toBe("telemetry.trouble_invalid");
         }
         expect(readTelemetryRecord(dir).trouble).toEqual([
-          { ...dialog, screen: "634c6530", count: 1 },
-          { ...dialog, count: 1 },
+          { ...dialog, screen: "634c6530", linked: false, count: 1 },
+          { ...dialog, linked: false, count: 1 },
         ]);
       } finally {
         await rm(dir, { recursive: true, force: true });
@@ -4825,8 +4980,11 @@ describe("POST /api/workspace — a create that worked records the folder the mu
       return Promise.resolve();
     }
   }
-  const engineStub: Partial<StateEngine> = { pokeNow: () => {} };
-  // SAFETY: after a create, `createWorkspace` asks the engine for exactly one thing — `pokeNow()` —
+  const engineStub: Partial<StateEngine> = {
+    pokeNow: () => {},
+    current: () => ({ agents: [], shellPanes: [], workspaces: [], tabs: [], bridge: "connected" }),
+  };
+  // SAFETY: a `createWorkspace` asks the engine for two things, `current()` (the panes it knew before the create) and `pokeNow()` —
   // and the adapter for exactly the two calls FakeSpaceMux implements. Nothing else is reachable.
   const engine = engineStub as StateEngine;
   function asSpaceMux(fake: Partial<MuxAdapter>): MuxAdapter {
@@ -5133,7 +5291,7 @@ describe("the folder routes — GET /api/folders and POST /api/folders/star", ()
     // Wired once, inside serveSessionRoute, so a crew peer's dispatch reaches it too (§5).
     expect([...src.matchAll(/await serveFolderRoute\(req, pathname, caller, folders, folderBrowse\)/g)]).toHaveLength(1);
     // And the create is handed the same store, so a peer records into its OWN list.
-    expect(src).toContain("return createWorkspace(rt.herdr, rt.engine, req, caller.audit, caller.device(), rt.name, folders, await sessionFolderOf(rt.name));");
+    expect(src).toContain("return createWorkspace(rt.herdr, rt.engine, req, caller.audit, caller.device(), rt.name, folders, await sessionFolderOf(rt.name), { receipts: launchReceipts });");
     // A launch reads the same session folder, so both creates from the dashboard open in one place.
     expect(src).toContain("sessionFolder: await sessionFolderOf(rt.name),");
   });
@@ -5356,7 +5514,7 @@ describe("update status peers — the legs of a crew-wide run", () => {
 
   test("retry crew update: a peers-only run has peer legs only and never touches a current lead", () => {
     const current = "1.5.0";
-    const behind: CrewUpdateRow = { name: "minibuch", version: "1.4.1", verdict: "green", reasons: [], asOf: 1 };
+    const behind: CrewUpdateRow = { name: "desk", version: "1.4.1", verdict: "green", reasons: [], asOf: 1 };
     const state = {
       current,
       // A current lead has nothing above it to take. That is exactly when "Retry crew update" is the
@@ -5392,14 +5550,14 @@ describe("update status peers — the legs of a crew-wide run", () => {
     expect(
       updateStartVerdict(
         { confirm: true, target: null, major: false, peersOnly: true },
-        { ...state, crew: [levelled], peers: [{ name: "minibuch", state: "rolled-back" }] },
+        { ...state, crew: [levelled], peers: [{ name: "desk", state: "rolled-back" }] },
       ),
     ).toMatchObject({ kind: "refuse", status: 409 });
   });
 
   test("retry crew update: one confirm still covers the crew, so a red member refuses it", () => {
     const red: CrewUpdateRow = {
-      name: "minibuch",
+      name: "desk",
       version: "1.4.1",
       verdict: "red",
       reasons: ["less than 200 MB free on /"],
@@ -5558,6 +5716,84 @@ describe("readPane — the logical read is asked for only when it can repair som
     // The mirror keeps its own rows, styling and all — only the hrefs are repaired downstream.
     expect(body.text).toBe(grid);
   });
+
+  test("?logical=0 keeps the default: omitted without a split URL, SGR-stripped with one", async () => {
+    const url0 = new URL("http://x/api/pane/w1:p1?logical=0");
+    const req0 = new Request(url0);
+    const plain = paneStub("$ echo hi\nhi", "unused");
+    const resPlain = await readPane(plain.adapter, cfg(), "w1:p1", url0, req0);
+    // SAFETY: the bridge's own JSON, served by the call above.
+    const bodyPlain = (await resPlain.json()) as PaneReadResponse;
+    expect(plain.reads()).toBe(0);
+    expect(bodyPlain.logicalText).toBeUndefined();
+
+    const grid = "run:\n\u001b[36mhttps://a.dev/auth?client=1&s\u001b[0m\ntate=y then";
+    const logical = "\u001b[36mrun:\nhttps://a.dev/auth?client=1&state=y then\u001b[0m";
+    const split = paneStub(grid, logical);
+    const resSplit = await readPane(split.adapter, cfg(), "w1:p1", url0, req0);
+    // SAFETY: the bridge's own JSON, served by the call above.
+    const bodySplit = (await resSplit.json()) as PaneReadResponse;
+    expect(split.reads()).toBe(1);
+    expect(bodySplit.logicalText).toBe("run:\nhttps://a.dev/auth?client=1&state=y then");
+  });
+
+  test("?logical=1 always populates logicalText and keeps SGR styling even without a split URL", async () => {
+    const grid = "\u001b[32m$ echo hello world\u001b[0m\nhello \nworld";
+    const logical = "\u001b[32m$ echo hello world\u001b[0m\n\u001b[1mhello world\u001b[0m";
+    const { adapter, reads } = paneStub(grid, logical);
+    const logicalUrl = new URL("http://x/api/pane/w1:p1?logical=1");
+    const res = await readPane(adapter, cfg(), "w1:p1", logicalUrl, new Request(logicalUrl));
+    // SAFETY: the bridge's own JSON, served by the call above.
+    const body = (await res.json()) as PaneReadResponse;
+    expect(reads()).toBe(1);
+    expect(body.logicalText).toBe(logical);
+    expect(body.text).toBe(grid);
+
+    const etag = res.headers.get("etag");
+    expect(etag).toBeTruthy();
+    const res304 = await readPane(
+      adapter,
+      cfg(),
+      "w1:p1",
+      logicalUrl,
+      new Request(logicalUrl, { headers: { "if-none-match": etag ?? "" } }),
+    );
+    expect(res304.status).toBe(304);
+    expect(res304.headers.get("etag")).toBe(etag);
+  });
+
+  test("?logical=1 leaves logicalText absent when the multiplexer has no readLogicalText", async () => {
+    const stub: Partial<MuxAdapter> = {
+      mux: "tmux",
+      readGrid: (paneId: string) =>
+        Promise.resolve(muxOk({ paneId, text: "$ echo hi\nhi", truncated: false, revision: 7 })),
+    };
+    // SAFETY: `readPane` only reaches `mux`, `readGrid` and optional `readLogicalText`.
+    const adapter = stub as MuxAdapter;
+    const logicalUrl = new URL("http://x/api/pane/w1:p1?logical=1");
+    const res = await readPane(adapter, cfg(), "w1:p1", logicalUrl, new Request(logicalUrl));
+    // SAFETY: the bridge's own JSON, served by the call above.
+    const body = (await res.json()) as PaneReadResponse;
+    expect(body.logicalText).toBeUndefined();
+    expect("logicalText" in body).toBe(false);
+  });
+
+  test("?logical=1 with redaction masks a secret split mid-token by SGR escapes while keeping colour", async () => {
+    const keyTail = "PLACEHOLDER00000";
+    const splitAws = `AWS_ACCESS_KEY_ID=AKIA\u001b[31m${keyTail}\u001b[0m`;
+    const splitSk = `sk-proj-\u001b[32m${"1234567890".repeat(2)}\u001b[0m`;
+    const logical = `${splitAws}\n${splitSk}`;
+    const { adapter } = paneStub("$ env\n", logical);
+    const logicalUrl = new URL("http://x/api/pane/w1:p1?logical=1");
+    const res = await readPane(adapter, { ...cfg(), redact: true }, "w1:p1", logicalUrl, new Request(logicalUrl));
+    // SAFETY: the bridge's own JSON, served by the call above.
+    const body = (await res.json()) as PaneReadResponse;
+    expect(body.logicalText).toBe(
+      `AWS_ACCESS_KEY_ID=AKIA\u001b[31m${"•".repeat(16)}\u001b[0m\nsk-p${"•".repeat(4)}\u001b[32m${"•".repeat(20)}\u001b[0m`,
+    );
+    expect(body.logicalText).not.toContain(keyTail);
+    expect(body.logicalText).not.toContain("1234567890");
+  });
 });
 
 describe("the state engine's blocked hint reaches the pane's recent reads (herdr-core history reads hold keys)", () => {
@@ -5641,7 +5877,7 @@ describe("an input written to a pane makes its engine hot", () => {
     expect(isPaneInput("/api/tab/w1%3At1/close", "POST")).toBe(false);
   });
 
-  // A pane launched on minibuch stayed a shell on the phone for up to 12 s (2026-10-14): the lead's
+  // A pane launched on desk stayed a shell on the phone for up to 12 s (2026-10-14): the lead's
   // sweep of the member rode a cold engine, and only inputs warmed it.
   test("isTopologyWrite names the launch, create, close and rename routes, as POSTs, and nothing else", () => {
     for (const path of ["/api/launch", "/api/workspace", "/api/worktree", "/api/tab", "/api/tab/w1%3At1/close", "/api/tab/w1%3At1/rename"]) {
@@ -5723,7 +5959,7 @@ describe("security headers on the app shell", () => {
 
   test("Strict-Transport-Security is absent over plain HTTP", async () => {
     const handler = withHsts(async () => new Response("ok"));
-    const res = await handler(new Request("http://bluefin:8788/"));
+    const res = await handler(new Request("http://lodge:8788/"));
     expect(res.headers.get("strict-transport-security")).toBeNull();
   });
 
@@ -5747,17 +5983,17 @@ describe("pair attempt rate limit", () => {
   test("the 11th attempt inside a minute is refused, and the burst is flagged once", () => {
     const limiter = createPairLimiter();
     for (let i = 0; i < PAIR_ATTEMPTS_PER_WINDOW; i++) {
-      expect(limiter.hit("100.64.0.9", 1_000 + i).allowed).toBe(true);
+      expect(limiter.hit("100.64.10.2", 1_000 + i).allowed).toBe(true);
     }
     // `retryAfterMs` is how long until the oldest attempt (at 1_000) leaves the window.
-    expect(limiter.hit("100.64.0.9", 2_000)).toEqual({ allowed: false, first: true, retryAfterMs: 59_000 });
-    expect(limiter.hit("100.64.0.9", 2_001)).toEqual({ allowed: false, first: false, retryAfterMs: 58_999 });
+    expect(limiter.hit("100.64.10.2", 2_000)).toEqual({ allowed: false, first: true, retryAfterMs: 59_000 });
+    expect(limiter.hit("100.64.10.2", 2_001)).toEqual({ allowed: false, first: false, retryAfterMs: 58_999 });
   });
 
   test("another address is not affected by the first one's burst", () => {
     const limiter = createPairLimiter();
-    for (let i = 0; i < PAIR_ATTEMPTS_PER_WINDOW + 2; i++) limiter.hit("100.64.0.9", 1_000);
-    expect(limiter.hit("100.64.0.10", 1_001).allowed).toBe(true);
+    for (let i = 0; i < PAIR_ATTEMPTS_PER_WINDOW + 2; i++) limiter.hit("100.64.10.2", 1_000);
+    expect(limiter.hit("100.64.10.10", 1_001).allowed).toBe(true);
   });
 
   test("the window slides: attempts older than a minute stop counting", () => {
@@ -5778,26 +6014,26 @@ describe("pair attempt rate limit", () => {
 
 describe("pair source key (forwarded header trust)", () => {
   test("a non-loopback peer is keyed by its socket address; an untrusted x-forwarded-for does not change it", () => {
-    const a = pairSourceKey("100.64.0.9", false, "1.1.1.1");
-    const b = pairSourceKey("100.64.0.9", false, "2.2.2.2");
-    expect(a).toBe("100.64.0.9");
+    const a = pairSourceKey("100.64.10.2", false, "1.1.1.1");
+    const b = pairSourceKey("100.64.10.2", false, "2.2.2.2");
+    expect(a).toBe("100.64.10.2");
     expect(b).toBe(a);
   });
 
   test("a loopback peer (the front door) is keyed by the RIGHTMOST x-forwarded-for entry, the one the proxy appended", () => {
     expect(pairSourceKey("127.0.0.1", true, "203.0.113.7, 10.0.0.1")).toBe("10.0.0.1");
-    expect(pairSourceKey("127.0.0.1", true, "100.64.0.9")).toBe("100.64.0.9");
+    expect(pairSourceKey("127.0.0.1", true, "100.64.10.2")).toBe("100.64.10.2");
   });
 
   test("entries a client wrote to the left of the proxy's own cannot rotate the key", () => {
-    const a = pairSourceKey("127.0.0.1", true, "1.1.1.1, 100.64.0.9");
-    const b = pairSourceKey("127.0.0.1", true, "2.2.2.2, 3.3.3.3, 100.64.0.9");
-    expect(a).toBe("100.64.0.9");
+    const a = pairSourceKey("127.0.0.1", true, "1.1.1.1, 100.64.10.2");
+    const b = pairSourceKey("127.0.0.1", true, "2.2.2.2, 3.3.3.3, 100.64.10.2");
+    expect(a).toBe("100.64.10.2");
     expect(b).toBe(a);
   });
 
   test("blank entries are skipped, so a trailing comma is not an address", () => {
-    expect(pairSourceKey("127.0.0.1", true, "100.64.0.9, ")).toBe("100.64.0.9");
+    expect(pairSourceKey("127.0.0.1", true, "100.64.10.2, ")).toBe("100.64.10.2");
     expect(pairSourceKey("127.0.0.1", true, " , ")).toBe("loopback");
   });
 
@@ -6558,5 +6794,129 @@ describe("freeSpaceName — a folder-named space never takes a name already in u
     expect(freeSpaceName("app", [{ label: "app" }])).toBe("app-2");
     expect(freeSpaceName("app", [{ label: "app" }, { label: "app-2" }])).toBe("app-3");
     expect(freeSpaceName("app", [{ label: "app-2" }])).toBe("app");
+  });
+});
+
+// `POST /api/pane/:id/arrived` (M102 spec 01): the person's "It arrived" on a send Collie could not tell.
+describe("It arrived", () => {
+  const withRuntime = async (run: (kit: { rt: Parameters<typeof arrivedRoute>[0]; send: SendProtocol; store: RequestStore; audit: AuditLog; lines: string[] }) => Promise<void>): Promise<void> => {
+    const dir = await mkdtemp(join(tmpdir(), "collie-arrived-"));
+    try {
+      const store = new RequestStore(join(dir, "sends"), () => 1_000);
+      const pane = { writeKeys: () => Promise.resolve(muxAck()) };
+      const send = new SendProtocol({
+        mux: { readGrid: (paneId: string) => Promise.resolve(muxOk({ paneId, text: "", truncated: false, revision: 1 })), typeText: () => Promise.resolve(muxAck()) },
+        gate: new KeyGate(pane, () => 1_000),
+        store,
+        locks: new SessionLocks(),
+        ring: new RowRing(),
+        profile: () => Promise.resolve(null),
+        generation: () => "gen",
+      });
+      const lines: string[] = [];
+      const rt = { send, name: "main" };
+      await run({ rt, send, store, audit: new AuditLog((line) => void lines.push(line)), lines });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
+  /** A settled receipt on pane `paneId`, ended as `outcome`. */
+  const settle = (store: RequestStore, id: string, outcome: SendReceipt["outcome"], paneId = "%1"): void => {
+    const { record } = store.accept({ id, session: "main", paneId, paneGeneration: "gen", surfaceRevision: 0, mode: "send", text: "was it typed" });
+    const { reason: _crash, ...rest } = SendProtocol.crashReceipt(record);
+    store.settle(id, { ...rest, harness: "claude", version: "2.1.200", profileId: "claude", profileStatus: "verified", outcome });
+  };
+  const context = (audit: AuditLog, device: string | null = "phone") => ({ audit, device, acceptEncoding: null });
+
+  test("marks an unknown receipt arrived: a 200 with the word, the stored receipt and the list carry it, one audit line with no text", async () => {
+    await withRuntime(async ({ rt, send, store, audit, lines }) => {
+      settle(store, "arrived-req-0001", "unknown");
+      const res = await arrivedRoute(rt, "%1", { requestId: "arrived-req-0001" }, context(audit));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ word: "arrived" });
+      expect(store.get("arrived-req-0001")?.receipt).toMatchObject({ outcome: "unknown", word: "arrived" });
+      expect(send.recent("%1")[0]).toMatchObject({ requestId: "arrived-req-0001", outcome: "unknown", word: "arrived" });
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('"action":"send-arrived"');
+      expect(lines[0]).toContain('"outcome":"marked"');
+      expect(lines[0]).not.toContain("was it typed");
+    });
+  });
+
+  test("refuses an id of another pane and an id nobody sent with the same 404", async () => {
+    await withRuntime(async ({ rt, store, audit }) => {
+      settle(store, "arrived-req-0002", "unknown", "%2");
+      const other = await arrivedRoute(rt, "%1", { requestId: "arrived-req-0002" }, context(audit));
+      const nobody = await arrivedRoute(rt, "%1", { requestId: "arrived-req-9999" }, context(audit));
+      expect([other.status, nobody.status]).toEqual([404, 404]);
+      expect(await other.text()).toBe(await nobody.text());
+      expect(store.get("arrived-req-0002")?.receipt?.word).toBeUndefined();
+    });
+  });
+
+  test("refuses a receipt that did not end unknown with a 409", async () => {
+    await withRuntime(async ({ rt, store, audit }) => {
+      settle(store, "arrived-req-0003", "sent");
+      const res = await arrivedRoute(rt, "%1", { requestId: "arrived-req-0003" }, context(audit));
+      expect(res.status).toBe(409);
+      expect(store.get("arrived-req-0003")?.receipt?.word).toBeUndefined();
+    });
+  });
+
+  test("refuses a second mark with a 409", async () => {
+    await withRuntime(async ({ rt, store, audit }) => {
+      settle(store, "arrived-req-0004", "unknown");
+      expect((await arrivedRoute(rt, "%1", { requestId: "arrived-req-0004" }, context(audit))).status).toBe(200);
+      const again = await arrivedRoute(rt, "%1", { requestId: "arrived-req-0004" }, context(audit));
+      expect(again.status).toBe(409);
+      expect(store.get("arrived-req-0004")?.receipt?.word).toBe("arrived");
+    });
+  });
+
+  test("refuses a bad id or a body that is no object with a 400, and answers 404 with the protocol off", async () => {
+    await withRuntime(async ({ rt, audit }) => {
+      for (const body of [{ requestId: "../x" }, { requestId: 5 }, {}, "arrived-req-0005", null, undefined]) {
+        // SAFETY: each case is plain JSON data (or undefined), a JsonValue.
+        expect((await arrivedRoute(rt, "%1", body as JsonValue | undefined, context(audit))).status).toBe(400);
+      }
+      const off = await arrivedRoute({ send: undefined, name: "main" }, "%1", { requestId: "arrived-req-0006" }, context(audit));
+      expect(off.status).toBe(404);
+      expect(await off.text()).toBe(SEND_OFF_TEXT);
+    });
+  });
+
+  test("the route is a write: any method at arrived asks for an authorised device", () => {
+    expect(paneGateLevel("arrived", "POST")).toBe("write");
+    expect(paneGateLevel("arrived", "GET")).toBe("write");
+    expect(isHeldCancel("/api/pane/w1%3Ap1/arrived", "DELETE")).toBe(false);
+  });
+});
+
+// ── Changes keeps the bounds of Files (ADR 0150, M103) ──────────────────────────────────────────
+// The dispatcher lives inside Bun.serve, so the wiring is pinned by source, as the Files gate is in
+// bridge/api-front-gate.test.ts. The behaviour of each scope is tested in bridge/changes-root.test.ts.
+
+describe("the changes routes read under the caller's own Files right", () => {
+  const code = readFileSync(join(import.meta.dir, "server.ts"), "utf8");
+
+  test("changes: both routes build their scope from the caller, never from a fixed level", () => {
+    expect(code).toContain("return workspaceChanges(rt.engine, workspaceId, url, req, changesScope(cfg, caller), cfg.redact);");
+    expect(code).toContain('if (action === "changes" && req.method === "GET") return paneChanges(rt.engine, paneId, url, req, changesScope(cfg, caller), cfg.redact);');
+    // The two routes are the only callers of the two handlers in the dispatcher.
+    expect([...code.matchAll(/return (paneChanges|workspaceChanges)\(/g)]).toHaveLength(2);
+  });
+
+  test("changes: the scope asks the caller's device-read gate and carries the bridge's private folders", () => {
+    const start = code.indexOf("function changesScope(");
+    expect(start).toBeGreaterThan(0);
+    const body = code.slice(start, code.indexOf("\n}\n", start));
+    expect(body).toContain('wide: caller.gate("device-read") === null');
+    expect(body).toContain("privateFolders: filesPrivateFolders(cfg)");
+  });
+
+  test("changes: a crew member's routes answer through the same closure, so its own gate decides", () => {
+    // The member's `caller.gate` is `crewGate` over the forwarded device (bridge/crew/peer-gate.ts).
+    expect(code).toContain("crewGate(level, cfg, device)");
+    expect([...code.matchAll(/serveSessionRoute\(\s*req/g)]).toHaveLength(2);
   });
 });

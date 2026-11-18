@@ -3,7 +3,7 @@
 
 import { t } from "@/lib/i18n";
 
-import { RIGHTS_CLOSED, RIGHTS_CLOSED_KEYS, type HillDecision, type HillPriority, type HillReceipt, type HillState } from "./wire";
+import { HILL_ANSWERED_IN_SESSION, RIGHTS_CLOSED, RIGHTS_CLOSED_KEYS, type HillDecision, type HillPriority, type HillReceipt, type HillState } from "./wire";
 
 export function priorityWord(priority: HillPriority): string {
   return t(`hill.priority.${priority}`);
@@ -15,12 +15,22 @@ export function stateWord(state: Exclude<HillState, "open">): string {
 }
 
 /**
+ * Whether the person's own message to the session closed this agent's card (M96 spec 10, the bridge's
+ * `noteSpoke`): it is theirs, as an answer is, and stays under Answered until they clear it.
+ */
+export function answeredInSession(decision: Pick<HillDecision, "state" | "from" | "closedReason">): boolean {
+  return decision.state === "withdrawn" && decision.from.kind === "agent" && decision.closedReason === HILL_ANSWERED_IN_SESSION;
+}
+
+/**
  * A closed decision's line: its state in plain words, except Collie's card about a trick's changed rights,
  * which says why it closed (the bridge's `closedReason`, one of {@link RIGHTS_CLOSED}), never "Withdrawn by
  * the poster". A reason this phone does not know reads as the plain state.
  */
 export function closedWord(decision: Pick<HillDecision, "state" | "from" | "closedReason">): string {
   if (decision.state === "open") return "";
+  // The person wrote in the session (M96 spec 10): never "Withdrawn by the poster".
+  if (answeredInSession(decision)) return t("hill.state.answeredInSession");
   if (decision.state !== "withdrawn" || decision.from.kind !== "collie" || decision.from.ref?.type !== "rights") return stateWord(decision.state);
   const why = RIGHTS_CLOSED_KEYS.find((key) => RIGHTS_CLOSED[key] === decision.closedReason);
   return why === undefined ? stateWord(decision.state) : t(`hill.rightsClosed.${why}`);

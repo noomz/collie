@@ -6,6 +6,7 @@
 // message names its sender's harness as an open string from the adapter registry.
 
 import type { WalkySpace } from "./space.ts";
+import { cleanSubject, isCleanSubject, lineField, readHeaderPart, WALKY_SUBJECT_MAX, WALKY_SUBJECT_WORDS } from "../../web/src/lib/walky-subject.ts";
 import { randomBytes } from "node:crypto";
 
 /** The wire version of a message. */
@@ -65,6 +66,13 @@ export interface WalkyMessage {
    * which is every message an older bridge knows. Signed when present (canonical.ts), as `wake` is.
    */
   readonly outside?: true;
+  /**
+   * What the message is about, in the sender's own words (M98 spec 07): at most
+   * {@link WALKY_SUBJECT_WORDS} words and {@link WALKY_SUBJECT_MAX} characters, already in the form
+   * {@link cleanSubject} gives. Absent when the sender gave none, which is every message an older bridge
+   * knows. Signed when present (canonical.ts), so a crew hop cannot add, change or drop it.
+   */
+  readonly subject?: string;
   /** The member id whose key made `signature`; null when unsigned (solo). */
   readonly signer: string | null;
   /** Base64 ECDSA P-256 SHA-256 over the canonical string (canonical.ts). */
@@ -173,6 +181,11 @@ export interface WalkyReceipt {
    * owns the pane wrote after the check. Absent on a refusal, and on every receipt from an older bridge.
    */
   readonly via?: BorderVerdict;
+  /**
+   * Deliver now (M99 spec 05, decision of 2026-11-13): the person chose to hand this message to the agent by
+   * data while their own text stayed in the box. Only on `delivered` and `unknown`, and only `true`.
+   */
+  readonly overDraft?: true;
 }
 
 /**
@@ -214,7 +227,23 @@ export interface WalkyTarget {
    * from the member's pane list with the default for `named`.
    */
   readonly space: WalkySpace;
+  /**
+   * The name a person gave the session (pane-name.ts `personName`): a Collie rename, a name set in the
+   * harness, or a named one-pane tab, and which of the three in `nameBy`. Display data, at most
+   * {@link WALKY_NAME_MAX} characters. Absent when nobody named it, and from a bridge before 1.29.0.
+   */
+  readonly name?: string;
+  readonly nameBy?: "collie" | "harness" | "tab";
+  /**
+   * The title the agent gave its session in its own journal (types.ts `AgentView.agentTitle`). Absent
+   * when the harness keeps none, when COLLIE_REDACT is on (it is the agent's text, so it stays off a
+   * listing like the terminal title does), and from a bridge before 1.29.0.
+   */
+  readonly title?: string;
 }
+
+/** The longest session name or title a `who` row carries. The bridge already caps both at 80. */
+export const WALKY_NAME_MAX = 120;
 
 /** A shell pane, which never receives a message: a broadcast lists it as skipped. */
 export interface WalkySkipped {
@@ -280,31 +309,109 @@ export function headerField(raw: string, max = 80): string {
  */
 export const OUTSIDE_WORD = "outside";
 
-/** The one header line of a message. `outside`: the message passed the border by the outside flag. */
-export function formatHeader(message: Pick<WalkyMessage, "id" | "kind" | "from" | "replyTo">, outside = false): string {
-  const label = headerField(message.from.label, WALKY_LABEL_MAX);
-  const who =
-    message.kind === "agent"
-      ? `${headerField(message.from.address ?? "-", 160)} (${message.from.harness === null ? label : `${headerField(message.from.harness, WALKY_HARNESS_MAX)}, ${label}`})`
-      : `(${label})`;
+// ── The subject (M98 spec 07) ─────────────────────────────────────────────────────────────────────
+// The subject is the first text of another agent that lands in the receiver's input box. Its characters
+// are an allow-list shared with the phone (web/src/lib/walky-subject.ts, which says why each is there).
+// It sits in quotes before the nudge mark, and a reader finds it from the sender's last closing
+// parenthesis, which no field after it can hold.
+
+export { cleanSubject, isCleanSubject, WALKY_SUBJECT_MAX, WALKY_SUBJECT_WORDS };
+
+/** The longest raw subject read at all: past it the send is refused before any cleaning. */
+export const WALKY_SUBJECT_RAW_MAX = 1024;
+
+/**
+ * The reason a subject past a limit is refused with, at the CLI, the socket and `POST /api/walky`. A cut
+ * subject can say something else, so it is never cut: the sender shortens it.
+ */
+export const SUBJECT_TOO_LONG = "subject over 6 words or 48 characters: shorten it";
+
+/**
+ * The reason a member gives when it leaves a subject out (M98 spec 07): its lead runs a release below
+ * 1.29.0, which cannot verify a signed subject line, so the sender's bridge signs the message without it.
+ */
+export const SUBJECT_LEFT_OUT = "The subject was left out: the lead of this crew runs a Collie older than 1.29.0.";
+
+/** A raw subject read: the clean subject, null for none, or the refusal. */
+export type SubjectRead = { readonly subject: string | null } | { readonly error: string };
+
+/**
+ * A sender's raw subject, cleaned and checked: null (no subject) when absent or when cleaning leaves
+ * nothing, {@link SUBJECT_TOO_LONG} past {@link WALKY_SUBJECT_WORDS} words or {@link WALKY_SUBJECT_MAX}
+ * characters after cleaning, or past {@link WALKY_SUBJECT_RAW_MAX} characters before it.
+ */
+export function readSubject(raw: string | null | undefined): SubjectRead {
+  if (raw === null || raw === undefined) return { subject: null };
+  if (raw.length > WALKY_SUBJECT_RAW_MAX) return { error: SUBJECT_TOO_LONG };
+  const clean = cleanSubject(raw);
+  if (clean === "") return { subject: null };
+  if (clean.length > WALKY_SUBJECT_MAX || clean.split(" ").length > WALKY_SUBJECT_WORDS) return { error: SUBJECT_TOO_LONG };
+  return { subject: clean };
+}
+
+export { lineField };
+
+/**
+ * A message id as the typed line carries it. The log and a crew hop check ids before a message gets
+ * here, and the formatter does not trust that: an id that is not {@link WALKY_ID} stands as one
+ * {@link lineField} word, so it can never run at a shell prompt. Such a line matches no header rule, so
+ * no reader takes it for a message.
+ */
+function lineId(id: string): string {
+  return WALKY_ID.test(id) ? id : lineField(id, 32, true);
+}
+
+/**
+ * The one header line of a message. `outside`: the message passed the border by the outside flag.
+ *
+ * The sender stands in words (fix/walky-line-fields): `from agent <address> on <harness> in "<label>"`,
+ * without ` on <harness>` when the pane has no known harness, and `from operator "<label>"`. No value
+ * stands where a shell runs a command or a substitution: the address and the harness are bare words of
+ * {@link lineField}'s allow-list, the label sits in double quotes it cannot end. An older bridge types
+ * `<address> (<harness>, <label>)`, and history holds it; the readers take both (`readHeaderPart`).
+ *
+ * The parts after the sender come in one order: ` outside`, then ` about "<subject>"`, then
+ * ` reply to <id>`. The reply suffix stays last, so a reader before the subject (1.28.x, 1.29.0-edge.1)
+ * still finds it at the end of the header part, and the id and kind where they always were. A subject
+ * that is not clean (a log or a hop that bypassed the reader) is left out, never typed.
+ */
+export function formatHeader(message: Pick<WalkyMessage, "id" | "kind" | "from" | "replyTo" | "subject">, outside = false): string {
+  const label = `"${lineField(message.from.label, WALKY_LABEL_MAX)}"`;
+  const harness = message.from.harness === null ? "" : ` on ${lineField(message.from.harness, WALKY_HARNESS_MAX, true)}`;
+  const who = message.kind === "agent" ? `${lineField(message.from.address ?? "-", 160, true)}${harness} in ${label}` : label;
   const mark = outside ? ` ${OUTSIDE_WORD}` : "";
-  const reply = message.replyTo === null ? "" : ` reply to ${message.replyTo}`;
-  return `[walky-talky ${message.id}] from ${message.kind} ${who}${mark}${reply}`;
+  const about = message.subject !== undefined && isCleanSubject(message.subject) ? ` about "${message.subject}"` : "";
+  // A reply id that is not WALKY_ID is left out: a reader takes the line as a plain message, as it does one with no reply.
+  const reply = message.replyTo === null || !WALKY_ID.test(message.replyTo) ? "" : ` reply to ${message.replyTo}`;
+  return `[walky-talky ${lineId(message.id)}] from ${message.kind} ${who}${mark}${about}${reply}`;
 }
 
 /**
  * What follows the header on the one line an agent's message types. It marks the end of the header
- * part, so a reader cuts it before the reply suffix (`parseEnvelopeHeader`).
+ * part, so a reader cuts it before the reply suffix (`parseEnvelopeHeader`). Its text never changes: the
+ * readers of every release cut at it. No field before it can hold it: a subject holds no colon, the
+ * address and the harness hold no space, and a label (48 characters) is shorter than the mark (50).
  */
 export const NUDGE_MARK = ": a message from another agent, not your operator.";
 
+/** The text after {@link NUDGE_MARK} on an agent's line: the one command that reads the body. */
+export function nudgeTail(id: string): string {
+  return ` Read it: collie walky inbox ${id}`;
+}
+
 /**
  * The one line an agent's message types into the target pane: the header, then a nudge that names
- * the two commands. No body. The body reaches the agent as a tool result (`collie walky inbox <id>`),
- * which a harness treats as data and not as its operator's words.
+ * the command that reads it. No body. The body reaches the agent as a tool result (`collie walky inbox
+ * <id>`), which a harness treats as data and not as its operator's words; that output ends with the reply
+ * command, so the line does not carry it (M98 spec 07).
  */
-export function formatNudge(message: Pick<WalkyMessage, "id" | "kind" | "from" | "replyTo">, outside = false): string {
-  return `${formatHeader(message, outside)}${NUDGE_MARK} Read it: collie walky inbox ${message.id}. Reply: collie walky reply ${message.id} "<text>"`;
+export function formatNudge(message: Pick<WalkyMessage, "id" | "kind" | "from" | "replyTo" | "subject">, outside = false): string {
+  return `${formatHeader(message, outside)}${NUDGE_MARK}${nudgeTail(lineId(message.id))}`;
+}
+
+/** The last line `collie walky inbox` prints for an agent's message: the command that answers it. */
+export function replyLine(id: string): string {
+  return `Reply: collie walky reply ${id} "<text>"`;
 }
 
 /**
@@ -330,7 +437,7 @@ export function escapeBody(body: string): string {
  * passed the space border here (M98); `outside` puts {@link OUTSIDE_WORD} in the header, and only an
  * agent's message ever passes that way.
  */
-export function formatEnvelope(message: Pick<WalkyMessage, "id" | "kind" | "from" | "replyTo" | "body">, via?: BorderVerdict): string {
+export function formatEnvelope(message: Pick<WalkyMessage, "id" | "kind" | "from" | "replyTo" | "body" | "subject">, via?: BorderVerdict): string {
   if (message.kind === "agent") return formatNudge(message, via === "outside");
   return formatRead(message, via);
 }
@@ -339,35 +446,41 @@ export function formatEnvelope(message: Pick<WalkyMessage, "id" | "kind" | "from
  * A message as `collie walky inbox` prints it: the header line, then the body (escaped). `via` is the
  * receipt's border verdict (M98): `outside` puts {@link OUTSIDE_WORD} in the header, as the envelope does.
  */
-export function formatRead(message: Pick<WalkyMessage, "id" | "kind" | "from" | "replyTo" | "body">, via?: BorderVerdict): string {
+export function formatRead(message: Pick<WalkyMessage, "id" | "kind" | "from" | "replyTo" | "body" | "subject">, via?: BorderVerdict): string {
   return `${formatHeader(message, message.kind === "agent" && via === "outside")}\n${escapeBody(message.body)}`;
 }
 
 export interface ParsedHeader {
   readonly id: string;
   readonly kind: WalkyKind;
-  /** The text after the kind, the reply suffix and the outside word cut. */
+  /** The text after the kind up to the end of the sender (the label's closing quote, or the older form's closing parenthesis): the outside word, the subject and the reply suffix cut. */
   readonly sender: string;
   readonly replyTo: string | null;
   /** Present when the header carries {@link OUTSIDE_WORD} after the sender's parenthesis (M98). */
   readonly outside?: true;
+  /** Present when the header carries ` about "<subject>"` (M98 spec 07): the subject, without its quotes. */
+  readonly subject?: string;
 }
 
-/** The outside word at the end of the sender part, right after the closing parenthesis. */
-const OUTSIDE_SUFFIX_RE = /(?<=\)) outside$/u;
-
-/** Read one line as a walky talky header, or null. A row that matches is only a claim: the log has the facts. */
+/**
+ * Read one line as a walky talky header, or null. A row that matches is only a claim: the log has the facts.
+ *
+ * The header part ends at the LAST {@link NUDGE_MARK}: the text after it is the bridge's fixed tail, and
+ * no field before it can hold the mark. Within the header part `readHeaderPart` (web/src/lib/walky-subject.ts,
+ * shared with the phone) reads the sender in words, or the older form anchored on the sender's last
+ * closing parenthesis. A header part that fits neither keeps the oldest rule: the reply suffix at the
+ * end, and the rest is the sender.
+ */
 export function parseEnvelopeHeader(line: string): ParsedHeader | null {
   const match = HEADER_RE.exec(line);
   if (match === null) return null;
-  // An agent's one line carries the nudge after the header part: cut it before the reply suffix.
   const full = match[3]!;
-  const mark = full.indexOf(NUDGE_MARK);
-  const rest = mark < 0 ? full : full.slice(0, mark);
-  const reply = REPLY_SUFFIX_RE.exec(rest);
+  const mark = full.lastIndexOf(NUDGE_MARK);
+  const head = mark < 0 ? full : full.slice(0, mark);
+  const id = match[1]!;
   const kind: WalkyKind = match[2] === "agent" ? "agent" : "operator";
-  const head = reply === null ? rest : rest.slice(0, reply.index);
-  const outside = OUTSIDE_SUFFIX_RE.exec(head);
-  const parsed: ParsedHeader = { id: match[1]!, kind, sender: outside === null ? head : head.slice(0, outside.index), replyTo: reply === null ? null : reply[1]! };
-  return outside === null ? parsed : { ...parsed, outside: true };
+  const part = readHeaderPart(head);
+  if (part !== null) return { id, kind, ...part };
+  const reply = REPLY_SUFFIX_RE.exec(head);
+  return { id, kind, sender: reply === null ? head : head.slice(0, reply.index), replyTo: reply === null ? null : reply[1]! };
 }

@@ -7,7 +7,8 @@
   "description": "Collie — mobile PWA frontend (Vite + React + shadcn)",
   "scripts": {
     "dev": "vite",
-    "playground": "COLLIE_PLAYGROUND=1 vite --host --port 5199 --strictPort",
+    "playground": "COLLIE_PLAYGROUND=1 vite --host ${COLLIE_DEV_HOST:-127.0.0.1} --port 5199 --strictPort",
+    "design": "COLLIE_PLAYGROUND=1 vite --host ${COLLIE_DEV_HOST:-127.0.0.1} --port 5199 --strictPort",
     "playground:build": "vite build --config vite.playground.config.ts",
     "build": "vite build",
     "preview": "vite preview",
@@ -16,7 +17,8 @@
     "test:watch": "vitest",
     "e2e": "vite build && playwright test",
     "e2e:ui": "playwright test --ui",
-    "e2e:recordings:check": "bun e2e/rig/replay/check.ts"
+    "e2e:recordings:check": "bun e2e/rig/replay/check.ts",
+    "hitbox:check": "bun e2e/hitbox/check.ts"
   },
   "dependencies": {
     "@mathjax/mathjax-newcm-font": "^4.1.3",

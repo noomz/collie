@@ -56,6 +56,15 @@ describe("rootLoader", () => {
     expect(data.agents).toHaveLength(2);
   });
 
+  it("says whether the bridge runs tricks, so a page can tell none from not yet", async () => {
+    const { rootLoader } = await import("./loaders");
+    expect((await rootLoader()).tricks).toBe(false);
+    server.use(http.get("/api/snapshot", () => HttpResponse.json({ ...fixtureSnapshot, tricksRev: 4 })));
+    vi.resetModules();
+    const again = await import("./loaders");
+    expect((await again.rootLoader()).tricks).toBe(true);
+  });
+
   it.each([401, 403] as const)("marks a %i response as an auth error", async (status) => {
     rejectSnapshot(status);
     const { rootLoader } = await import("./loaders");
@@ -1088,7 +1097,7 @@ describe("cold boot with no network", () => {
         http.get(/\/api\/pane\/[^/]+$/, () =>
           HttpResponse.json({
             paneId: "w1:p1",
-            text: "$ sudo -v\n[sudo] password for altan:",
+            text: "$ sudo -v\n[sudo] password for dev:",
             truncated: false,
             revision: 2,
           }),
@@ -1128,7 +1137,7 @@ describe("crewLoader", () => {
     const { crewLoader } = await import("./loaders");
     const data = await crewLoader();
     expect(data.error).toBe(false);
-    expect(data.status?.members.map((m) => m.id)).toEqual(["bluefin", "workshop", "attic"]);
+    expect(data.status?.members.map((m) => m.id)).toEqual(["lodge", "workshop", "attic"]);
   });
 
   // The default handler already refuses with 404, which is what a solo collie and a peer both do.
@@ -1158,8 +1167,8 @@ describe("rootLoader — spaces and tabs follow the host the url names", () => {
     crewSnapshot();
     const { rootLoader } = await import("./loaders");
     const data = await rootLoader();
-    expect(data.workspaces.map((w) => w.host)).toEqual(["bluefin", "bluefin"]);
-    expect(data.tabs.every((t) => t.host === "bluefin")).toBe(true);
+    expect(data.workspaces.map((w) => w.host)).toEqual(["lodge", "lodge"]);
+    expect(data.tabs.every((t) => t.host === "lodge")).toBe(true);
   });
 
   it("gives the peer's when the url names it — including its own `w1`", async () => {

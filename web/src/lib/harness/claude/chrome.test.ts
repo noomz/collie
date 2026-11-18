@@ -244,7 +244,7 @@ describe("extractStatusLines — recovers the stripped statusline run", () => {
   it("a real 3-row statusline surfaces every row, in TUI order", () => {
     const REAL_ROWS = [
       "  CTX:20% CACHE:100% LIMITS 5h:22%/1h:20m 7d:26%/5d:03h",
-      "  [Opus·medium] ~/projects/workspace-sprqvntrs/argo-sprqvntrs on main*",
+      "  [Opus·medium] ~/projects/workspace-example/argo-example on main*",
       "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 4 agents",
     ];
     // U+00A0 after the marker, as Claude renders it — never a plain space.
@@ -338,6 +338,19 @@ describe("extractAgentsFooter — the background-agents block under the statusli
 
   it("is empty when there is no input box at the tail", () => {
     expect(extractAgentsFooter(splitLines(parseAnsi("hello\nworld")))).toEqual([]);
+  });
+
+  it("extracts the macOS ⏺ main header on idle and focused captures", () => {
+    expect(footerText(fixtureLines("claude--v2322-macos-agents-panel-idle--w80.txt"))).toEqual([
+      "⏺ main",
+      "◯ general-purpose  audit layout metrics across narrow vie… 4s · ↓ 307 tokens",
+      "◯ general-purpose  verify build types                      3s · ↓ 284 tokens",
+    ]);
+    expect(footerText(fixtureLines("claude--v2322-macos-agents-panel-focused--w80.txt"))).toEqual([
+      "❯ ⏺ main",
+      "◯ general-purpose  audit responsive layout metrics and ove… 2s · ↓ 29 tokens",
+      "◯ general-purpose  verify build types                       1s · ↓ 31 tokens",
+    ]);
   });
 });
 
@@ -1140,6 +1153,23 @@ describe("real corpus — pinned so any change to the walk shows up as a diff", 
     { fixture: "v2317-next-steps-suggestions-dismissed--w100", statusRows: 1, draft: null, stripped: 5 },
     { fixture: "v2304-select-preview-cjk", statusRows: 0, draft: null, stripped: 0 },
     { fixture: "v2304-select-preview-cjk-moved", statusRows: 0, draft: null, stripped: 0 },
+    // Remote Control on (2.1.319): `/rc` is the fourth statusline row, stripped with the rest.
+    { fixture: "v2319-rc-footer-idle--w100", statusRows: 4, draft: null, stripped: 9 },
+    // Remote Control on, 2.1.323 (lab 2026-11-13): the pill `/rc active` shares the mode row (one statusline row)
+    // or takes a row of its own under a full-width notice (three), and is stripped with the rest. Dialogs draw
+    // no footer, so no status row. The slash list's `/` is the draft; the same idle box with Remote Control off.
+    { fixture: "v2323-rc-off-ask-single--w100", statusRows: 0, draft: null, stripped: 20 },
+    { fixture: "v2323-rc-off-idle--w100", statusRows: 1, draft: null, stripped: 5 },
+    { fixture: "v2323-rc-off-permission-bash--w100", statusRows: 0, draft: null, stripped: 8 },
+    { fixture: "v2323-rc-on-ask-single--w100", statusRows: 0, draft: null, stripped: 2 },
+    { fixture: "v2323-rc-on-draft--w100", statusRows: 3, draft: "hello there", stripped: 30 },
+    { fixture: "v2323-rc-on-idle-joined--w100", statusRows: 1, draft: null, stripped: 14 },
+    { fixture: "v2323-rc-on-idle-notice--w100", statusRows: 3, draft: null, stripped: 30 },
+    { fixture: "v2323-rc-on-idle-usage--w100", statusRows: 3, draft: null, stripped: 30 },
+    { fixture: "v2323-rc-on-permission-bash--w100", statusRows: 0, draft: null, stripped: 5 },
+    { fixture: "v2323-rc-on-rewind--w100", statusRows: 0, draft: null, stripped: 6 },
+    { fixture: "v2323-rc-on-running--w100", statusRows: 2, draft: null, stripped: 26 },
+    { fixture: "v2323-rc-on-slash-list--w100", statusRows: 0, draft: "/", stripped: 26 },
     { fixture: "wizard-multiselect-checked", statusRows: 0, draft: null, stripped: 0 },
     { fixture: "wizard-multiselect-final", statusRows: 0, draft: null, stripped: 0 },
     { fixture: "wizard-multiselect-pointer-next", statusRows: 0, draft: null, stripped: 0 },
@@ -1168,6 +1198,54 @@ describe("real corpus — pinned so any change to the walk shows up as a diff", 
     { fixture: "v21314-core-menu-model--w120", statusRows: 0, draft: null, stripped: 0 },
     // Claude Code 2.1.318: the weekly-limit notice fills the /model picker's top edge, one trailing `▔` (2026-11-06).
     { fixture: "v2318-model-picker-usage-notice-edge--w120", statusRows: 0, draft: null, stripped: 0 },
+    { fixture: "v2322-permission-bash-cut-top--w160", statusRows: 0, draft: null, stripped: 0 },
+    // Stock Claude Code 2.1.322 on macOS: `⏺ main` (U+23FA) over two `◯` rows, captured in an 80 x 45 tmux pane (2026-11-11).
+    { fixture: "v2322-macos-agents-panel-focused--w80", statusRows: 1, draft: null, stripped: 25 },
+    { fixture: "v2322-macos-agents-panel-idle--w80", statusRows: 2, draft: null, stripped: 27 },
+    { fixture: "v2322-macos-agents-panel-working--w80", statusRows: 2, draft: null, stripped: 27 },
+    // Claude Code 2.1.325 `/login` (2026-11-15). The sign-in field reads as a box from the panel's rule to the
+    // end: its draft is the field's masked text, never the code.
+    { fixture: "v2325-login-bad-code--w61", statusRows: 0, draft: null, stripped: 23 },
+    { fixture: "v2325-login-console-methods--w61", statusRows: 0, draft: null, stripped: 21 },
+    { fixture: "v2325-login-console-url--w61", statusRows: 0, draft: null, stripped: 35 },
+    { fixture: "v2325-login-console-url-pasted--w61", statusRows: 0, draft: "***************************…", stripped: 35 },
+    { fixture: "v2325-login-methods--w61", statusRows: 0, draft: null, stripped: 13 },
+    { fixture: "v2325-login-url--w61", statusRows: 0, draft: null, stripped: 35 },
+    // `/login` opened inside a running conversation at 220 columns (2026-11-16): the same box under the transcript.
+    { fixture: "v2325-login-url-in-session--w220", statusRows: 0, draft: null, stripped: 49 },
+    { fixture: "v2325-login-url-typed--w120", statusRows: 0, draft: "***************ESTATE", stripped: 35 },
+    { fixture: "v2325-login-url-typed--w61", statusRows: 0, draft: "***************ESTATE", stripped: 35 },
+    // `/theme` in an onboarded session (2.1.325, 2026-11-15): the theme list under the prompt, no box.
+    { fixture: "v2325-theme-command--w40", statusRows: 0, draft: null, stripped: 2 },
+    { fixture: "v2325-theme-command--w61", statusRows: 0, draft: null, stripped: 5 },
+    // Claude Code 2.1.325's first run, an empty config folder (2026-11-15). The sign-in field reads as a box
+    // from the welcome art's last row (or the welcome row) to the end; its draft is the masked text, wrapped.
+    { fixture: "v2325-first-run-console-methods--w61", statusRows: 0, draft: null, stripped: 16 },
+    { fixture: "v2325-first-run-console-url--w61", statusRows: 0, draft: null, stripped: 26 },
+    { fixture: "v2325-first-run-methods--w120", statusRows: 0, draft: null, stripped: 17 },
+    { fixture: "v2325-first-run-methods--w40", statusRows: 0, draft: null, stripped: 26 },
+    { fixture: "v2325-first-run-methods--w61", statusRows: 0, draft: null, stripped: 14 },
+    { fixture: "v2325-first-run-methods-moved2--w61", statusRows: 0, draft: null, stripped: 14 },
+    { fixture: "v2325-first-run-methods-moved3--w61", statusRows: 0, draft: null, stripped: 14 },
+    { fixture: "v2325-first-run-theme--w40", statusRows: 0, draft: null, stripped: 15 },
+    { fixture: "v2325-first-run-theme--w61", statusRows: 0, draft: null, stripped: 4 },
+    { fixture: "v2325-first-run-login-ok--w219", statusRows: 0, draft: null, stripped: 1 },
+    { fixture: "v2325-first-run-security-notes--w219", statusRows: 0, draft: null, stripped: 1 },
+    { fixture: "v2325-first-run-trust--w219", statusRows: 0, draft: null, stripped: 1 },
+    { fixture: "v2325-first-run-theme-moved--w61", statusRows: 0, draft: null, stripped: 4 },
+    { fixture: "v2325-first-run-thirdparty-methods--w61", statusRows: 0, draft: null, stripped: 16 },
+    { fixture: "v2325-first-run-url--w120", statusRows: 0, draft: null, stripped: 26 },
+    { fixture: "v2325-first-run-url--w40", statusRows: 0, draft: null, stripped: 41 },
+    { fixture: "v2325-first-run-url--w61", statusRows: 0, draft: null, stripped: 26 },
+    { fixture: "v2325-first-run-url-fullscreen--w61", statusRows: 0, draft: null, stripped: 36 },
+    { fixture: "v2325-first-run-url-fullscreen--w80", statusRows: 0, draft: null, stripped: 36 },
+    { fixture: "v2325-first-run-url-fullscreen--w120", statusRows: 0, draft: null, stripped: 36 },
+    { fixture: "v2325-first-run-url-fullscreen--w200", statusRows: 0, draft: null, stripped: 36 },
+    { fixture: "v2325-first-run-url-fullscreen--w219", statusRows: 0, draft: null, stripped: 36 },
+    { fixture: "v2325-first-run-url-pasted--w120", statusRows: 0, draft: "**************************************************************************************** **************************************#state", stripped: 26 },
+    { fixture: "v2325-first-run-url-pasted--w61", statusRows: 0, draft: "***************************** ***************************** ***************************** ******ateEND", stripped: 26 },
+    { fixture: "v2325-first-run-url-typed--w40", statusRows: 0, draft: "******** ******** STATE", stripped: 41 },
+    { fixture: "v2325-first-run-url-typed--w61", statusRows: 0, draft: "***************ESTATE", stripped: 26 },
     { fixture: "v21314-core-permission--w120", statusRows: 0, draft: null, stripped: 0 },
     { fixture: "v21314-core-permission--w60", statusRows: 0, draft: null, stripped: 0 },
     { fixture: "v21314-core-slash-list--w120", statusRows: 0, draft: "/", stripped: 24 },

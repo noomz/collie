@@ -1,8 +1,9 @@
-// Fixture data for the states playground — a believable herd, four rosters, three panes, so the page
+// Fixture data for the design reference — a believable herd, four rosters, three panes, so the page
 // shows what Collie looks like on a working day instead of on a two-row test snapshot.
 //
-// DEV-ONLY, like the rest of `src/playground/`: this module is only ever reached from
-// `playground.html`, which is not a build input.
+// DEV-ONLY, like the rest of `src/playground/`: this module is reached from `design.html`, which is
+// not a build input, from rounds under `src/pick/rounds/`, and from the website's app screens, which import it by name
+// (`@/playground/fixtures`): keep the module's path and its exports' names.
 //
 // ── The rules this file keeps ────────────────────────────────────────────────────────────────────
 //
@@ -56,6 +57,7 @@ import type {
 // `node:fs` — the playground's mirror is therefore the exact screen the grammar tests run against,
 // escape sequences and all, rather than a re-typed approximation of one.
 import claudePermissionBash from "@/fixtures/panes/claude--permission-bash.txt?raw";
+import claudePermissionCutTop from "@/fixtures/panes/claude--v2322-permission-bash-cut-top--w160.txt?raw";
 import claudeWorking from "@/fixtures/panes/claude--working.txt?raw";
 import claudeModelPicker from "@/fixtures/panes/claude-lab--menu-model-picker-v2300--w119.txt?raw";
 import claudeHeadsUp from "@/fixtures/panes/claude--v2302-heads-up-above-box--w142.txt?raw";
@@ -149,7 +151,7 @@ export const spacesWithWorktrees: WorkspaceView[] = [
 
 export const spaces: WorkspaceView[] = [
   { workspaceId: "w1", number: 1, label: "collie", focused: true, activeTabId: "w1:t1", tabCount: 3, paneCount: 4 },
-  { workspaceId: "w2", number: 2, label: "sprqvntrs-api", focused: false, activeTabId: "w2:t1", tabCount: 3, paneCount: 4 },
+  { workspaceId: "w2", number: 2, label: "example-api", focused: false, activeTabId: "w2:t1", tabCount: 3, paneCount: 4 },
   { workspaceId: "w3", number: 3, label: "nixcfg", focused: false, activeTabId: "w3:t1", tabCount: 2, paneCount: 3 },
   { workspaceId: "w4", number: 4, label: "blog", focused: false, activeTabId: "w4:t1", tabCount: 2, paneCount: 2 },
 ];
@@ -239,13 +241,13 @@ const needsYou: AgentView[] = [
   {
     paneId: "w2:p3",
     workspaceId: "w2",
-    workspaceLabel: "sprqvntrs-api",
+    workspaceLabel: "example-api",
     workspaceNumber: 2,
     tabId: "w2:t1",
     tabLabel: "fix-deploy",
     agent: "codex",
     status: "blocked",
-    cwd: "/home/you/src/sprqvntrs-api",
+    cwd: "/home/you/src/example-api",
     focused: false,
     hasSession: true,
     hint: "asked you a question and is waiting for the answer",
@@ -280,13 +282,13 @@ const readyUnseen: AgentView[] = [
   {
     paneId: "w2:p4",
     workspaceId: "w2",
-    workspaceLabel: "sprqvntrs-api",
+    workspaceLabel: "example-api",
     workspaceNumber: 2,
     tabId: "w2:t3",
     tabLabel: "billing-webhooks",
     agent: "claude",
     status: "done",
-    cwd: "/home/you/src/sprqvntrs-api",
+    cwd: "/home/you/src/example-api",
     focused: false,
     hasSession: true,
     sessionName: "billing webhooks",
@@ -339,13 +341,13 @@ const working: AgentView[] = [
   {
     paneId: "w2:p1",
     workspaceId: "w2",
-    workspaceLabel: "sprqvntrs-api",
+    workspaceLabel: "example-api",
     workspaceNumber: 2,
     tabId: "w2:t2",
     tabLabel: "migrate-users",
     agent: "codex",
     status: "working",
-    cwd: "/home/you/src/sprqvntrs-api",
+    cwd: "/home/you/src/example-api",
     focused: false,
     terminalTitle: "running drizzle-kit generate",
     lastActiveAt: TS - 4 * MIN,
@@ -388,13 +390,13 @@ const working: AgentView[] = [
   {
     paneId: "w2:p2",
     workspaceId: "w2",
-    workspaceLabel: "sprqvntrs-api",
+    workspaceLabel: "example-api",
     workspaceNumber: 2,
     tabId: "w2:t3",
     tabLabel: "billing-webhooks",
     agent: "claude",
     status: "working",
-    cwd: "/home/you/src/sprqvntrs-api",
+    cwd: "/home/you/src/example-api",
     focused: false,
     hasSession: true,
     terminalTitle: "waiting on CI",
@@ -461,13 +463,13 @@ const resting: AgentView[] = [
   {
     paneId: "w2:p5",
     workspaceId: "w2",
-    workspaceLabel: "sprqvntrs-api",
+    workspaceLabel: "example-api",
     workspaceNumber: 2,
     tabId: "w2:t3",
     tabLabel: "billing-webhooks",
     agent: "shell",
     status: "unknown",
-    cwd: "/home/you/src/sprqvntrs-api",
+    cwd: "/home/you/src/example-api",
     focused: false,
     kind: "shell",
     paneLabel: "logs",
@@ -1064,6 +1066,34 @@ export const paneBlocked: PaneFixture = {
   },
 };
 
+/**
+ * Blocked on a permission whose command is taller than the screen (Claude Code 2.1.322, constructed):
+ * the dialog's top is above the read, so the card shows the rows that are on it, says the start is
+ * above the screen, and draws the "Dangerous rm operation" warning in the caution ink.
+ */
+export const paneBlockedCutTop: PaneFixture = {
+  pane: needsYou[0]!,
+  text: claudePermissionCutTop,
+  revision: 813,
+  surface: {
+    revision: 813,
+    turn: "idle",
+    modal: {
+      ask: {
+        id: "playground-ask-cut",
+        kind: "permission",
+        options: [
+          { id: "1", label: "Yes" },
+          { id: "2", label: "No" },
+        ],
+        channel: "keys",
+        hash: "0000000001",
+      },
+    },
+    composer: "unknown",
+  },
+};
+
 /** Mid-tool-run, with the ANSI the mirror actually has to colour. */
 export const paneWorking: PaneFixture = {
   pane: working[0]!,
@@ -1288,7 +1318,7 @@ export function paneCache(overrides: Partial<PaneCache> & { state: PaneCache["st
  */
 export const watchedPanes: CacheWatchListEntry[] = [
   { id: "b7f1c2a9", label: "collie · next", session: "next", paneId: "%1" },
-  { id: "3d90ee14", label: "infra · claude", host: "minibuch", paneId: "w2:p1" },
+  { id: "3d90ee14", label: "infra · claude", host: "workshop", paneId: "w2:p1" },
 ];
 
 /** One pane's place in the list: off, watchable, with the bridge's own 300-second window. */

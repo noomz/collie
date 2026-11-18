@@ -6,17 +6,19 @@ import { dirname, join } from "node:path";
 import { HOST as THIS_HOST } from "../host.ts";
 import type { JsonObject } from "../json.ts";
 import { ensureOwnerOnlyDir, isOwnerOnly, privateRoot } from "../owner-only.ts";
-import { CLOSED_KEY_LINE, FACT_SESSIONS_MAX, parseDecisionView, parseFacts, parseTrickDocumentText, partKey, RULES_NEVER_AUTO, type FactsSession, type TrickFacts, type TrickTapReply, type TricksRunsOn } from "../../web/src/lib/tricks/schema.ts";
+import { CLOSED_KEY_LINE, DECIDES_REPLY_LINE, FACT_SESSIONS_MAX, parseDecisionView, parseFacts, parseTrickDocumentText, partKey, RULES_NEVER_AUTO, type FactsSession, type TrickFacts, type TrickTapReply, type TricksRunsOn } from "../../web/src/lib/tricks/schema.ts";
 import type { AgentView } from "../types.ts";
-import { legacyPowersOf, powersOfDir } from "./approved.ts";
+import { legacyPowersOf, powersOf, powersOfDir } from "./approved.ts";
 import { factsWorldOf, NO_FACTS_CAPS, type FactsWorldInput } from "./facts.ts";
 import { trickCodeHash } from "./code-hash.ts";
+import { switchMasked } from "./code-view.ts";
 import { approvedCopyDir, pendingCopyDir, TRICKS_DIR } from "./paths.ts";
-import type { RunOutcome, RunSpec } from "./run.ts";
+import { RUN_TOKEN_MARK, runProgram, type RunOutcome, type RunSpec } from "./run.ts";
 import { payloadDigest } from "../worktree-receipts.ts";
+import { WalkyInstances } from "../walky/instances.ts";
 import { memoryTrickReceipts, TrickReceiptStore } from "./receipts.ts";
 import { tricksTapRoute } from "./routes.ts";
-import { backoffAfter, BACKOFF_MS, LINK_LINE, NO_PROGRAM_LINE, SWITCH_MOVED, NOT_APPROVED_LINE, PENDING_LINE, PENDING_SETTLE_MS, RUNS_MAX, TAMPERED_LINE, RIGHTS_LINE, TAP_LOST_LINE, TAP_REFUSED_LINES, TricksService, WATCH_WINDOW_MS, type TricksServiceDeps, type TapAnswer } from "./service.ts";
+import { backoffAfter, BACKOFF_MS, LINK_LINE, NO_PROGRAM_LINE, SWITCH_MOVED, NOT_APPROVED_LINE, PENDING_LINE, PENDING_SETTLE_MS, RUNS_MAX, TAMPERED_LINE, RIGHTS_LINE, TAP_LOST_LINE, STALE_CARD_LINE, TAP_REFUSED_LINES, TricksService, WATCH_WINDOW_MS, type TricksServiceDeps, type TapAnswer } from "./service.ts";
 import { updateSwitches, withEntry, withSwitch, writeSwitches, type Switches } from "./switches.ts";
 
 const dirs: string[] = [];
@@ -106,6 +108,7 @@ async function rig(outcomes: Scripted[] | null, extra: Partial<TricksServiceDeps
   const deps: TricksServiceDeps = {
     configDir,
     stateDir,
+    feature: { on: () => true },
     memberId: HOST,
     world: (memberId) => ({
       machine: "desk",
@@ -200,7 +203,7 @@ describe("discovery and the switch", () => {
     await tickAt(r, T0);
     const reply = await r.service.reply(undefined);
     expect(reply.tricks).toEqual([
-      { host: HOST, id: "legs", name: "Browser leg", icon: "plug", on: false, state: "off", places: ["belt", "session"], provenance: { via: "folder" }, approves: expect.stringMatching(/^[0-9a-f]{64}$/u) },
+      { host: HOST, id: "legs", name: "Browser leg", icon: "plug", on: false, state: "off", places: ["belt", "session"], provenance: { via: "folder" }, approves: expect.stringMatching(/^[0-9a-f]{64}$/u), run: "./legs.sh", everyMs: 30_000 },
     ]);
     expect(r.specs).toEqual([]);
   });
@@ -276,7 +279,10 @@ describe("discovery and the switch", () => {
     expect(reply.parts.map((p) => partKey(p))).toEqual(["lodge/legs/belt"]);
     expect(reply.parts[0]?.value).toEqual({ at: "belt", id: "belt", mark: { label: "23/34", intent: "x" } });
     expect(reply.parts[0]?.fresh).toBe("90s");
-    expect(reply.path).toBe(process.env.PATH ?? "/usr/bin:/bin");
+    // The runner's PATH goes to the host's own CLI only: a phone's reply has no `path` at all.
+    expect("path" in reply).toBe(false);
+    expect((await r.service.reply(undefined, { forCli: false })).path).toBeUndefined();
+    expect((await r.service.reply(undefined, { forCli: true })).path).toBe(process.env.PATH ?? "/usr/bin:/bin");
   });
 
   test("switched off: the parts go, and it does not run", async () => {
@@ -303,6 +309,110 @@ describe("discovery and the switch", () => {
     const reply = await r.service.reply(undefined);
     expect(reply.tricks).toEqual([]);
     expect(reply.present).toEqual([]);
+  });
+});
+
+describe("the local API's life (M105 spec 03: `onLocalApi`, told from `localApiWanted`)", () => {
+  test("told once after the first scan, then only when the switch moves: a second scan, off, on, a folder gone, a trick on", async () => {
+    const told: boolean[] = [];
+    let on = true;
+    const r = await rig([exited(belt("1"))], { feature: { on: () => on }, onLocalApi: (wanted) => told.push(wanted) });
+    const dir = await makeTrick(r.configDir, "legs", MANIFEST, { "legs.sh": "#!/bin/sh\n" });
+    await r.service.refresh(true);
+    expect(told).toEqual([true]);
+    await r.service.refresh(true);
+    expect(told).toEqual([true]);
+    // A trick switched on, off and gone moves nothing: the socket follows the switch for tricks as a whole.
+    await switchOn(r.stateDir, "legs");
+    await r.service.refresh(true);
+    await writeSwitches(r.stateDir, { on: new Map() });
+    await r.service.refresh(true);
+    await rm(dir, { recursive: true });
+    await r.service.refresh(true);
+    expect(told).toEqual([true]);
+    on = false;
+    await r.service.refresh(true);
+    expect(told).toEqual([true, false]);
+    on = true;
+    await r.service.refresh(true);
+    expect(told).toEqual([true, false, true]);
+  });
+
+  test("where tricks do not run (deps.active false: a peer, a deputy, a deposed lead) it is told false; a tick tells each change", async () => {
+    const told: boolean[] = [];
+    let active = false;
+    const r = await rig([exited(belt("1"))], { active: () => active, onLocalApi: (wanted) => told.push(wanted) });
+    await makeTrick(r.configDir, "legs", MANIFEST);
+    await switchOn(r.stateDir, "legs");
+    await tickAt(r, T0);
+    expect(told).toEqual([false]);
+    // The crown comes: the next tick, with no scan of its own needed, tells it.
+    active = true;
+    await r.service.tick();
+    expect(told).toEqual([false, true]);
+    // Deposed: the tick tells false before its own gate returns, whether or not a phone watched.
+    active = false;
+    await r.service.tick();
+    expect(told).toEqual([false, true, false]);
+    await r.service.tick();
+    expect(told).toEqual([false, true, false]);
+  });
+
+  test("the local API stands while tricks are switched on where tricks run, with no trick on, and closes when the switch goes off", async () => {
+    const told: boolean[] = [];
+    let on = true;
+    let active = true;
+    const r = await rig([exited(belt("1"))], { feature: { on: () => on }, active: () => active, onLocalApi: (wanted) => told.push(wanted) });
+    // No trick at all, the switch on: the socket stands.
+    await r.service.tick();
+    expect(told).toEqual([true]);
+    expect(r.service.localApiWanted()).toBe(true);
+    // The terminal writes off: the next tick closes it, and tells only the change.
+    on = false;
+    await r.service.tick();
+    await r.service.tick();
+    expect(told).toEqual([true, false]);
+    on = true;
+    await r.service.tick();
+    expect(told).toEqual([true, false, true]);
+    // Deposed (a peer, a deputy): no socket, the switch on or not.
+    active = false;
+    await r.service.tick();
+    expect(told).toEqual([true, false, true, false]);
+  });
+
+  test("on Windows (the gate) it is never told true", async () => {
+    const told: boolean[] = [];
+    const r = await rig([exited(belt("1"))], { platform: "win32", onLocalApi: (wanted) => told.push(wanted) });
+    await makeTrick(r.configDir, "legs", MANIFEST);
+    await switchOn(r.stateDir, "legs");
+    await tickAt(r, T0);
+    await r.service.refresh(true);
+    expect(told.every((wanted) => !wanted)).toBe(true);
+    expect(r.service.localApiWanted()).toBe(false);
+  });
+
+  test("a trick stopped by its backoff leaves the socket standing", async () => {
+    const told: boolean[] = [];
+    const r = await rig([exited("", 1)], { onLocalApi: (wanted) => told.push(wanted) });
+    await makeTrick(r.configDir, "legs", MANIFEST);
+    await switchOn(r.stateDir, "legs");
+    for (const t of [T0, T0 + 60_000, T0 + 360_000, T0 + 360_000 + 1_800_000]) await tickAt(r, t);
+    expect((await r.service.reply(undefined)).tricks[0]?.state).toBe("stopped");
+    await tickAt(r, T0 + 100 * 60 * 60_000);
+    expect(told).toEqual([true]);
+  });
+
+  test("a listener that throws breaks no scan", async () => {
+    const r = await rig([exited(belt("1"))], {
+      onLocalApi: () => {
+        throw new Error("boom");
+      },
+    });
+    await makeTrick(r.configDir, "legs", MANIFEST);
+    await r.service.refresh(true);
+    expect((await r.service.reply(undefined)).tricks.length).toBe(1);
+    expect(r.warnings.some((line) => line.includes("boom"))).toBe(true);
   });
 });
 
@@ -377,6 +487,15 @@ describe("the switch route", () => {
     const off = await r.service.setSwitch(HOST, "legs", false);
     expect(off).toMatchObject({ status: 200, body: { id: "legs", on: false, state: "off" } });
     expect(JSON.parse(await readFile(join(r.stateDir, "tricks", "switches.json"), "utf8")).on).toEqual({});
+  });
+
+  test("A5: code the About sheet cannot show as it is (a key here) is not switched on, and nothing is approved", async () => {
+    const r = await rig([exited(belt("1"))]);
+    // A placeholder of a key's shape: the secret mask changes the line.
+    await makeTrick(r.configDir, "legs", MANIFEST, { "legs.sh": '#!/bin/sh\nKEY="sk-or-v1-your-key-here-placeholder00"\n' });
+    await r.service.refresh(true);
+    expect(await r.service.setSwitch(HOST, "legs", true)).toEqual({ status: 409, body: { error: "not-whole", message: switchMasked("legs.sh", "legs") } });
+    expect(await readFile(join(r.stateDir, "tricks", "switches.json"), "utf8").catch(() => null)).toBeNull();
   });
 
   test("a switch keeps the other tricks' switches", async () => {
@@ -1143,6 +1262,18 @@ describe("consent tied to the code", () => {
   }
   const ASK = { key: "a", title: "Rerun?", summary: "Case 8 failed." };
 
+  test("point 2 (read of 1bf6c747a): an answer from the hill for a card the map does not hold says one sentence and runs nothing", async () => {
+    const spy = hillSpy();
+    const r = await rig([exited(belt("1"))], { decisions: spy.port });
+    await makeTrick(r.configDir, "legs", MANIFEST, { "legs.sh": "#!/bin/sh\n" });
+    await switchOn(r.stateDir, "legs");
+    await tickAt(r, T0);
+    const runs = r.specs.length;
+    expect(await r.service.tapFromHill(HOST, "legs", { rid: REQ, node: "hill/a", intent: "rerun", value: { text: null } }, "dc_oldtrick000")).toBe(false);
+    expect(r.warnings.filter((line) => line.includes(STALE_CARD_LINE))).toHaveLength(1);
+    expect(r.specs.length).toBe(runs);
+  });
+
   test("an edited program keeps running its approved copy; a new version waits, and the switch approves it", async () => {
     const spy = hillSpy();
     const r = await rig([exited(belt("1", { decisions: [ASK] }))], { decisions: spy.port });
@@ -1388,12 +1519,13 @@ describe("taps, answers and slots", () => {
 describe("real programs", () => {
   test("an sh program and a bun program run through the real runner", async () => {
     const r = await rig(null);
-    // A shell line runs under `cmd.exe` on Windows (run.ts `shellArgv`), so a `#!/bin/sh` program is a POSIX one: there the bun program runs alone.
+    // A shell line does not run on Windows (fault d, run.ts `windowsRunProblem`), so a `#!/bin/sh` program is a POSIX one: there the bun program runs alone.
     const posix = process.platform !== "win32";
     if (posix) await makeTrick(r.configDir, "hello", 'id = "hello"\nname = "Hello"\nrun = "./program.sh"\nplaces = ["belt"]\n', {
       "program.sh": `#!/bin/sh\nfacts=$(cat)\nn=$(printf '%s' "$facts" | grep -o '"paneId"' | wc -l | tr -d ' ')\nprintf '{"v":1,"parts":[{"at":"belt","id":"belt","mark":{"label":"%s"}}]}' "$n"\n`,
     });
-    await makeTrick(r.configDir, "bunny", 'id = "bunny"\nname = "Bunny"\nrun = "bun program.ts"\nplaces = ["belt"]\n', {
+    // The script form: a shell line such as `bun program.ts` does not run on Windows (fault d).
+    await makeTrick(r.configDir, "bunny", 'id = "bunny"\nname = "Bunny"\nrun = "program.ts"\nplaces = ["belt"]\n', {
       "program.ts": [
         'import { appendFileSync } from "node:fs";',
         "const facts = JSON.parse(await Bun.stdin.text());",
@@ -1440,7 +1572,77 @@ describe("warnings at the switch (review 15)", () => {
     const row = (await r.service.reply(undefined)).tricks.find((t) => t.id === "legs");
     expect(row && "warnings" in row).toBe(false);
     // The official repository at a commit the official list never named: the row must not read as the list.
-    expect(row?.provenance).toEqual({ via: "repo", at: "2026-11-10T09:41:00.000Z", repo: "AltanS/collie-tricks", sha: commit, unlisted: true });
+    expect(row?.provenance).toEqual({ via: "repo", at: "2026-11-10T09:41:00.000Z", repo: "AltanS/collie-tricks", sha: commit, url: "https://github.com/AltanS/collie-tricks", unlisted: true });
+  });
+
+  test("a phone's list asks for the repository facts, carries what the cache holds, and the manifest's version", async () => {
+    const asked: string[][] = [];
+    const held = new Map<string, { stars: number; pushedAt: string }>();
+    const repoFacts = {
+      facts: (url: string) => held.get(url),
+      want: (urls: Iterable<string>) => void asked.push([...urls]),
+    };
+    const r = await rig([exited(belt("1"))], { repoFacts });
+    const dir = await makeTrick(r.configDir, "legs", `${MANIFEST}version = "1.4.0"\n`, { "legs.sh": "#!/bin/sh\nprintf '{}'\n" });
+    const commit = "3f2a91c0d4e5f60718293a4b5c6d7e8f90a1b2c3";
+    const url = "https://github.com/someone/legs-trick";
+    await writeFile(join(dir, ".collie-origin.json"), JSON.stringify({ v: 1, url, ref: null, commit, subdir: null, at: "2026-11-10T09:41:00.000Z" }));
+    await makeTrick(r.configDir, "clock", 'id = "clock"\nname = "Clock"\nrun = "./clock.sh"\nplaces = ["belt"]\n', { "clock.sh": "#!/bin/sh\nprintf '{}'\n" });
+
+    // The first read finds nothing cached: no facts, and the one repository is asked for.
+    const first = (await r.service.reply(undefined)).tricks;
+    expect(asked).toEqual([[url]]);
+    expect(first.find((t) => t.id === "legs")?.repoFacts).toBeUndefined();
+    expect(first.find((t) => t.id === "legs")?.version).toBe("1.4.0");
+    expect(first.find((t) => t.id === "clock")?.version).toBeUndefined();
+
+    // A read landed: the rows take it at once and the rev moves.
+    const rev = r.service.rev();
+    held.set(url, { stars: 7, pushedAt: "2026-11-09T12:00:00Z" });
+    r.service.repoFactsMoved();
+    expect(r.service.rev()).toBeGreaterThan(rev ?? 0);
+    const legs = (await r.service.reply(undefined)).tricks.find((t) => t.id === "legs");
+    expect(legs?.repoFacts).toEqual({ stars: 7, pushedAt: "2026-11-09T12:00:00Z" });
+    expect(Object.keys(legs?.repoFacts ?? {}).toSorted()).toEqual(["pushedAt", "stars"]);
+    expect((await r.service.reply(undefined)).tricks.find((t) => t.id === "clock")?.repoFacts).toBeUndefined();
+
+    // The host's own CLI reads the list without asking for anything.
+    const before = asked.length;
+    await r.service.reply(undefined, { forCli: true });
+    expect(asked).toHaveLength(before);
+  });
+
+  test("an origin URL with a credential, an ssh or git@ form, a query or a local path never leaves the bridge, and is never read for", async () => {
+    const commit = "3f2a91c0d4e5f60718293a4b5c6d7e8f90a1b2c3";
+    const cases: { url: string; repo: string }[] = [
+      { url: "https://user:tok@github.com/a/b", repo: "a/b" },
+      { url: "https://tok@github.com/a/b.git", repo: "a/b" },
+      { url: "ssh://git@github.com/a/b.git", repo: "ssh://github.com/a/b" },
+      { url: "git@github.com:a/b.git", repo: "github.com:a/b" },
+      { url: "user:tok@github.com:a/b", repo: "github.com:a/b" },
+      { url: "https://github.com/a/b?access_token=tok", repo: "a/b" },
+      { url: "/srv/tricks/legs-repo", repo: "/srv/tricks/legs-repo" },
+    ];
+    for (const { url, repo } of cases) {
+      const asked: string[][] = [];
+      const facts: string[] = [];
+      const repoFacts = {
+        facts: (u: string) => void facts.push(u),
+        want: (urls: Iterable<string>) => void asked.push([...urls]),
+      };
+      const r = await rig([exited(belt("1"))], { repoFacts });
+      const dir = await makeTrick(r.configDir, "legs", MANIFEST, { "legs.sh": "#!/bin/sh\nprintf '{}'\n" });
+      await writeFile(join(dir, ".collie-origin.json"), JSON.stringify({ v: 1, url, ref: null, commit, subdir: null, at: "2026-11-10T09:41:00.000Z" }));
+      const reply = await r.service.reply(undefined);
+      const row = reply.tricks.find((t) => t.id === "legs");
+      expect(row?.provenance?.via, url).toBe("repo");
+      expect(row?.provenance?.url, url).toBeUndefined();
+      expect(row?.provenance?.repo, url).toBe(repo);
+      // Nothing secret anywhere in what a phone or a crew lead receives.
+      expect(JSON.stringify(reply), url).not.toContain("tok");
+      expect(asked.flat(), url).toEqual([]);
+      expect(facts, url).toEqual([]);
+    }
   });
 });
 
@@ -1551,6 +1753,40 @@ describe("the approved copy (crew slice 2)", () => {
     expect((await r.service.reply(undefined)).tricks[0]?.pending).toMatchObject({ hash: v3, powersChanged: true });
   });
 
+  // Review 3, item 5: `access` is in the powers, so a version that raises it waits for a person, auto or not.
+  test("auto holds a version that raises access, none to see and see to read; one that keeps it is taken", async () => {
+    const audits: string[] = [];
+    const r = await rig([exited(belt("1"))], { audit: (e) => audits.push(`${e.action} ${e.detail.by ?? ""}`.trim()) });
+    const toml = (access?: string): string => `${MANIFEST}contract = 3\n${access === undefined ? "" : `access = "${access}"\n`}`;
+    const dir = await makeTrick(r.configDir, "legs", toml(), { "legs.sh": "#!/bin/sh\necho 1\n" });
+    await switchOn(r.stateDir, "legs");
+    await tickAt(r, T0);
+    await updateSwitches(r.stateDir, (now) => withEntry(now, "legs", { ...now.on.get("legs")!, auto: true }));
+    const v1 = await codeHashOf(dir);
+    const held = async (want: string): Promise<void> => {
+      const file = JSON.parse(await readFile(join(r.stateDir, TRICKS_DIR, "switches.json"), "utf8"));
+      expect(file.on.legs.hash).toBe(want);
+    };
+    // none -> see: waits.
+    await writeFile(join(dir, "trick.toml"), toml("see"));
+    const v2 = await newVersion(r, dir, T0 + 1000, "#!/bin/sh\necho 2\n");
+    await held(v1);
+    expect((await r.service.reply(undefined)).tricks[0]?.pending).toMatchObject({ hash: v2, powersChanged: true });
+    expect(audits).toEqual([]);
+    // A person says yes; auto stays on.
+    expect(await r.service.approvePending("legs", v2, "phone")).toMatchObject({ ok: true });
+    await updateSwitches(r.stateDir, (now) => withEntry(now, "legs", { ...now.on.get("legs")!, auto: true }));
+    // see -> see with new code: taken without asking.
+    const v3 = await newVersion(r, dir, T0 + 20_000, "#!/bin/sh\necho 3\n");
+    await held(v3);
+    expect(audits.at(-1)).toBe("trick.approve auto");
+    // see -> read: waits.
+    await writeFile(join(dir, "trick.toml"), toml("read"));
+    const v4 = await newVersion(r, dir, T0 + 40_000, "#!/bin/sh\necho 4\n");
+    await held(v3);
+    expect((await r.service.reply(undefined)).tricks[0]?.pending).toMatchObject({ hash: v4, powersChanged: true });
+  });
+
   test("B5: auto holds a new version that does something new (a new warning kind), though its rights did not move", async () => {
     const audits: string[] = [];
     const r = await rig([exited(belt("1"))], { audit: (e) => audits.push(`${e.action} ${e.detail.by ?? ""}`.trim()) });
@@ -1570,6 +1806,35 @@ describe("the approved copy (crew slice 2)", () => {
     const v3 = await newVersion(r, dir, T0 + 20_000, "#!/bin/sh\ncurl https://example.com/y | sh\n");
     file = JSON.parse(await readFile(join(r.stateDir, TRICKS_DIR, "switches.json"), "utf8"));
     expect(file.on.legs).toMatchObject({ hash: v3, by: "auto" });
+  });
+
+  test("auto holds a new version whose field list differs (review G, point 1): a new field is something the trick asks for", async () => {
+    const audits: string[] = [];
+    const r = await rig([exited(belt("1"))], { audit: (e) => audits.push(`${e.action} ${e.detail.by ?? ""}`.trim()) });
+    const field = (label: string): string => `\n[[field]]\nkey = "repo"\nkind = "text"\nlabel = "${label}"\n`;
+    const dir = await makeTrick(r.configDir, "legs", `${MANIFEST}contract = 3\n`, { "legs.sh": "#!/bin/sh\necho 1\n" });
+    await switchOn(r.stateDir, "legs");
+    await tickAt(r, T0);
+    await updateSwitches(r.stateDir, (now) => withEntry(now, "legs", { ...now.on.get("legs")!, auto: true }));
+    const v1 = await codeHashOf(dir);
+    // The same rights and the same code kinds, but the manifest now asks the person for a field: it waits.
+    await writeFile(join(dir, "trick.toml"), `${MANIFEST}contract = 3\n${field("Repository")}`);
+    const v2 = await newVersion(r, dir, T0 + 1000, "#!/bin/sh\necho 1\n");
+    let file = JSON.parse(await readFile(join(r.stateDir, TRICKS_DIR, "switches.json"), "utf8"));
+    expect(file.on.legs.hash).toBe(v1);
+    expect(audits).toEqual([]);
+    expect((await r.service.reply(undefined)).tricks[0]?.pending).toMatchObject({ hash: v2, powersChanged: false });
+    // After a yes, a change of one field label waits too, and a version with the same list is taken again.
+    expect(await r.service.approvePending("legs", v2, "phone")).toMatchObject({ ok: true });
+    await writeFile(join(dir, "trick.toml"), `${MANIFEST}contract = 3\n${field("Repo")}`);
+    const v3 = await newVersion(r, dir, T0 + 20_000, "#!/bin/sh\necho 1\n");
+    file = JSON.parse(await readFile(join(r.stateDir, TRICKS_DIR, "switches.json"), "utf8"));
+    expect(file.on.legs.hash).toBe(v2);
+    expect((await r.service.reply(undefined)).tricks[0]?.pending).toMatchObject({ hash: v3 });
+    expect(await r.service.approvePending("legs", v3, "phone")).toMatchObject({ ok: true });
+    const v4 = await newVersion(r, dir, T0 + 40_000, "#!/bin/sh\necho 4\n");
+    file = JSON.parse(await readFile(join(r.stateDir, TRICKS_DIR, "switches.json"), "utf8"));
+    expect(file.on.legs).toMatchObject({ hash: v4, by: "auto" });
   });
 
   test("auto holds a new version that adds an inputs glob (contract 2): reading session folders is a new right", async () => {
@@ -1594,6 +1859,37 @@ describe("the approved copy (crew slice 2)", () => {
     file = JSON.parse(await readFile(join(r.stateDir, TRICKS_DIR, "switches.json"), "utf8"));
     expect(file.on.legs.hash).toBe(v2);
     expect((await r.service.reply(undefined)).tricks[0]?.pending).toMatchObject({ hash: v3, powersChanged: true });
+  });
+
+  test("decides = reply is a right: a version that adds it waits, auto or not; the approved copy refuses replyTo meanwhile, then takes it after the yes", async () => {
+    const audits: string[] = [];
+    const ask = { key: "ship", title: "Ship it?", summary: "One change.", options: [{ intent: "ship", label: "Ship it" }], replyTo: `${HOST}:w6X:3` };
+    const r = await rig([exited(belt("1", { decisions: [ask] }))], { audit: (e) => audits.push(`${e.action} ${e.detail.by ?? ""}`.trim()) });
+    const dir = await makeTrick(r.configDir, "legs", MANIFEST, { "legs.sh": "#!/bin/sh\necho 1\n" });
+    await switchOn(r.stateDir, "legs");
+    await tickAt(r, T0);
+    const legs = async () => (await r.service.reply(undefined)).tricks.find((trick) => trick.id === "legs");
+    // An old version without the key: its Decision with replyTo is refused with the plain line, the rest draws.
+    expect((await legs())?.refusals?.map((refusal) => [refusal.code, refusal.path, refusal.reason])).toEqual([["undeclared", "/decisions/0/replyTo", DECIDES_REPLY_LINE]]);
+    expect((await legs())?.decidesReply).toBeUndefined();
+    await updateSwitches(r.stateDir, (now) => withEntry(now, "legs", { ...now.on.get("legs")!, auto: true }));
+    const v1 = await codeHashOf(dir);
+    // The folder adds the key: a new code hash and new powers, so it waits for a person, auto or not.
+    await writeFile(join(dir, "trick.toml"), `${MANIFEST}decides = "reply"\n`);
+    const v2 = await newVersion(r, dir, T0 + 1000, "#!/bin/sh\necho 1\n");
+    const file = JSON.parse(await readFile(join(r.stateDir, TRICKS_DIR, "switches.json"), "utf8"));
+    expect(file.on.legs.hash).toBe(v1);
+    expect(audits).toEqual([]);
+    expect((await legs())?.pending).toMatchObject({ hash: v2, powersChanged: true });
+    // The approved copy runs, and its manifest is the one read: the folder's key does not count yet.
+    await tickAt(r, T0 + 40_000);
+    expect((await legs())?.refusals?.map((refusal) => refusal.reason)).toEqual([DECIDES_REPLY_LINE]);
+    expect((await legs())?.decidesReply).toBeUndefined();
+    // The yes: the new copy runs, the Decision passes, and the row says it before anything else.
+    expect(await r.service.approvePending("legs", v2, "phone")).toMatchObject({ ok: true });
+    await tickAt(r, T0 + 80_000);
+    expect((await legs())?.refusals).toBeUndefined();
+    expect((await legs())?.decidesReply).toBe(true);
   });
 
   test("a copy that changed on disk stops the trick with a plain line; switching on again approves the folder anew", async () => {
@@ -2066,5 +2362,886 @@ describe("review 8 V-N1: a switch on approves the code the person read", () => {
     expect(await r.service.setSwitch(HOST, "legs", true, now)).toMatchObject({ status: 200, body: { on: true } });
     const file = JSON.parse(await readFile(join(r.stateDir, TRICKS_DIR, "switches.json"), "utf8"));
     expect(file.on.legs.hash).toBe(now);
+  });
+});
+
+// ── Contract 2: the menu place and bound parts, tests named by rule ─────────────────────────────
+
+describe("the menu place and bound parts (contract 2)", () => {
+  const ROUTE = /^\/api\/tricks\/([^/]+)\/([^/]+)\/tap$/;
+  const rid = (n: number): string => `${String(n).padStart(8, "0")}-3b4a-4c5d-8e6f-708192a3b4c5`;
+  const CI = 'id = "ci"\nname = "CI"\nrun = "./ci.sh"\nevery = "30s"\ncontract = 2\nplaces = ["belt", "menu"]\n';
+  const OWN = `${HOST}:w6X:3`;
+  const OWN2 = `${HOST}:w6X:5`;
+  const SHELL = `${HOST}:w6X:4`;
+  const MEMBER = "m_workshop:w1:2";
+  const rows = (on = true): JsonObject[] => [
+    { id: "rerun", kind: "button", label: "Rerun CI", icon: "refresh", intent: "rerun", confirm: true },
+    { id: "watch", kind: "switch", label: "Watch branch", icon: "flag", intent: "watch", on },
+  ];
+  /** A document: the parts given, each as a contract 2 trick prints it. */
+  const doc = (...parts: JsonObject[]): string => JSON.stringify({ v: 2, asOf: "2026-11-08T09:00:00Z", parts });
+  const menu = (extra: JsonObject = {}): JsonObject => ({ at: "menu", id: "ci", rows: rows(), ...extra });
+  const mark = (extra: JsonObject = {}): JsonObject => ({ at: "belt", id: "mark", mark: { label: "2 red", intent: "open" }, ...extra });
+  const world: TricksServiceDeps["world"] = (memberId) => ({
+    machine: "desk",
+    sessions: [
+      { id: `${memberId}:w6X:3`, memberId, sessionId: `${memberId}:w6X:3`, paneId: "w6X:3", host: "desk", name: "composer", agent: "claude", status: "working", reachable: true },
+      { id: `${memberId}:w6X:5`, memberId, sessionId: `${memberId}:w6X:5`, paneId: "w6X:5", host: "desk", name: "docs", agent: "pi", status: "idle", reachable: true },
+      { id: `${memberId}:w6X:4`, memberId, sessionId: `${memberId}:w6X:4`, paneId: "w6X:4", host: "desk", name: "zsh", status: "idle", reachable: true },
+      { id: MEMBER, memberId: "m_workshop", sessionId: MEMBER, paneId: "w1:2", host: "workshop", name: "fix", agent: "claude", status: "idle", reachable: true },
+    ],
+    spaces: [],
+  });
+
+  async function menuRig(outputs: string[], instances: Map<string, string>): Promise<Rig & { audits: string[] }> {
+    const audits: string[] = [];
+    const r = await rig(outputs.map((out) => exited(out)), { world, instanceOf: (session) => instances.get(session) ?? null, audit: (entry) => audits.push(String(entry.detail.reason)) });
+    await makeTrick(r.configDir, "ci", CI, { "ci.sh": "#!/bin/sh\necho 1\n" });
+    await switchOn(r.stateDir, "ci");
+    await tickAt(r, T0);
+    return Object.assign(r, { audits });
+  }
+  async function route(r: Rig, body: JsonObject, bound = true): Promise<TrickTapReply> {
+    const match = ROUTE.exec(`/api/tricks/${HOST}/ci/tap`);
+    if (match === null) throw new Error("the tap path did not match");
+    return ok200(await tricksTapRoute(r.service, match, body, new URLSearchParams(bound ? "bound=1" : "")));
+  }
+  async function held(r: Rig, part: string) {
+    const found = (await r.service.reply(undefined, { bound: true })).parts.find((p) => p.trick === "ci" && p.part === part);
+    if (found === undefined) throw new Error(`the trick holds no part ${part}`);
+    return found;
+  }
+  const own = new Map([
+    [OWN, "ab12"],
+    [OWN2, "ef56"],
+  ]);
+
+  test("menu-tap-names-stored-row: a tap runs only a stored row's intent, and a switch only the state it asks for", async () => {
+    const r = await menuRig([doc(menu())], own);
+    const rev = (await held(r, "ci")).rev;
+    const from = { session: OWN };
+    expect(await route(r, { rid: rid(1), node: "ci", intent: "rerun", from, rev })).toMatchObject({ code: "ok" });
+    expect(await route(r, { rid: rid(2), node: "ci", intent: "delete", from, rev })).toMatchObject({ code: "rejected", refused: "intent" });
+    // The switch shows on: the only tap it sends asks for off.
+    expect(await route(r, { rid: rid(3), node: "ci", intent: "watch", value: "on", from, rev })).toMatchObject({ code: "rejected", refused: "value" });
+    expect(await route(r, { rid: rid(4), node: "ci", intent: "watch", from, rev })).toMatchObject({ code: "rejected", refused: "value" });
+    expect(await route(r, { rid: rid(5), node: "ci", intent: "watch", value: "off", from, rev: (await held(r, "ci")).rev })).toMatchObject({ code: "ok" });
+    // The run gets the tap and the session's identity only: no instance, no rev, nothing to type with.
+    const triggers = r.specs.slice(1).map((spec) => factsOf(spec).trigger);
+    expect(triggers).toEqual([
+      { kind: "tap", rid: rid(1), node: "ci", intent: "rerun", from },
+      { kind: "tap", rid: rid(5), node: "ci", intent: "watch", value: "off", from },
+    ]);
+    expect(r.audits).toEqual(["intent", "value"]);
+  });
+
+  test("menu-tap-rev-moved-changed: a row tapped from a rev before the rows changed answers changed and runs nothing", async () => {
+    const r = await menuRig([doc(menu()), doc(menu({ rows: rows(false) }))], own);
+    const drawn = (await held(r, "ci")).rev;
+    await tickAt(r, T0 + 30_000);
+    expect(r.specs).toHaveLength(2);
+    const reply = await route(r, { rid: rid(1), node: "ci", intent: "watch", value: "off", from: { session: OWN }, rev: drawn });
+    expect(reply).toMatchObject({ code: "changed", refused: "changed" });
+    expect(reply.parts?.find((p) => p.part === "ci")?.value).toMatchObject({ rows: [{}, { on: false }] });
+    expect(r.specs).toHaveLength(2);
+  });
+
+  test("menu-tap-session-not-listed: a menu tap names its session; a bound part only one it lists; an unbound one never a crew member's", async () => {
+    const r = await menuRig([doc(menu(), mark({ sessions: [OWN] }))], own);
+    const menuRev = (await held(r, "ci")).rev;
+    const markRev = (await held(r, "mark")).rev;
+    expect(await route(r, { rid: rid(1), node: "ci", intent: "rerun", rev: menuRev })).toMatchObject({ refused: "session" });
+    expect(await route(r, { rid: rid(2), node: "ci", intent: "rerun", from: { session: MEMBER }, rev: menuRev })).toMatchObject({ refused: "session" });
+    expect(await route(r, { rid: rid(3), node: "ci", intent: "rerun", from: { session: SHELL }, rev: menuRev })).toMatchObject({ refused: "session" });
+    expect(await route(r, { rid: rid(4), node: "mark", intent: "open", from: { session: OWN2 }, rev: markRev })).toMatchObject({ refused: "session" });
+    expect(await route(r, { rid: rid(5), node: "mark", intent: "open", rev: markRev })).toMatchObject({ refused: "session" });
+    expect(r.specs).toHaveLength(1);
+    expect(await route(r, { rid: rid(6), node: "mark", intent: "open", from: { session: OWN }, rev: markRev })).toMatchObject({ code: "ok" });
+    expect(await route(r, { rid: rid(7), node: "ci", intent: "rerun", from: { session: OWN2 }, rev: (await held(r, "ci")).rev })).toMatchObject({ code: "ok" });
+  });
+
+  test("bound-mark-pane-reuse-hidden: a pane id handed to a new session taps nothing until the program binds it again", async () => {
+    const instances = new Map(own);
+    const r = await menuRig([doc(mark({ sessions: [OWN] }))], instances);
+    const first = await held(r, "mark");
+    expect(first.bound).toEqual([{ session: OWN, instance: "ab12" }]);
+    // The pane closed and the multiplexer gave its id to a new session: the registry minted a new token.
+    instances.set(OWN, "zz99");
+    expect(await route(r, { rid: rid(1), node: "mark", intent: "open", from: { session: OWN }, rev: first.rev })).toMatchObject({ refused: "session" });
+    expect(r.specs).toHaveLength(1);
+    // The next run names the id again: it is stamped with the new token, and what the phone drew moved.
+    await tickAt(r, T0 + 30_000);
+    const again = await held(r, "mark");
+    expect(again.bound).toEqual([{ session: OWN, instance: "zz99" }]);
+    expect(await route(r, { rid: rid(2), node: "mark", intent: "open", from: { session: OWN }, rev: first.rev })).toMatchObject({ refused: "changed" });
+    expect(await route(r, { rid: rid(3), node: "mark", intent: "open", from: { session: OWN }, rev: again.rev })).toMatchObject({ code: "ok" });
+  });
+
+  /** A rig whose panes' binding generations the test sets, the instance tokens fixed (`own`). */
+  async function generationRig(generations: Map<string, string>, extra: Partial<TricksServiceDeps> = {}): Promise<Rig> {
+    const r = await rig([exited(doc(menu({ sessions: [OWN] }), mark({ sessions: [OWN, OWN2] })))], {
+      world,
+      instanceOf: (session) => own.get(session) ?? null,
+      generationOf: (session) => generations.get(session) ?? null,
+      audit: () => undefined,
+      ...extra,
+    });
+    await makeTrick(r.configDir, "ci", CI, { "ci.sh": "#!/bin/sh\necho 1\n" });
+    await switchOn(r.stateDir, "ci");
+    await tickAt(r, T0);
+    return r;
+  }
+  const listed = async (r: Rig, since?: number) => {
+    const reply = await r.service.reply(since, { bound: true });
+    const parts = reply.parts.toSorted((a, b) => (a.part < b.part ? -1 : a.part > b.part ? 1 : 0));
+    return { rev: reply.rev, parts: parts.map((p) => [p.part, (p.bound ?? []).map((b) => b.session)]), present: reply.present.toSorted() };
+  };
+
+  test("binding generation: after a /clear a tap on a bound part is refused, and the part leaves the phone's list with a new rev", async () => {
+    const generations = new Map([
+      [OWN, "claude:s1"],
+      [OWN2, "pi:t1"],
+    ]);
+    const r = await generationRig(generations);
+    const ci = await held(r, "ci");
+    const before = await listed(r);
+    expect(before.parts).toEqual([
+      ["ci", [OWN]],
+      ["mark", [OWN, OWN2]],
+    ]);
+    const drawn = await held(r, "mark");
+    // A /clear in OWN's pane: the same pane and walky token, another agent session.
+    generations.set(OWN, "claude:s2");
+    // The menu part was bound to OWN alone, so it went with that binding; the mark no longer lists OWN.
+    expect(await route(r, { rid: rid(1), node: "ci", intent: "rerun", from: { session: OWN }, rev: ci.rev })).toMatchObject({ code: "rejected", refused: "part" });
+    // A phone that still drew the old mark is told it changed; one that drew the new one is refused for OWN.
+    expect(await route(r, { rid: rid(3), node: "mark", intent: "open", from: { session: OWN }, rev: drawn.rev })).toMatchObject({ code: "changed", refused: "changed" });
+    expect(await route(r, { rid: rid(4), node: "mark", intent: "open", from: { session: OWN }, rev: (await held(r, "mark")).rev })).toMatchObject({ code: "rejected", refused: "session" });
+    const after = await listed(r, before.rev);
+    expect(after.rev).toBeGreaterThan(before.rev);
+    expect(after.parts).toEqual([["mark", [OWN2]]]);
+    expect(after.present).toEqual([`${HOST}/ci/mark`]);
+    // The other session's binding stands, and its tap runs.
+    expect(await route(r, { rid: rid(2), node: "mark", intent: "open", from: { session: OWN2 }, rev: (await held(r, "mark")).rev })).toMatchObject({ code: "ok" });
+  });
+
+  test("binding generation, M1 with the REAL registry: a pane id reused inside 30 s by another agent, or the same agent's new session, inherits no bound row or mark", async () => {
+    const clock = { now: T0 };
+    const registry = new WalkyInstances(null, () => clock.now);
+    const panes = new Map([
+      ["w6X:3", "claude:s1"],
+      ["w6X:5", "pi:t1"],
+    ]);
+    const paneOf = (session: string): string => session.slice(session.indexOf(":") + 1);
+    const r = await generationRig(new Map(), {
+      instanceOf: (session) => registry.tokenOf("main", paneOf(session)),
+      generationOf: (session) => panes.get(paneOf(session)) ?? null,
+    });
+    const token = (await held(r, "ci")).bound?.[0]?.instance ?? "";
+    expect(token).toMatch(/^[a-z0-9]{4}$/u);
+    for (const [n, next] of [[1, "codex:x1"], [2, "claude:s9"]] as const) {
+      // Five seconds later another session took the pane id: well inside the grace, so the walky token stays.
+      clock.now += 5_000;
+      panes.set("w6X:3", next);
+      expect(registry.tokenOf("main", "w6X:3")).toBe(token);
+      const rev = (await held(r, "mark")).rev;
+      expect(await route(r, { rid: rid(n * 10), node: "mark", intent: "open", from: { session: OWN }, rev })).toMatchObject({ refused: "session" });
+      expect((await listed(r)).parts).toEqual([["mark", [OWN2]]]);
+      // The next run sees the new session and binds to it, by the program's own choice.
+      await tickAt(r, T0 + n * 60_000);
+      expect((await listed(r)).parts).toEqual([
+        ["ci", [OWN]],
+        ["mark", [OWN, OWN2]],
+      ]);
+    }
+  });
+
+  test("binding generation: the same agent closing and reopening inside one observe tick taps nothing until it names its session, then the row goes", async () => {
+    const generations = new Map([
+      [OWN, "claude:s1"],
+      [OWN2, "pi:t1"],
+    ]);
+    const r = await generationRig(generations);
+    // The new agent has not named its session yet: unsure, so the tap is refused and the row waits.
+    generations.set(OWN, "claude:-");
+    expect(await route(r, { rid: rid(1), node: "ci", intent: "rerun", from: { session: OWN }, rev: (await held(r, "ci")).rev })).toMatchObject({ refused: "session" });
+    expect((await listed(r)).present).toContain(`${HOST}/ci/ci`);
+    generations.set(OWN, "claude:s2");
+    expect((await listed(r)).present).toEqual([`${HOST}/ci/mark`]);
+    // A binding taken before the agent named its session learns the name, and a later change still drops it.
+    const early = new Map([
+      [OWN, "claude:-"],
+      [OWN2, "pi:t1"],
+    ]);
+    const e = await generationRig(early);
+    early.set(OWN, "claude:s1");
+    expect(await route(e, { rid: rid(2), node: "ci", intent: "rerun", from: { session: OWN }, rev: (await held(e, "ci")).rev })).toMatchObject({ code: "ok" });
+    early.set(OWN, "claude:s2");
+    expect((await listed(e)).present).toEqual([`${HOST}/ci/mark`]);
+  });
+
+  test("binding generation, bridge restart: nothing bound survives it; the first run binds the sessions as they are, unchanged or not", async () => {
+    const generations = new Map([
+      [OWN, "claude:s1"],
+      [OWN2, "pi:t1"],
+    ]);
+    const first = await generationRig(generations);
+    expect((await listed(first)).present).toEqual([`${HOST}/ci/ci`, `${HOST}/ci/mark`]);
+    const restart = async (): Promise<Rig> => {
+      const again = await rig([exited(doc(menu({ sessions: [OWN] }), mark({ sessions: [OWN, OWN2] })))], {
+        configDir: first.configDir,
+        stateDir: first.stateDir,
+        world,
+        instanceOf: (session) => own.get(session) ?? null,
+        generationOf: (session) => generations.get(session) ?? null,
+        audit: () => undefined,
+        revBase: 9000,
+      });
+      // The store is in memory: before the first run the new bridge holds no part, bound or not.
+      expect((await listed(again)).present).toEqual([]);
+      await tickAt(again, T0 + 60_000);
+      return again;
+    };
+    // Unchanged sessions: the first run binds them again, and a tap from OWN runs.
+    const same = await restart();
+    expect((await listed(same)).parts).toEqual([
+      ["ci", [OWN]],
+      ["mark", [OWN, OWN2]],
+    ]);
+    expect(await route(same, { rid: rid(1), node: "ci", intent: "rerun", from: { session: OWN }, rev: (await held(same, "ci")).rev })).toMatchObject({ code: "ok" });
+    // OWN changed while the bridge was down: the first run binds the conversation it saw, never the old one.
+    generations.set(OWN, "claude:s2");
+    const changed = await restart();
+    expect(await route(changed, { rid: rid(2), node: "ci", intent: "rerun", from: { session: OWN }, rev: (await held(changed, "ci")).rev })).toMatchObject({ code: "ok" });
+    generations.set(OWN, "claude:s1");
+    expect((await listed(changed)).present).toEqual([`${HOST}/ci/mark`]);
+  });
+
+  test("M2: a refused part is not kept stale where an accepted part took its slot, in every one-part place, bound or not", async () => {
+    const ALL = 'id = "ci"\nname = "CI"\nrun = "./ci.sh"\nevery = "30s"\ncontract = 2\nplaces = ["belt", "menu", "status", "dashboard", "tabbar"]\n';
+    const first = doc(
+      mark(),
+      mark({ id: "here", sessions: [OWN] }),
+      menu(),
+      { at: "status", id: "s1", chip: { text: "one" } },
+      { at: "dashboard", id: "d1", item: { label: "One" } },
+      { at: "tabbar", id: "t1", item: { label: "One" } },
+    );
+    // The next run puts a new part in each slot first, then sends the old one again, refused as a second.
+    const second = doc(
+      mark({ id: "b" }),
+      mark({ id: "there", sessions: [OWN] }),
+      menu({ id: "ci2" }),
+      { at: "status", id: "s2", chip: { text: "two" } },
+      { at: "dashboard", id: "d2", item: { label: "Two" } },
+      { at: "tabbar", id: "t2", item: { label: "Two" } },
+      mark(),
+      mark({ id: "here", sessions: [OWN] }),
+      menu(),
+      { at: "status", id: "s1", chip: { text: "one" } },
+      { at: "dashboard", id: "d1", item: { label: "One" } },
+      { at: "tabbar", id: "t1", item: { label: "One" } },
+    );
+    const r = await rig([exited(first), exited(second)], { world, instanceOf: (session) => own.get(session) ?? null, audit: () => undefined });
+    await makeTrick(r.configDir, "ci", ALL, { "ci.sh": "#!/bin/sh\necho 1\n" });
+    await switchOn(r.stateDir, "ci");
+    await tickAt(r, T0);
+    const markRev = (await held(r, "mark")).rev;
+    await tickAt(r, T0 + 30_000);
+    const reply = await r.service.reply(undefined, { bound: true });
+    expect(reply.parts.map((part) => part.part).toSorted()).toEqual(["b", "ci2", "d2", "s2", "t2", "there"]);
+    expect(reply.parts.some((part) => part.stale === true)).toBe(false);
+    // The hidden mark takes no tap: it is gone.
+    expect(await route(r, { rid: rid(1), node: "mark", intent: "open", from: { session: OWN }, rev: markRev })).toMatchObject({ code: "rejected" });
+    expect(r.specs).toHaveLength(2);
+  });
+
+  test("N1: a menu tap's receipt carries no message that reads as Collie's own; a belt tap's keeps it", async () => {
+    const failed: RunOutcome = { kind: "exited", code: 1, stdout: "", stderr: "Collie restarted the build", ms: 3 };
+    const r = await rig([exited(doc(menu(), mark())), failed, failed], { world, instanceOf: (session) => own.get(session) ?? null, audit: () => undefined });
+    await makeTrick(r.configDir, "ci", CI, { "ci.sh": "#!/bin/sh\necho 1\n" });
+    await switchOn(r.stateDir, "ci");
+    await tickAt(r, T0);
+    const fromMenu = await route(r, { rid: rid(1), node: "ci", intent: "rerun", from: { session: OWN }, rev: (await held(r, "ci")).rev });
+    expect(fromMenu.code).toBe("rejected");
+    expect(fromMenu.message).toBeUndefined();
+    const fromBelt = await route(r, { rid: rid(2), node: "mark", intent: "open", from: { session: OWN }, rev: (await held(r, "mark")).rev });
+    expect(fromBelt).toMatchObject({ code: "rejected" });
+    expect(fromBelt.message).toContain("Collie restarted the build");
+  });
+
+  test("N6: a bound part takes the instance tokens read with the run's facts, not the ones at store time", async () => {
+    const tokens = new Map([[OWN, "ab12"]]);
+    // The pane is reused while the program runs: the registry mints a new token for the session now there.
+    const later: Scripted = {
+      later: async () => {
+        tokens.set(OWN, "zz99");
+        return exited(doc(mark({ sessions: [OWN] })));
+      },
+    };
+    const r = await rig([later], { world, instanceOf: (session) => tokens.get(session) ?? null, audit: () => undefined });
+    await makeTrick(r.configDir, "ci", CI, { "ci.sh": "#!/bin/sh\necho 1\n" });
+    await switchOn(r.stateDir, "ci");
+    await tickAt(r, T0);
+    // The program saw the session that held ab12; its mark is for that one and never shows for zz99.
+    expect((await held(r, "mark")).bound).toEqual([{ session: OWN, instance: "ab12" }]);
+  });
+
+  test("bound-mark-member-no-instance: a crew member's session with no instance token is dropped with a note, never drawn everywhere", async () => {
+    const r = await menuRig([doc(mark({ sessions: [MEMBER] }), menu({ sessions: [MEMBER, SHELL, `${HOST}:w6X:9`] })), doc(mark({ sessions: [MEMBER] }))], own);
+    const reply = await r.service.reply(undefined, { bound: true });
+    // Neither part is stored: with no session left, a bound part goes, it does not fall back to every session.
+    expect(reply.parts).toEqual([]);
+    expect(reply.present).toEqual([]);
+    const notes = (reply.tricks[0]?.refusals ?? []).map((note) => [note.code, note.part, note.reason]);
+    expect(notes).toEqual([
+      ["dropped", "mark", `"${MEMBER}" has no instance Collie can bind to, so the part does not show there.`],
+      ["dropped", "mark", "None of the part's sessions is open, so the part is left out."],
+      ["dropped", "ci", `"${MEMBER}" has no instance Collie can bind to, so the part does not show there.`],
+      ["dropped", "ci", `"${SHELL}" is not an agent session in this run's facts, so the part does not show there.`],
+      ["dropped", "ci", `"${HOST}:w6X:9" is not an agent session in this run's facts, so the part does not show there.`],
+      ["dropped", "ci", "None of the part's sessions is open, so the part is left out."],
+    ]);
+    // A member that sent its token binds, and the tap holds it to that token.
+    const withMember = await menuRig([doc(mark({ sessions: [MEMBER] }))], new Map([[MEMBER, "kk77"]]));
+    const part = await held(withMember, "mark");
+    expect(part.bound).toEqual([{ session: MEMBER, instance: "kk77" }]);
+    expect(await route(withMember, { rid: rid(1), node: "mark", intent: "open", from: { session: MEMBER }, rev: part.rev })).toMatchObject({ code: "ok" });
+  });
+
+  test("bound=1: a phone that does not ask gets no bound part and no bound key, in the list and in a tap's receipt", async () => {
+    const r = await menuRig([doc(menu(), mark({ sessions: [OWN] }))], own);
+    const old = await r.service.reply(undefined);
+    expect(old.parts.map((p) => p.part)).toEqual(["ci"]);
+    expect(old.present).toEqual(["lodge/ci/ci"]);
+    const asked = await r.service.reply(undefined, { bound: true });
+    expect(asked.parts.map((p) => p.part).toSorted()).toEqual(["ci", "mark"]);
+    const rev = (await held(r, "ci")).rev;
+    const receipt = await route(r, { rid: rid(1), node: "ci", intent: "rerun", from: { session: OWN }, rev }, false);
+    expect(receipt.code).toBe("ok");
+    expect(receipt.present).toEqual(["lodge/ci/ci"]);
+    expect((receipt.parts ?? []).some((p) => p.bound !== undefined)).toBe(false);
+  });
+
+  test("menu-powers-gate-after-upgrade: a trick approved where menu was a later place stops for its rights here, and asks again", async () => {
+    const r = await rig([exited(doc(menu()))], { world, instanceOf: (session) => own.get(session) ?? null });
+    const dir = await makeTrick(r.configDir, "ci", CI, { "ci.sh": "#!/bin/sh\necho 1\n" });
+    // v1.29.0-edge.1 read `menu` as a later place and left it out of the places it stored the approval with.
+    const edge1 = powersOf({ places: ["belt"] });
+    expect(await powersOfDir(dir, "ci")).not.toBe(edge1);
+    const hash = await codeHashOf(dir);
+    await writeSwitches(r.stateDir, withSwitch({ on: new Map() }, "ci", true, "2026-11-12T08:00:00Z", hash, edge1));
+    await tickAt(r, T0);
+    expect(r.specs).toHaveLength(0);
+    const reply = await r.service.reply(undefined, { bound: true });
+    expect(reply.tricks[0]).toMatchObject({ on: false, state: "stopped", error: RIGHTS_LINE, rightsMoved: true });
+    expect(reply.parts).toEqual([]);
+    // Switching it on again approves the rights read now, the menu among them; then it draws its rows.
+    expect(await r.service.setSwitch(HOST, "ci", true)).toMatchObject({ status: 200, body: { state: "ok" } });
+    await tickAt(r, T0 + 1_000);
+    expect(r.specs).toHaveLength(1);
+    expect((await r.service.reply(undefined)).parts.map((p) => p.part)).toEqual(["ci"]);
+  });
+});
+
+// ACCESS: THE FACTS CARRY THE SOCKET (M105 spec 04, decisions 5 and 8). A trick whose approved manifest says
+// `access` gets `api: { socket, access }` in its facts while the local API stands, and nothing in the
+// environment. With no socket it gets no `api`, and its row says so once.
+describe("access and the local API in the facts", () => {
+  const SOCKET = "/home/dev/.local/state/collie/api/sock";
+  const accessManifest = (access: string): string => `${MANIFEST}contract = 3\naccess = ${JSON.stringify(access)}\n`;
+
+  test("access = see with the socket standing: the facts carry the path and the level, the environment carries nothing", async () => {
+    const r = await rig([exited(belt("x"))], { localApi: () => SOCKET });
+    await makeTrick(r.configDir, "legs", accessManifest("see"), { "legs.sh": "#!/bin/sh\n" });
+    await switchOn(r.stateDir, "legs");
+    await tickAt(r, T0);
+    const facts = factsOf(r.specs[0]);
+    expect(facts.api).toEqual({ socket: SOCKET, access: "see", token: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u) });
+    expect(JSON.stringify(r.specs[0]?.env)).not.toContain("sock");
+    const row = (await r.service.reply(undefined)).tricks[0];
+    expect(row?.access).toBe("see");
+    expect(row?.accessOff).toBeUndefined();
+  });
+
+  test("access = read is carried as read", async () => {
+    const r = await rig([exited(belt("x"))], { localApi: () => SOCKET });
+    await makeTrick(r.configDir, "legs", accessManifest("read"), { "legs.sh": "#!/bin/sh\n" });
+    await switchOn(r.stateDir, "legs");
+    await tickAt(r, T0);
+    expect(factsOf(r.specs[0]).api).toMatchObject({ socket: SOCKET, access: "read" });
+  });
+
+  test("access with no socket: no `api` in the facts, and the row carries one note", async () => {
+    const r = await rig([exited(belt("x"))], { localApi: () => null });
+    await makeTrick(r.configDir, "legs", accessManifest("see"), { "legs.sh": "#!/bin/sh\n" });
+    await switchOn(r.stateDir, "legs");
+    await tickAt(r, T0);
+    expect(factsOf(r.specs[0]).api).toBeUndefined();
+    expect("api" in JSON.parse(r.specs[0]?.stdin ?? "{}")).toBe(false);
+    const row = (await r.service.reply(undefined)).tricks[0];
+    expect(row).toMatchObject({ access: "see", accessOff: true });
+    // The same with no function wired at all (a bridge that never builds the socket).
+    const bare = await rig([exited(belt("x"))]);
+    await makeTrick(bare.configDir, "legs", accessManifest("see"), { "legs.sh": "#!/bin/sh\n" });
+    await switchOn(bare.stateDir, "legs");
+    await tickAt(bare, T0);
+    expect(factsOf(bare.specs[0]).api).toBeUndefined();
+    expect((await bare.service.reply(undefined)).tricks[0]?.accessOff).toBe(true);
+  });
+
+  test("a trick with no access gets no `api` even while the socket stands, and no note", async () => {
+    const r = await rig([exited(belt("x"))], { localApi: () => SOCKET });
+    await makeTrick(r.configDir, "legs", MANIFEST, { "legs.sh": "#!/bin/sh\n" });
+    await switchOn(r.stateDir, "legs");
+    await tickAt(r, T0);
+    expect(factsOf(r.specs[0]).api).toBeUndefined();
+    const row = (await r.service.reply(undefined)).tricks[0];
+    expect(row?.access).toBeUndefined();
+    expect(row?.accessOff).toBeUndefined();
+  });
+
+  test("an off trick carries its level but no note", async () => {
+    const r = await rig([exited(belt("x"))], { localApi: () => null });
+    await makeTrick(r.configDir, "legs", accessManifest("see"), { "legs.sh": "#!/bin/sh\n" });
+    await r.service.refresh(true);
+    const row = (await r.service.reply(undefined)).tricks[0];
+    expect(row).toMatchObject({ on: false, access: "see" });
+    expect(row?.accessOff).toBeUndefined();
+  });
+
+  test("apiMoved republishes the rows, so the note goes when the socket comes up", async () => {
+    let socket: string | null = null;
+    const r = await rig([exited(belt("x"))], { localApi: () => socket });
+    await makeTrick(r.configDir, "legs", accessManifest("see"), { "legs.sh": "#!/bin/sh\n" });
+    await switchOn(r.stateDir, "legs");
+    await tickAt(r, T0);
+    expect((await r.service.reply(undefined)).tricks[0]?.accessOff).toBe(true);
+    socket = SOCKET;
+    r.service.apiMoved();
+    expect((await r.service.reply(undefined)).tricks[0]?.accessOff).toBeUndefined();
+  });
+});
+
+// THE RUN TOKEN (M105 spec 05, decisions 1 and 2). A run of a trick that declares `access` gets one token in
+// its facts on stdin while the socket stands; the token resolves while the run lasts and dies with it, with
+// its trick's switch, with its removal, with tricks going off and at stop. Nowhere else: not in the
+// environment, the command line, a log line, a reply or a file under the state folder.
+describe("the run token of the local API", () => {
+  const SOCKET = "/home/dev/.local/state/collie/api/sock";
+  const accessManifest = (access: string): string => `${MANIFEST}contract = 3\naccess = ${JSON.stringify(access)}\n`;
+
+  /** A held run: the outcome waits until `finish` is called. */
+  interface HeldRun {
+    outcome: Scripted;
+    finish: (outcome?: RunOutcome) => void;
+    started: Promise<void>;
+  }
+  function held(): HeldRun {
+    let finish: (outcome?: RunOutcome) => void = () => undefined;
+    let started: () => void = () => undefined;
+    const startedP = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const outcome: Scripted = {
+      later: () =>
+        new Promise<RunOutcome>((resolve) => {
+          started();
+          finish = (o) => resolve(o ?? exited(belt("x")));
+        }),
+    };
+    return { outcome, finish: (o) => finish(o), started: startedP };
+  }
+
+  async function heldRig(extra: Partial<TricksServiceDeps> = {}, access = "see"): Promise<{ r: Rig; run: HeldRun; token: () => string; ticked: Promise<void> }> {
+    const run = held();
+    const r = await rig([run.outcome, exited(belt("x"))], { localApi: () => SOCKET, ...extra });
+    await makeTrick(r.configDir, "legs", accessManifest(access), { "legs.sh": "#!/bin/sh\n" });
+    await switchOn(r.stateDir, "legs");
+    const ticked = tickAt(r, T0);
+    await run.started;
+    return { r, run, token: () => factsOf(r.specs[0]).api?.token ?? "", ticked };
+  }
+
+  test("the token resolves to the trick and its level while the run lasts, and dies when it exits", async () => {
+    const { r, run, token, ticked } = await heldRig({}, "read");
+    expect(r.service.resolveRunToken(token())).toMatchObject({ trickId: "legs", level: "read" });
+    run.finish();
+    await ticked;
+    expect(r.service.resolveRunToken(token())).toBeNull();
+  });
+
+  for (const [how, outcome] of [
+    ["a failure", exited("", 1)],
+    ["a timeout", { kind: "timeout", stderr: "", ms: 5, limitMs: 5 }],
+    ["a kill", { kind: "stopped", stderr: "", ms: 5 }],
+    ["a refused start", { kind: "spawn-failed", message: "no such file", ms: 0 }],
+  ] as const satisfies readonly (readonly [string, RunOutcome])[]) {
+    test(`the token dies when the run ends by ${how}`, async () => {
+      const { r, run, token, ticked } = await heldRig();
+      expect(r.service.resolveRunToken(token())).not.toBeNull();
+      run.finish(outcome);
+      await ticked;
+      expect(r.service.resolveRunToken(token())).toBeNull();
+    });
+  }
+
+  test("the token dies when the runner throws", async () => {
+    let token = "";
+    const resolvedDuring: ReturnType<TricksService["resolveRunToken"]>[] = [];
+    const r = await rig(null, {
+      localApi: () => SOCKET,
+      run: async (spec) => {
+        token = factsOf(spec).api?.token ?? "";
+        resolvedDuring.push(r.service.resolveRunToken(token));
+        throw new Error("the runner broke");
+      },
+    });
+    await makeTrick(r.configDir, "legs", accessManifest("see"), { "legs.sh": "#!/bin/sh\n" });
+    await switchOn(r.stateDir, "legs");
+    await tickAt(r, T0).catch(() => undefined);
+    expect(resolvedDuring).toEqual([expect.objectContaining({ trickId: "legs", level: "see" })]);
+    expect(r.service.resolveRunToken(token)).toBeNull();
+  });
+
+  test("the token dies when the trick is switched off, while its run still goes", async () => {
+    const { r, run, token, ticked } = await heldRig();
+    expect(await r.service.setSwitch(HOST, "legs", false)).toMatchObject({ status: 200 });
+    await r.service.refresh(true);
+    expect(r.service.resolveRunToken(token())).toBeNull();
+    run.finish();
+    await ticked;
+  });
+
+  test("the token dies when the trick's folder is removed", async () => {
+    const { r, run, token, ticked } = await heldRig();
+    await rm(join(r.configDir, TRICKS_DIR, "legs"), { recursive: true, force: true });
+    r.clock.t = T0 + 60_000;
+    await r.service.refresh(true);
+    expect(r.service.resolveRunToken(token())).toBeNull();
+    run.finish();
+    await ticked;
+  });
+
+  test("the token dies when tricks are switched off as a whole", async () => {
+    const listeners: ((on: boolean) => void)[] = [];
+    let on = true;
+    const feature = {
+      on: () => on,
+      onChange: (listener: (on: boolean) => void) => {
+        listeners.push(listener);
+        return () => undefined;
+      },
+    };
+    const { r, run, token, ticked } = await heldRig({ feature });
+    expect(r.service.resolveRunToken(token())).not.toBeNull();
+    on = false;
+    for (const listener of listeners) listener(false);
+    expect(r.service.resolveRunToken(token())).toBeNull();
+    run.finish();
+    await ticked;
+  });
+
+  test("the token dies at stop", async () => {
+    const { r, run, token, ticked } = await heldRig();
+    r.service.stop();
+    expect(r.service.resolveRunToken(token())).toBeNull();
+    run.finish();
+    await ticked;
+  });
+
+  test("two runs get two tokens; a token of one trick never resolves as another", async () => {
+    const r = await rig([exited(belt("x"))], { localApi: () => SOCKET });
+    await makeTrick(r.configDir, "legs", accessManifest("see"), { "legs.sh": "#!/bin/sh\n" });
+    await makeTrick(r.configDir, "gates", accessManifest("read").replace('id = "legs"', 'id = "gates"'), { "legs.sh": "#!/bin/sh\n" });
+    await switchOn(r.stateDir, "legs", "gates");
+    await tickAt(r, T0);
+    const tokens = r.specs.map((spec) => factsOf(spec).api?.token);
+    expect(tokens).toHaveLength(2);
+    expect(new Set(tokens).size).toBe(2);
+  });
+
+  test("no socket, or no access: no token is minted", async () => {
+    const off = await rig([exited(belt("x"))], { localApi: () => null });
+    await makeTrick(off.configDir, "legs", accessManifest("see"), { "legs.sh": "#!/bin/sh\n" });
+    await switchOn(off.stateDir, "legs");
+    await tickAt(off, T0);
+    expect(JSON.parse(off.specs[0]?.stdin ?? "{}").api).toBeUndefined();
+    const none = await rig([exited(belt("x"))], { localApi: () => SOCKET });
+    await makeTrick(none.configDir, "legs", MANIFEST, { "legs.sh": "#!/bin/sh\n" });
+    await switchOn(none.stateDir, "legs");
+    await tickAt(none, T0);
+    expect(JSON.parse(none.specs[0]?.stdin ?? "{}").api).toBeUndefined();
+  });
+
+  test("the leak test: the token is in the run's stdin and nowhere else (no env, no argv, no log line, no reply, no file)", async () => {
+    const { r, run, token, ticked } = await heldRig({}, "read");
+    const secret = token();
+    expect(secret).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    const spec = r.specs[0];
+    expect(spec?.stdin).toContain(secret);
+    expect(JSON.stringify(spec?.env)).not.toContain(secret);
+    expect(spec?.command).not.toContain(secret);
+    expect(spec?.cwd).not.toContain(secret);
+    // The run prints its token back, as a careless trick might: a line of its output still never reaches a
+    // file of the state folder by the bridge's own hand, and no log line of the bridge names it.
+    run.finish(exited(belt("x")));
+    await ticked;
+    const reply = JSON.stringify(await r.service.reply(undefined, { bound: true }));
+    expect(reply).not.toContain(secret);
+    expect(r.warnings.join("\n")).not.toContain(secret);
+    // A tap runs the program again: its token is a new one, and that one also stays out of the reply.
+    const tap = JSON.stringify(await beltTap(r, REQ));
+    expect(tap).not.toContain(secret);
+    const second = factsOf(r.specs[1]).api?.token ?? "";
+    expect(second).not.toBe(secret);
+    expect(tap).not.toContain(second);
+    expect(r.service.resolveRunToken(second)).toBeNull();
+    // No file under the state folder holds either token.
+    const files = await walkFiles(r.stateDir);
+    expect(files.length).toBeGreaterThan(0);
+    for (const file of files) {
+      const text = await readFile(file, "utf8").catch(() => "");
+      expect({ file, holds: text.includes(secret) || text.includes(second) }).toEqual({ file, holds: false });
+    }
+  });
+});
+
+// Security read of spec 05, item 1: the run path awaits between `recheck` and the mint (here the inputs fetch,
+// held open by the test). A trick switched off, tricks switched off, or the trick removed inside that gap
+// gets no token and its program never starts.
+describe("the run token: a switch inside the gap between the recheck and the mint", () => {
+  const SOCKET = "/home/dev/.local/state/collie/api/sock";
+  const GAP_MANIFEST = `${MANIFEST}contract = 3\naccess = "see"\ninputs = ["TODO.md"]\n`;
+
+  async function gapRig(extra: Partial<TricksServiceDeps> = {}): Promise<{ r: Rig; ended: string[]; inGap: Promise<void>; leave: () => void; ticked: Promise<void> }> {
+    const ended: string[] = [];
+    let leave: () => void = () => undefined;
+    let entered: () => void = () => undefined;
+    const inGap = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const inputs = {
+      fetch: async () => {
+        entered();
+        await new Promise<void>((resolve) => {
+          leave = resolve;
+        });
+        return new Map();
+      },
+      forget: () => undefined,
+    };
+    const r = await rig([exited(belt("x"))], { localApi: () => SOCKET, inputs, runTokenEnded: (key) => void ended.push(key), ...extra });
+    await makeTrick(r.configDir, "legs", GAP_MANIFEST, { "legs.sh": "#!/bin/sh\n" });
+    await switchOn(r.stateDir, "legs");
+    const ticked = tickAt(r, T0);
+    await inGap;
+    return { r, ended, inGap, leave: () => leave(), ticked };
+  }
+
+  test("a control: with nothing switched, the run past the gap gets its token and starts", async () => {
+    const { r, ended, leave, ticked } = await gapRig();
+    leave();
+    await ticked;
+    expect(r.specs).toHaveLength(1);
+    expect(factsOf(r.specs[0]).api?.token).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(ended).toHaveLength(1);
+  });
+
+  test("the trick switched off inside the gap: no token, no start", async () => {
+    const { r, ended, leave, ticked } = await gapRig();
+    expect(await r.service.setSwitch(HOST, "legs", false)).toMatchObject({ status: 200 });
+    await r.service.refresh(true);
+    leave();
+    await ticked;
+    expect(r.specs).toHaveLength(0);
+    expect(ended).toEqual([]);
+  });
+
+  test("tricks switched off as a whole inside the gap: no token, no start", async () => {
+    const listeners: ((on: boolean) => void)[] = [];
+    let on = true;
+    const feature = {
+      on: () => on,
+      onChange: (listener: (on: boolean) => void) => {
+        listeners.push(listener);
+        return () => undefined;
+      },
+    };
+    const { r, ended, leave, ticked } = await gapRig({ feature });
+    on = false;
+    for (const listener of listeners) listener(false);
+    leave();
+    await ticked;
+    expect(r.specs).toHaveLength(0);
+    expect(ended).toEqual([]);
+  });
+
+  test("the trick removed inside the gap: no token, no start", async () => {
+    const { r, ended, leave, ticked } = await gapRig();
+    await rm(join(r.configDir, TRICKS_DIR, "legs"), { recursive: true, force: true });
+    r.clock.t = T0 + 60_000;
+    await r.service.refresh(true);
+    leave();
+    await ticked;
+    expect(r.specs).toHaveLength(0);
+    expect(ended).toEqual([]);
+  });
+});
+
+// Security read of spec 05, item 4: a program that prints its own facts prints its run token. The bridge
+// knows the token it handed the run, so the mark stands in its place in stdout and stderr before either
+// reaches the problem line, the warning log, the parser, a part or the reply. Real programs, real runner.
+describe.skipIf(process.platform === "win32")("the run token: a program that prints it back", () => {
+  const SOCKET = "/home/dev/.local/state/collie/api/sock";
+  const PRINTS = `${MANIFEST.replace('run = "./legs.sh"', 'run = "sh legs.sh"')}contract = 3\naccess = "see"\n`;
+  // The facts on stdout and on stderr, then the token alone as the last stderr line (the problem line's tail).
+  const TOKEN_OF = `token=$(printf '%s' "$facts" | sed 's/.*"token":"\\([^"]*\\)".*/\\1/')`;
+
+  async function printing(script: string): Promise<{ r: Rig; token: () => string }> {
+    let seen = "";
+    const r = await rig(null, {
+      localApi: () => SOCKET,
+      run: async (spec) => {
+        seen = factsOf(spec).api?.token ?? "";
+        return runProgram({ ...spec, timeoutMs: 5000 });
+      },
+    });
+    await makeTrick(r.configDir, "legs", PRINTS, { "legs.sh": script });
+    await switchOn(r.stateDir, "legs");
+    await tickAt(r, T0);
+    return { r, token: () => seen };
+  }
+
+  test("a failed run that printed its facts on stdout and stderr: the problem line, the warn log and the reply hold the mark", async () => {
+    const { r, token } = await printing(`#!/bin/sh\nfacts=$(cat)\n${TOKEN_OF}\nprintf '%s\\n' "$facts"\nprintf 'facts: %s\\n' "$facts" >&2\nprintf 'the token is %s\\n' "$token" >&2\nexit 3\n`);
+    const secret = token();
+    expect(secret).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    const reply = JSON.stringify(await r.service.reply(undefined, { bound: true }));
+    const logged = r.warnings.join("\n");
+    expect(logged).toContain(`The program exited with 3: the token is ${RUN_TOKEN_MARK}`);
+    expect(reply).toContain(`the token is ${RUN_TOKEN_MARK}`);
+    expect(logged).not.toContain(secret);
+    expect(reply).not.toContain(secret);
+  });
+
+  test("a run that drew its token into a part: the part shows the mark, never the token", async () => {
+    const { r, token } = await printing(`#!/bin/sh\nfacts=$(cat)\n${TOKEN_OF}\nprintf '{"v":1,"asOf":"2026-11-08T09:00:00Z","parts":[{"at":"belt","id":"belt","mark":{"label":"%s"}}]}\\n' "$token"\n`);
+    const secret = token();
+    expect(secret).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    const reply = await r.service.reply(undefined, { bound: true });
+    expect(JSON.stringify(reply.parts)).toContain(RUN_TOKEN_MARK);
+    expect(JSON.stringify(reply)).not.toContain(secret);
+    expect(r.warnings.join("\n")).not.toContain(secret);
+  });
+
+  test("a runner that throws with the token in its words: the log line holds the mark", async () => {
+    let seen = "";
+    const r = await rig(null, {
+      localApi: () => SOCKET,
+      run: async (spec) => {
+        seen = factsOf(spec).api?.token ?? "";
+        throw new Error(`the runner broke on ${seen}`);
+      },
+    });
+    await makeTrick(r.configDir, "legs", PRINTS, { "legs.sh": "#!/bin/sh\n" });
+    await switchOn(r.stateDir, "legs");
+    await tickAt(r, T0).catch(() => undefined);
+    expect(seen).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(r.warnings.join("\n")).toContain(`the runner broke on ${RUN_TOKEN_MARK}`);
+    expect(r.warnings.join("\n")).not.toContain(seen);
+  });
+});
+
+/** Every file under `dir`, recursively. */
+async function walkFiles(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...(await walkFiles(path)));
+    else if (entry.isFile()) out.push(path);
+  }
+  return out;
+}
+
+describe("review J, read of 1bf6c747a, point 3: the service forgets an id that arrives between scans", () => {
+  test("a folder that appears after the first scan runs the forget hook before the trick can run", async () => {
+    const seen: { id: string; runs: number }[] = [];
+    const r = await rig([exited(belt("x"))], {
+      forgetTrick: (id) => {
+        seen.push({ id, runs: r.specs.length });
+      },
+    });
+    await makeTrick(r.configDir, "legs", MANIFEST, { "legs.sh": "#!/bin/sh\n" });
+    await switchOn(r.stateDir, "legs");
+    // The first scan learns the ids it holds and forgets none.
+    await r.service.refresh(true);
+    expect(seen).toEqual([]);
+    // Another scan with no new id forgets none either.
+    await r.service.refresh(true);
+    expect(seen).toEqual([]);
+    // `collie trick add` at the terminal: a new folder appears between two scans, off, with no switch entry
+    // (`forgetLeftovers` cleared the old one).
+    await makeTrick(r.configDir, "fresh", MANIFEST.replace('id = "legs"', 'id = "fresh"').replace("./legs.sh", "./fresh.sh"), { "fresh.sh": "#!/bin/sh\n" });
+    await r.service.refresh(true);
+    // Before the trick had a runtime or a run.
+    expect(seen).toEqual([{ id: "fresh", runs: 0 }]);
+    expect(r.specs).toHaveLength(0);
+    // Held now: later scans forget nothing.
+    await r.service.refresh(true);
+    expect(seen).toHaveLength(1);
+  });
+
+  test("a folder removed and put back is an arrival again; a failing hook is logged and the trick still lists", async () => {
+    let calls = 0;
+    const r = await rig([exited(belt("x"))], {
+      forgetTrick: () => {
+        calls += 1;
+        throw new Error("views offline");
+      },
+    });
+    await makeTrick(r.configDir, "legs", MANIFEST, { "legs.sh": "#!/bin/sh\n" });
+    await r.service.refresh(true);
+    await rm(join(r.configDir, TRICKS_DIR, "legs"), { recursive: true });
+    await r.service.refresh(true);
+    expect(calls).toBe(0);
+    await makeTrick(r.configDir, "legs", MANIFEST, { "legs.sh": "#!/bin/sh\n" });
+    await r.service.refresh(true);
+    expect(calls).toBe(1);
+    expect(r.warnings.some((w) => w.includes("views offline"))).toBe(true);
+    expect((await r.service.reply(undefined)).tricks.map((t) => t.id)).toEqual(["legs"]);
+  });
+
+  test("a folder that vanishes and reappears while its switch entry holds an approved hash keeps its views and keys; no entry, or one with no hash, is forgotten", async () => {
+    const seen: string[] = [];
+    const r = await rig([exited(belt("x"))], { forgetTrick: (id) => void seen.push(id) });
+    const bare = MANIFEST.replace('id = "legs"', 'id = "bare"').replace("./legs.sh", "./bare.sh");
+    const open = MANIFEST.replace('id = "legs"', 'id = "open"').replace("./legs.sh", "./open.sh");
+    await makeTrick(r.configDir, "legs", MANIFEST, { "legs.sh": "#!/bin/sh\n" });
+    await makeTrick(r.configDir, "bare", bare, { "bare.sh": "#!/bin/sh\n" });
+    await makeTrick(r.configDir, "open", open, { "open.sh": "#!/bin/sh\n" });
+    // `legs` is approved (an entry with its code hash); `open` is on but approves nothing yet; `bare` has none.
+    await switchOn(r.stateDir, "legs");
+    await updateSwitches(r.stateDir, (now) => withSwitch(now, "open", true, "2026-11-08T09:00:00Z", null));
+    await r.service.refresh(true);
+    expect(seen).toEqual([]);
+    // The swap window of `collie trick update`: the folders are gone for one scan, the entries stay.
+    for (const id of ["legs", "bare", "open"]) await rm(join(r.configDir, TRICKS_DIR, id), { recursive: true });
+    await r.service.refresh(true);
+    expect(seen).toEqual([]);
+    for (const id of ["legs", "bare", "open"]) await makeTrick(r.configDir, id, MANIFEST.replace('id = "legs"', `id = "${id}"`).replace("./legs.sh", `./${id}.sh`), { [`${id}.sh`]: "#!/bin/sh\n" });
+    await r.service.refresh(true);
+    expect(seen.toSorted()).toEqual(["bare", "open"]);
+  });
+
+  test("a bridge with no tricks folder at its first look: the folder's first trick is not an arrival at the first good scan", async () => {
+    const seen: string[] = [];
+    const r = await rig([exited(belt("x"))], { forgetTrick: (id) => void seen.push(id) });
+    await r.service.refresh(true);
+    await makeTrick(r.configDir, "legs", MANIFEST, { "legs.sh": "#!/bin/sh\n" });
+    await r.service.refresh(true);
+    // The first scan found no folder: that scan counts as the first, so a trick after it is an arrival.
+    expect(seen).toEqual(["legs"]);
   });
 });

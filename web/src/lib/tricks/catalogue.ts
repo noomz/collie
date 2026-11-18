@@ -60,13 +60,15 @@ import {
   VIEW_TITLE_MAX,
   VIEW_WRITES_PER_MINUTE,
 } from "../agent-view/wire";
-import { AGENT_VIEW_CONTRACT, INPUTS_CONTRACT, TRICK_CONTRACT, TRICK_CONTRACT_DEFAULT } from "./contract";
+import { ACCESS_CONTRACT, AGENT_VIEW_CONTRACT, FIELDS_CONTRACT, INPUTS_CONTRACT, TRICK_CONTRACT, TRICK_CONTRACT_DEFAULT } from "./contract";
 import {
   ABOUT_MAX,
   ACTION_ICONS,
   ACTION_LABEL_MAX,
   ACTIONS_MAX,
+  ACCESS_WORDS,
   AGENT_VIEW_PLACE,
+  API_FACT_KEYS,
   ANSI_NAMES,
   BADGE_TEXT_MAX,
   CHIP_STATES,
@@ -76,6 +78,8 @@ import {
   DECISION_KEY_MAX,
   DECISION_KEYS,
   DECISION_VIEW_KINDS,
+  DECIDES_REPLY_LINE,
+  DECIDES_WORDS,
   DECISION_VIEW_LIMITS,
   DECISIONS_MAX,
   DEFAULT_DECISION_PRIORITY,
@@ -95,6 +99,7 @@ import {
   FACT_SPACES_MAX,
   FACE_MAX,
   FACTS_KEYS,
+  FIELD_KINDS,
   FOCUS_LIMITS,
   FRESH_MAX_MS,
   FRESH_MIN_MS,
@@ -112,6 +117,16 @@ import {
   LATER_PLACE_WORDS,
   LATER_TRIGGERS,
   MANIFEST_KEYS,
+  BOUND_PARTS_MAX,
+  BOUND_SESSIONS_MAX,
+  MENU_CONTRACT,
+  MENU_LABEL_MAX,
+  MENU_RESERVED_LEADS,
+  MENU_ROW_KINDS,
+  MENU_ROWS_MAX,
+  MENU_SHEET_ROWS_MAX,
+  MENU_TAP_WORDS,
+  MENU_WORDS,
   NAME_MAX,
   NODE_ATTR_RULES,
   NODE_ATTRS,
@@ -147,6 +162,7 @@ import {
   TRIGGER_KINDS,
   URL_MAX,
   VALUE_MAX_BYTES,
+  VERSION_MAX,
   VIEW_LIMITS,
   VIEW_ROOT_KINDS,
   WATCH_MAX,
@@ -160,11 +176,20 @@ import {
   TAP_REFUSED_LINES,
   type TapCode,
   type TapRefusal,
+  type TrickEvent,
   TRICKS_WINDOWS_LINE,
 } from "./schema";
 import {
   BACKOFF_MS,
   BASE_ENV_NAMES,
+  FIELD_HINT_MAX,
+  FIELD_LABEL_MAX,
+  FIELD_NUMBER_ABS_MAX,
+  FIELD_OPTION_MAX,
+  FIELD_OPTIONS_MAX,
+  FIELD_OPTIONS_MIN,
+  FIELD_TEXT_MAX,
+  FIELDS_MAX,
   GROUP_CARD_CODE_BYTES,
   GROUP_CODE_BYTES,
   GROUP_CODE_CARDS,
@@ -183,6 +208,12 @@ import {
   PROPOSALS_SENDER_HOUR_MAX,
   PROPOSALS_SENDER_OPEN_MAX,
   PROPOSE_LIMITS,
+  REPO_INDEX_ABOUT_MAX,
+  REPO_INDEX_BYTES_MAX,
+  REPO_INDEX_CONTRACT,
+  REPO_INDEX_NAME_MAX,
+  REPO_INDEX_TIMEOUT_MS,
+  REPO_INDEX_TRICKS_MAX,
   RUN_TIMEOUT_MS,
   RUNS_MAX,
   SEED_BYTES_MAX,
@@ -191,6 +222,7 @@ import {
   STDERR_CAP_BYTES,
   STDOUT_CAP_BYTES,
 } from "./limits";
+import { REPO_INDEX_FILE, REPO_INDEX_HOSTS } from "./repo-index";
 
 // ── Small helpers that make the words from the numbers ───────────────────────────────────────
 
@@ -258,7 +290,7 @@ export type Example =
 /** Who writes to a place: a program the person switched on, or the agent of one session. */
 export type Who = "program" | "agent";
 
-/** Every place word: the five a program draws in, and the one an agent view adds. */
+/** Every place word: the six a program draws in, and the one an agent view adds. */
 export type PlaceId = PlaceKind | typeof AGENT_VIEW_PLACE;
 
 export interface PlaceEntry {
@@ -282,6 +314,12 @@ const BADGE_WORDS = `a count from 0 to ${String(COUNT_MAX)} as text, or "" for a
 const ITEM_BADGE_WORDS = `a count from 0 to ${String(COUNT_MAX)} (0 draws none), or text of 1 to ${String(BADGE_TEXT_MAX)} characters`;
 const ONE_PER_TRICK: Limit = { what: "Parts of this place per trick", value: "one" };
 const PART_SIZE: Limit = { what: "One part, as compact JSON", value: `at most ${sizeWords(PART_MAX_BYTES)}` };
+/** The `sessions` key of a belt mark and a menu part (contract 2): a part bound to sessions. */
+const SESSIONS_LIMIT: Limit = {
+  what: "`sessions`, contract 2",
+  value: `1 to ${String(BOUND_SESSIONS_MAX)} of the facts' session ids, agent sessions only. The part shows only in those sessions, in place of the trick's unbound part of this place there. Left out, the part is unbound`,
+};
+const BOUND_PER_TRICK: Limit = { what: "Parts of this place per trick", value: `one unbound, and up to ${String(BOUND_PARTS_MAX)} bound ones with \`sessions\`. No session is named by two parts` };
 
 /** Every place, described. A place added to `PLACE_KINDS` or to the agent view is a compile error until it is here. */
 export const PLACES = {
@@ -292,14 +330,27 @@ export const PLACES = {
     shows: "One mark: an icon, a face word (`label`), a `badge` and a `tone`. It takes no view.",
     tap: "With an `intent`, a tap runs the trick with that intent. Without one, the mark is the same button and takes no tap.",
     limits: [
-      ONE_PER_TRICK,
+      BOUND_PER_TRICK,
       { what: "`label`, the face word", value: `at most ${String(FACE_MAX)} characters` },
       { what: "`badge`", value: BADGE_WORDS },
       { what: "A mark needs", value: "at least one of `icon`, `label` and `badge`" },
+      SESSIONS_LIMIT,
       PART_SIZE,
     ],
     who: "program",
-    examples: [{ kind: "document", json: { v: 1, parts: [{ at: "belt", id: "legs", mark: { icon: "check", label: "23/34", tone: "ok", intent: "open" } }] } }],
+    examples: [
+      { kind: "document", json: { v: 1, parts: [{ at: "belt", id: "legs", mark: { icon: "check", label: "23/34", tone: "ok", intent: "open" } }] } },
+      {
+        kind: "document",
+        json: {
+          v: MENU_CONTRACT,
+          parts: [
+            { at: "belt", id: "legs", mark: { icon: "check", label: "23/34", tone: "ok" } },
+            { at: "belt", id: "legs-here", sessions: ["lodge:w1:2"], mark: { icon: "flask", label: "2 red", tone: "danger", intent: "open" } },
+          ],
+        },
+      },
+    ],
   },
   session: {
     id: "session",
@@ -380,6 +431,57 @@ export const PLACES = {
     who: "program",
     examples: [{ kind: "document", json: { v: 1, parts: [{ at: "tabbar", id: "legs", item: { label: "Legs", icon: "check", badge: "new" } }] } }],
   },
+  menu: {
+    id: "menu",
+    name: "Session settings rows",
+    where: `Rows in a session's settings (the sheet of the session's ⋮ button), in a group of the trick's own after Collie's rows and Close, under the heading "From the trick", then the trick's name. Agent sessions only. ${MENU_WORDS}`,
+    shows: `Rows: a \`button\` or a \`switch\`, each with a \`label\`, an \`icon\` and an \`intent\`. A switch shows the \`on\` of the last document and never flips before the program answers.`,
+    tap: `${MENU_TAP_WORDS} A button sends its intent; a switch sends its intent with the state asked for as \`value\`, "on" or "off". With \`confirm\` a button arms on the first tap and shows its whole label.`,
+    limits: [
+      { what: "Contract", value: String(MENU_CONTRACT) },
+      { what: "Rows", value: `1 to ${String(MENU_ROWS_MAX)} in a part. Each \`id\` and each \`intent\` once` },
+      { what: "A row", value: `\`id\`, \`kind\` (${orList(MENU_ROW_KINDS)}), \`label\`, \`intent\`, and optionally \`icon\`, \`disabled\`, \`on\` (required on a switch) and \`confirm\` (a button only). Nothing else` },
+      { what: "`label`", value: `1 to ${String(MENU_LABEL_MAX)} characters, refused when longer, never cut. No hidden character. It may not read as one of the sheet's own rows in any language Collie speaks, hold the word ${["Collie", "WalkyTalky", "Hill", "view"].map(code).join(", ")}, or start with ${MENU_RESERVED_LEADS.map((lead) => code(lead[0]?.toUpperCase() + lead.slice(1))).join(", ")}, or with a word of the permission card's buttons in any language Collie speaks. Look-alike letters count as the letters they pass for: \`C0llie\` is \`Collie\`` },
+      { what: "Parts of this place per trick", value: `one unbound, for every agent session of this machine, and up to ${String(BOUND_PARTS_MAX)} bound ones with \`sessions\`, the only way rows show on a crew member's session. No session is named by two parts` },
+      SESSIONS_LIMIT,
+      { what: "Rows in one sheet", value: `${String(MENU_SHEET_ROWS_MAX)} of every trick together. A trick's group is shown whole or left out whole, in the order of the trick ids, and the sheet says how many tricks it left out` },
+      PART_SIZE,
+    ],
+    who: "program",
+    examples: [
+      {
+        kind: "document",
+        json: {
+          v: MENU_CONTRACT,
+          parts: [
+            {
+              at: "menu",
+              id: "ci",
+              rows: [
+                { id: "rerun", kind: "button", label: "Rerun CI", icon: "refresh", intent: "rerun", confirm: true },
+                { id: "watch", kind: "switch", label: "Watch branch", icon: "flag", intent: "watch", on: true },
+              ],
+            },
+          ],
+        },
+      },
+      { kind: "manifest", toml: `id = "ci"\nname = "CI"\nrun = "program.ts"\ncontract = ${String(MENU_CONTRACT)}\nplaces = ["menu"]\n` },
+      {
+        kind: "document",
+        json: {
+          v: MENU_CONTRACT,
+          parts: [
+            {
+              at: "menu",
+              id: "ci-workshop",
+              sessions: ["m_workshop:w3:1"],
+              rows: [{ id: "deploy", kind: "button", label: "Deploy here", icon: "upload", intent: "deploy", confirm: true }],
+            },
+          ],
+        },
+      },
+    ],
+  },
   "agent-view": {
     id: "agent-view",
     name: "Agent view",
@@ -411,7 +513,7 @@ export const PLACES = {
   },
 } satisfies Readonly<Record<PlaceId, PlaceEntry>>;
 
-/** The places in the order the reference lists them: the five a program draws in, then the agent view. */
+/** The places in the order the reference lists them: the six a program draws in, then the agent view. */
 export const PLACE_ORDER: readonly PlaceId[] = [...PLACE_KINDS, AGENT_VIEW_PLACE];
 
 // ── Parts: the node kinds ────────────────────────────────────────────────────────────────────
@@ -768,7 +870,7 @@ const DECISION_KEY_WORDS = {
   priority: { type: "word", required: "no", limit: `one of ${codeList(HILL_PRIORITIES)}. Default \`${DEFAULT_DECISION_PRIORITY}\``, what: `A request, not a fact. Only \`now\` sends a notification, and one sender holds at most ${String(HILL_NOW_MAX)} open \`now\` Decisions.` },
   text: { type: "word", required: "no", limit: `one of ${codeList(HILL_TEXT_MODES)}. Default \`${DEFAULT_DECISION_TEXT}\``, what: "Whether the person may, must, or may not add words to the answer. `none` needs at least one option." },
   about: { type: "session id", required: "no", limit: "an `id` from the facts' sessions, `memberId:paneId`", what: "The session the card is about. The card opens its Chat." },
-  replyTo: { type: "session id", required: "no", limit: "an `id` from the facts' sessions", what: "The session that gets the person's words, as the person's own WalkyTalky message." },
+  replyTo: { type: "session id", required: "no", limit: "an `id` from the facts' sessions. Only for a trick whose `trick.toml` says `decides = \"reply\"`", what: "The session that gets the person's words, as the person's own WalkyTalky message. Without `decides = \"reply\"` the Decision is refused." },
   media: { type: "list", required: "no", limit: `at most ${String(HILL_MEDIA_MAX)}; each \`file\` (a PNG, JPEG or WebP in the trick's folder, ${sizeWords(HILL_MEDIA_BYTES_MAX)} at most) and optionally \`caption\` (at most ${String(HILL_MEDIA_CAPTION_MAX)} characters)`, what: "Pictures on the card." },
   links: { type: "list", required: "no", limit: `at most ${String(HILL_LINKS_MAX)}; each \`label\` (at most ${String(HILL_LINK_LABEL_MAX)}) and \`href\` (an https or http address, at most ${String(HILL_LINK_HREF_MAX)} characters)`, what: "Web pages that give more." },
   expiresAt: { type: "instant", required: "no", limit: `epoch milliseconds. Left out, ${String(HILL_DEFAULT_EXPIRY_DAYS)} days; never more than ${String(HILL_MAX_EXPIRY_DAYS)} days`, what: "When the Decision closes by itself, as expired." },
@@ -792,7 +894,7 @@ export interface HillEntry {
 /** The Hill: the place a program or an agent asks the person one question. It is not a `place` word. */
 export const HILL: HillEntry = {
   name: "The Hill",
-  what: "A page of Decisions: questions that a program or an agent asks the person, each answered with one tap. It is built in. A trick does not list it in `places`. Settings → Tricks shows it as the first row, tagged \"Built in\", with its one switch.",
+  what: "A page of Decisions: questions that a program or an agent asks the person, each answered with one tap. It ships with Collie as an experiment, off until the person switches it on in Settings → Experiments. A trick does not list it in `places`.",
   program: `A program lists Decisions in the \`decisions\` key of its output (the helper's \`t.decide\`). The list is declarative: after each run that succeeded, Collie makes the Hill agree with it, as [The list is the truth](#the-list-is-the-truth) says below. A document lists at most ${String(DECISIONS_MAX)}.`,
   agent: "An agent posts one with `collie hill post` and reads the answer with `collie hill status <id>`. The answer also reaches the agent as a WalkyTalky message.",
   keys: DECISION_KEYS.map((key) => Object.assign({ key }, DECISION_KEY_WORDS[key])),
@@ -849,6 +951,12 @@ export interface ProgramNumbers {
   /** The most bytes of each of stdout and stderr that `t.sh` keeps, and its default time: `SH_CAP` and the `timeoutMs` default of cli/trick-kit/trick.ts. */
   readonly helperShCapBytes: number;
   readonly helperShTimeoutMs: number;
+  /** The file watch's waits: `WATCH_DEBOUNCE_MS`, `WATCH_MAX_WAIT_MS` and `WATCH_POLL_MS` (bridge/tricks/watch.ts). */
+  readonly watchDebounceMs: number;
+  readonly watchMaxWaitMs: number;
+  readonly watchPollMs: number;
+  /** The least time between the starts of two event or watch runs of one trick: `REACT_FLOOR_MS` (bridge/tricks/triggers.ts). */
+  readonly reactFloorMs: number;
 }
 
 /** A row of a table of fields: the name, whether it is always there, and what it holds. */
@@ -930,6 +1038,10 @@ export interface ProgramEntry {
   readonly helper: readonly HelperRow[];
   readonly helperAfter: readonly string[];
   readonly globs: readonly GlobRow[];
+  /** The part on `on` and `watch` (M105 step one). */
+  readonly reacting: ReactingEntry;
+  /** The part on `access` and `t.api` (M105 spec 04). */
+  readonly access: AccessEntry;
   readonly inputStates: readonly InputStateRow[];
   /** The fields of a session's `inputs`, and of each file in it. */
   readonly inputsFields: readonly FieldRow[];
@@ -950,6 +1062,8 @@ const FACTS_WORDS = {
   sessions: { present: "always", what: `The agent and shell sessions, at most ${String(FACT_SESSIONS_MAX)}. On a crew's lead they are every member's, the lead's own first.` },
   spaces: { present: "always", what: `Each space as ${codeList(SPACE_FACT_KEYS)} (\`folder\` is left out when there is none), at most ${String(FACT_SPACES_MAX)}.` },
   sessionsOmitted: { present: "only when some are left out", what: "How many sessions the caps left out. Only a crew's lead counts them: a solo machine past the cap leaves the rest out with no count. Absent when none." },
+  values: { present: `contract ${String(FIELDS_CONTRACT)}, a trick with \`[[field]]\``, what: "Each field's value by its key: the person's own, else the field's `default`. A field with neither is left out. A value is the person's data and untrusted for the program: show it, never run it." },
+  api: { present: "only with `access`, while the local API stands", what: `${codeList(API_FACT_KEYS)}: the path of Collie's local API socket, the level \`access\` declares (\`see\` or \`read\`), and this run's token. \`t.api\` dials the socket and names the token. The token dies when the run ends. Nothing of it is in the environment, and your program must not print, log or save the token. Absent when the trick declares no \`access\`, and when the socket does not stand.` },
 } as const satisfies { readonly [K in (typeof FACTS_KEYS)[number]]: Omit<FieldRow, "field"> };
 
 const SESSION_WORDS = {
@@ -989,8 +1103,8 @@ const TRIGGER_WORDS = {
   start: { sent: true, when: () => "The first run after the trick loads, is switched on, a new version is approved or its `config.toml` changes." },
   timer: { sent: true, when: (n: ProgramNumbers) => `Every \`every\` after the last run, while a phone has looked in the last ${spanWords(n.watchWindowMs)}. A trick with no \`every\` gets none.` },
   tap: { sent: true, when: () => "A person tapped a control of the trick, or answered one of its Decisions." },
-  watch: { sent: false, when: () => "A watched file changed." },
-  event: { sent: false, when: () => "An event of the bus, such as `session.status`." },
+  watch: { sent: true, when: () => "A file of the manifest's `watch` changed. `path` is the path as the manifest wrote it, and `count` is how many files changed in the same burst." },
+  event: { sent: true, when: () => "An event of the manifest's `on` reached the trick. `session` is the `id` of the newest event's session, and `count` is how many events were folded into this run." },
 } as const satisfies { readonly [K in (typeof TRIGGER_KINDS)[number]]: { readonly sent: boolean; readonly when: (n: ProgramNumbers) => string } };
 
 /** One entry per key of a program's output document. A new key in `DOCUMENT_KEYS` is a compile error until it is here. */
@@ -1032,7 +1146,8 @@ function helperRows(n: ProgramNumbers): HelperRow[] {
   return [
     { call: "`t.facts`, `t.config`, `t.tap`", names: ["t.facts", "t.config", "t.tap"], what: "The facts, `config.toml` parsed (`{}` when there is none), and the tap that started the run or `null`. A tap has `rid`, `node`, `intent`, `value`, `decision` (the key of the Decision it answers, or `null`), `text`, `from` and `seen`." },
     { call: "`t.status({ text, icon?, tone? })`", names: ["t.status"], what: `The chip in the status line. \`text\` is at most ${String(STATUS_TEXT_MAX)} characters.` },
-    { call: "`t.belt({ label, icon?, tone?, badge?, intent? })`", names: ["t.belt"], what: "The mark at the end of the Belt." },
+    { call: "`t.belt({ label, icon?, tone?, badge?, intent?, sessions?, id? })`", names: ["t.belt"], what: "The mark at the end of the Belt. With `sessions` (contract 2) it shows only in those sessions; a bound mark without an `id` is numbered `belt-1`, `belt-2`." },
+    { call: "`t.menu(rows, { sessions?, id? })`", names: ["t.menu"], what: "Rows in a session's settings (contract 2): buttons `{ kind: \"button\", id, label, intent, icon?, confirm? }` and switches `{ kind: \"switch\", id, label, intent, on, icon? }`. The phone shows a switch's `on` from your next document, never a guess." },
     { call: "`t.dashboard(item)`, `t.tabbar(item)`", names: ["t.dashboard", "t.tabbar"], what: "The Dashboard tile and the bottom bar item: `{ label, icon?, badge?, tone? }`." },
     { call: "`t.session({ id?, name?, icon?, tone?, subtitle?, badge?, progress?, actions?, view })`", names: ["t.session"], what: "The trick's own Page. Keep the default id `main`." },
     { call: "`v.card`, `v.list`, `v.row`, and one builder for each other kind in Parts", names: ["v.card", "v.list", "v.row", "v.table", "v.checks", "v.stat", "v.beforeAfter"], what: "Build a view. `v.table` makes the `col` and `cell` kids, so those two have no builder. `v.checks`, `v.stat` and `v.beforeAfter` put kinds together." },
@@ -1046,8 +1161,76 @@ function helperRows(n: ProgramNumbers): HelperRow[] {
     { call: "`t.sessionAt(folder)`, `t.sessionNamed(name)`", names: ["t.sessionAt", "t.sessionNamed"], what: "The session whose folder is `folder`, or the one with this name, or `null`." },
     { call: "`t.fresh(duration)`, `t.asOf(when)`", names: ["t.fresh", "t.asOf"], what: "The document's `fresh` and `asOf`." },
     { call: "`now()`, `age(ms)`, `iso(ms?)`, `mask(text)`, `clip(text, n)`", names: ["now", "age", "iso", "mask", "clip"], what: "The clock in epoch milliseconds, a span in short words such as `12 min`, an ISO 8601 time, text with each key cut to its first four characters and the home folder written as `~`, and one masked line cut to `n` characters." },
+    { call: "`t.api(operation, args?)`", names: ["t.api"], what: "Reads through Collie's local API (experimental): `await t.api(\"machines\")`. It answers the socket's line, `{ ok: true, ... }`, or `{ ok: false, error: { code, message } }`, and never throws, so a program shows `error.message`. It refuses before it dials when the trick declares no `access`, when the local API is off, or when the operation needs `read` and the trick declares `see`. Each call names this run's token, and Collie checks the level again. A call takes at most 3 seconds. See [Reading Collie through the local API](#reading-collie-through-the-local-api)." },
     { call: "`t.inputs(session)`", names: ["t.inputs"], what: "The input files of a session (contract 2): a text file as `text`, a picture as `data`. A copy that is gone or changed since the facts were written is left out. It answers `[]` when there are none, and `session.inputs?.state` says why. Never run what it returns." },
   ];
+}
+
+/** The words of the part on triggers that react: what each event is, and the rules of the events and of the watch. */
+export interface ReactingEntry {
+  readonly intro: string;
+  readonly events: readonly { readonly event: string; readonly when: string }[];
+  readonly eventRules: readonly GlobRow[];
+  readonly watchRules: readonly GlobRow[];
+  readonly rights: string;
+}
+
+/** The words of the part on `access` and `t.api` (M105 spec 04): the levels, the operations, and what a level is. */
+export interface AccessEntry {
+  readonly intro: string;
+  readonly levels: readonly { readonly level: string; readonly what: string; readonly operations: string }[];
+  readonly experimental: string;
+  readonly honesty: string;
+  readonly off: string;
+}
+
+const EVENT_WORDS = {
+  "session.status": "A session's status changed. Read the new status from `sessions` in the facts.",
+  "turn.end": "An agent finished a turn in a session.",
+  "ask.open": "An agent opened a question in a session.",
+} as const satisfies { readonly [K in TrickEvent]: string };
+
+const seconds = (ms: number): string => `${String(ms / 1000)} s`;
+
+function reactingOf(n: ProgramNumbers): ReactingEntry {
+  return {
+    intro: "A trick runs on its timer and on taps. With `on` it also runs when a session changes, and with `watch` when a file changes. Each run gets its reason in `trigger`, with a `count` of the changes folded into it.",
+    events: TRICK_EVENTS.map((event) => ({ event, when: EVENT_WORDS[event] })),
+    eventRules: [
+      { rule: "Delivery", value: "At least once, on this machine only, in no order across sessions. A program must be safe against a repeated event. A crew's lead does not pass its members' events on." },
+      { rule: "One at a time", value: "A trick runs once at a time and has at most one run waiting. Events that arrive meanwhile fold into that run. Its `trigger` names the newest event, and `count` is how many were folded." },
+      { rule: "Lost events", value: "When Collie's queue overflows, it adds the events it lost to `count`, because it cannot know their types." },
+      { rule: "The same road as the timer", value: `A run has the same limits of time and size, the same slots and the same backoff. No run starts for a trick that has not had its start run, that is stopped, or that is backing off after a failure, or on a machine that does not schedule tricks. Collie drops such a request. It never keeps one. A run that already waited when a backoff began keeps waiting, and runs with the next request or after the next tap.` },
+      { rule: "No phone needed", value: `An event run or a file run happens also when no phone is open, so a trick can ask a Decision while you are away. Only the timer waits for a phone: it runs only while a phone has looked in the last ${spanWords(n.watchWindowMs)}.` },
+      { rule: "Spacing", value: `Two runs of one trick that an event or a file started begin at least ${seconds(n.reactFloorMs)} apart. A request inside that time is the one waiting run, or folds into it, and starts when the time ends. A tap, an answer to a Decision and a timer run neither wait for it nor count toward it.` },
+      { rule: "Taps first", value: "A tap, or an answer to a Decision, goes before a waiting run of an event or a file." },
+    ],
+    watchRules: [
+      { rule: "Paths", value: `At most ${String(WATCH_MAX)}. Each starts with \`/\` or \`~/\`, and \`~\` is the home folder of the user Collie runs as.` },
+      { rule: "The parent folder", value: "Collie watches the folder of each path and reacts to the file's name, because an editor saves by writing a new file and renaming it over the old one." },
+      { rule: "Links", value: "Collie resolves each path with `realpath` when the trick switches on and again after every change, so a link that moves to another file moves the watch. `trigger.path` stays as the manifest wrote it. The card shows each path as written, so a program of yours can point a link elsewhere after your yes: that gives the trick a run, never the file's contents." },
+      { rule: "A file that is not there yet", value: `It fires when it appears, if its folder exists. If the folder is missing too, Collie checks that path every ${seconds(n.watchPollMs)}.` },
+      { rule: "Waiting for a burst", value: `A change waits ${String(n.watchDebounceMs)} ms after the last change of a burst, and at most ${seconds(n.watchMaxWaitMs)} after the first, so a steady stream fires at least that often. One run waits, never a queue.` },
+      { rule: "A trick's own writes", value: "Collie records each file's time, size and inode when a run of the trick ends. A change starts a run only when the file differs from that record, so a trick that writes the file it watches does not loop. A write by someone else that lands during a run is absorbed too: the next change after the run starts the next one." },
+      { rule: "When the system cannot watch", value: `Out of watches, too many open files or a folder it refuses: Collie checks the files' times and presence every ${seconds(n.watchPollMs)} instead, and the trick's row says so.` },
+      { rule: "The same road as events", value: "The same gates, limits and backoff as an event run." },
+    ],
+    rights: '> **Note.** `on` and `watch` are rights. The card says it "runs when a session changes state" or "runs when these files change", with the paths. A new version that adds one, or names another event or path, asks for a new yes.',
+  };
+}
+
+function accessOf(): AccessEntry {
+  return {
+    intro: `A trick reads live facts of Collie (its machines, its sessions, your usage, the Hill) through Collie's local API, with no list of surfaces in its manifest. Your yes to the trick is the grant. The manifest says how much with \`access\`, which needs \`contract = ${String(ACCESS_CONTRACT)}\`, and the program calls \`t.api\`. Each run gets its own token in its facts, and the local API answers only a connection that names a live one, at the level the trick declares.`,
+    levels: [
+      { level: "`none`", what: "The default, also when `access` is left out. No `api` in the facts, and `t.api` answers an error.", operations: "none" },
+      { level: "`see`", what: "Lists and states: your machines, your sessions and their states, your usage and the Hill. Never the text of a screen. One field is text an agent wrote: the title of each card in `hill.list`.", operations: "`hello`, `sessions`, `brief`, `accounts`, `hill.list`, `events`, `machines`" },
+      { level: "`read`", what: "Everything in `see`, and the text of a session's screen, masked as the phone's own read is.", operations: "all of `see`, and `read`" },
+    ],
+    experimental: "> **Experimental.** `access` and `t.api` are new, and their words may still change.",
+    honesty: "> **Note.** The run token keeps a program that only finds the socket out of this socket, and nothing more. A program that runs as you can still read a pane through the multiplexer itself, and can read another program's memory. It can also read Collie's local secret file and use it on the bridge's loopback address, which still answers the routes that return a session's text. Collie does not stop that. A trick's own program runs as you too. Collie's text search of the code flags a trick that names the socket, reads its path or token from the facts, opens a socket of its own (`createConnection`, `Bun.connect`, a `unix:` option) or runs `collie api` itself, and the card shows that line like the other findings. Such a trick would have to send its own token from its own facts.",
+    off: "The socket stands while tricks are switched on, on a machine where tricks run. Where it does not (a crew peer, a deputy, Windows), the facts carry no `api`, `t.api` answers `Collie's local API is off here.`, and the trick's row says so once.",
+  };
 }
 
 /** What the program receives, prints and calls, as tables and sentences. The numbers outside this folder come in as `n`. */
@@ -1060,6 +1243,7 @@ export function programOf(n: ProgramNumbers): ProgramEntry {
     triggersLater: TRIGGER_KINDS.filter((kind) => !TRIGGER_WORDS[kind].sent),
     tap: [
       "A tap on a control of the trick's own part has `node` set to the part's id (`belt` for the Belt mark). Its `intent` is the control's, its `value` the control's one fixed text, and its `from` the session open on the phone, as `{ \"session\": ... }`, when there is one.",
+      "A tap on a row in a session's settings (contract 2) always has `from`: the session whose sheet it was. For a bound part, a belt mark or a menu part with `sessions`, it is one of the part's sessions, at the pane it was bound to; Collie refuses the rest before the program runs.",
       `An answer to a Decision is a tap too: its \`node\` is \`${HILL_NODE_PREFIX}<key>\`, and its \`seen\` is the hash of the version the person saw. See [The Hill](#the-hill).`,
       "`rid` is a UUID. A retried tap has the same `rid`, and Collie runs nothing twice for one `rid`: it answers with the first receipt. A program that records an answer keys the record on `rid`. The same `rid` with a different tap is refused.",
     ],
@@ -1071,7 +1255,7 @@ export function programOf(n: ProgramNumbers): ProgramEntry {
       { case: "A node of a kind this Collie does not know", result: "Left out, with a `dropped` note. The rest of the view draws." },
       { case: "A part in a place this Collie does not know", result: "Left out whole, with a `dropped` note. The other parts draw." },
       { case: `A key or an attribute this Collie does not know, inside a part, at contract ${String(TRICK_CONTRACT_DEFAULT)}`, result: "Ignored, with an `ignored` note. A node with only such attributes draws as if it had none." },
-      { case: `A key or an attribute this Collie does not know, at any depth of a part, at contract ${String(TRICK_CONTRACT)}`, result: `That part is refused alone, with an \`unknown-key\` refusal that names the key and ends: "${CLOSED_KEY_LINE}" Collie keeps no last good version of it.` },
+      { case: `A key or an attribute this Collie does not know, at any depth of a part, at contract 2 or newer`, result: `That part is refused alone, with an \`unknown-key\` refusal that names the key and ends: "${CLOSED_KEY_LINE}" Collie keeps no last good version of it.` },
       { case: "A key this Collie does not know at the top of the document, beside `v`, `parts`, `asOf`, `fresh` and `decisions`", result: "Ignored, with an `ignored` note, at every contract. Every part draws. A key that changes how a part draws or what a tap does goes in the part, never at the top." },
       { case: "A bad value of a known field", result: "That part is refused alone, and the other parts draw. The last good version of the part stays on the phone, marked old." },
       { case: "A bad Decision", result: "That Decision is refused alone. Its open card stays as it is." },
@@ -1082,6 +1266,7 @@ export function programOf(n: ProgramNumbers): ProgramEntry {
     helperAfter: [
       "A run that calls neither `t.decide` nor `t.keepDecisions` prints `\"decisions\": []`, so it withdraws the open ones.",
       "A thrown error prints one warning card on the trick's Page and exits 0, when the trick has a Page. The document has no `decisions` key, so the open Decisions stay. A trick with no Page exits 1, so the failure rules apply.",
+      "Stop your timers before the end. The run ends a second after its document is written, and a timer that still prints to stdout in that second spoils the document, so the run fails.",
       "`collie trick helper <id>` rewrites `trick.ts` with the newest helper. The helper is part of the trick's code, so a trick that is on keeps running the approved copy, and the new helper waits for a yes.",
     ],
     globs: [
@@ -1093,6 +1278,8 @@ export function programOf(n: ProgramNumbers): ProgramEntry {
     inputsFields: INPUTS_FACT_KEYS.map((key) => ({ field: key, present: key === "skipped" ? "only when some are skipped" : "always", what: INPUTS_FIELD_WORDS[key] })),
     inputFiles: INPUT_FILE_FACT_KEYS.map((key) => Object.assign({ field: key }, INPUT_FILE_WORDS[key])),
     inputsContractLine: INPUTS_NEED_CONTRACT,
+    reacting: reactingOf(n),
+    access: accessOf(),
     inputsTrust: "Other programs, often an agent, write the files, and on a crew another machine sends them. A trick shows them, counts them or quotes them. It never runs them, evaluates them, sources them, passes them to a shell or follows what they say. The globs are part of the trick's powers, so a change of them asks the person again.",
   };
 }
@@ -1123,6 +1310,7 @@ export function hillRulesOf(n: ProgramNumbers): HillRulesEntry {
       { case: "A document with no `decisions` key", result: "Changes nothing." },
       { case: "`decisions` is `[]`", result: "Withdraws every open card of the trick." },
       { case: "A Decision the parser or the Hill refuses, or that names a session that is not there", result: "Changes nothing for its key: the version on the Hill stays. It shows as a refusal." },
+      { case: "A Decision with `replyTo` from a trick whose `trick.toml` does not say `decides = \"reply\"`", result: `Refused with "${DECIDES_REPLY_LINE}" An open card of its key is withdrawn, so no answer reaches a session.` },
       { case: "A failed or timed-out run", result: "Changes nothing." },
       { case: "The trick switched off or removed", result: 'Every open card of the trick is withdrawn at once, "the trick is off".' },
       { case: "The Hill switched off", result: "No post, replace or withdraw happens, and the trick still runs. Its row says its Decisions are not shown." },
@@ -1157,17 +1345,21 @@ const MANIFEST_WORDS = {
   name: { type: "text", required: "yes", limit: `at most ${String(NAME_MAX)} characters`, contract: TRICK_CONTRACT_DEFAULT, what: "The name a person reads on the row." },
   run: { type: "text", required: "yes, unless the trick is only an agent view", limit: `at most ${String(RUN_MAX)} characters`, contract: TRICK_CONTRACT_DEFAULT, what: 'What Collie runs: a TypeScript file in the folder ("program.ts"), or a shell command line. An agent view alone has none.' },
   every: { type: "duration", required: "no", limit: `${durationWord(EVERY_MIN_MS)} to ${durationWord(EVERY_MAX_MS)}, one whole number and \`s\`, \`m\` or \`h\`, such as \`30s\` or \`5m\``, contract: TRICK_CONTRACT_DEFAULT, what: "How often it runs on its timer. Left out, it runs at start and on taps only." },
-  watch: { type: "list of paths", required: "no", limit: `at most ${String(WATCH_MAX)} paths of at most ${String(WATCH_PATH_MAX)} characters, each an absolute path, or a path under the home folder written with a leading tilde`, contract: TRICK_CONTRACT_DEFAULT, what: "Kept for a later Collie. This one leaves it out with a note. Leave it out." },
-  on: { type: "list of words", required: "no", limit: `${codeList(TRICK_EVENTS)}`, contract: TRICK_CONTRACT_DEFAULT, what: "Kept for a later Collie. This one leaves it out with a note. Leave it out." },
+  watch: { type: "list of paths", required: "no", limit: `at most ${String(WATCH_MAX)} paths of at most ${String(WATCH_PATH_MAX)} characters, each an absolute path, or a path under the home folder written with a leading tilde`, contract: TRICK_CONTRACT_DEFAULT, what: "Run when one of these files changes. A right: the card names the paths. See [When a trick reacts](#when-a-trick-reacts)." },
+  on: { type: "list of words", required: "no", limit: `${codeList(TRICK_EVENTS)}`, contract: TRICK_CONTRACT_DEFAULT, what: "Run when a session of an agent changes in one of these ways. A right: the card says it. See [When a trick reacts](#when-a-trick-reacts)." },
   mode: { type: "word", required: "no", limit: `${orList(TRICK_MODES)}. Default \`${TRICK_MODES[0]}\``, contract: TRICK_CONTRACT_DEFAULT, what: `\`${TRICK_MODES[0]}\` runs once per trigger and prints one document. \`${TRICK_MODES[1]}\` is kept for a later Collie.` },
-  contract: { type: "whole number", required: "no", limit: `1 to ${String(CONTRACT_MAX)}. Default ${String(TRICK_CONTRACT_DEFAULT)}. This Collie speaks 1 to ${String(TRICK_CONTRACT)}`, contract: TRICK_CONTRACT_DEFAULT, what: `The contract the trick is written for. Write ${String(INPUTS_CONTRACT)} to read files with \`inputs\` or to add an agent view. A higher number than this Collie knows is refused with one line.` },
+  contract: { type: "whole number", required: "no", limit: `1 to ${String(CONTRACT_MAX)}. Default ${String(TRICK_CONTRACT_DEFAULT)}. This Collie speaks 1 to ${String(TRICK_CONTRACT)}`, contract: TRICK_CONTRACT_DEFAULT, what: `The contract the trick is written for. Write ${String(INPUTS_CONTRACT)} to read files with \`inputs\` or to add an agent view, ${String(FIELDS_CONTRACT)} to keep settings with \`[[field]]\` or to read Collie with \`access\`. A higher number than this Collie knows is refused with one line.` },
   icon: { type: "word", required: "no", limit: `one of the icon words in Shared values. Default \`${DEFAULT_TRICK_ICON}\``, contract: TRICK_CONTRACT_DEFAULT, what: "The trick's icon. `collie trick check` names a wrong one." },
   places: { type: "list of words", required: "yes", limit: `1 to ${String(PLACES_LISTED_MAX)} of ${PLACE_WORDS_LIST}. Each once`, contract: TRICK_CONTRACT_DEFAULT, what: `Where its parts draw. Each place a part uses must be listed. \`${AGENT_VIEW_PLACE}\` adds an agent view and needs contract ${String(AGENT_VIEW_CONTRACT)}.` },
   env: { type: "list of names", required: "no", limit: `at most ${String(ENV_NAMES_MAX)} names of at most ${String(ENV_NAME_MAX)} characters: letters, digits and \`_\`, not starting with a digit`, contract: TRICK_CONTRACT_DEFAULT, what: "Environment names the program gets beyond the base list, such as `GH_TOKEN`. The person sees each one." },
   inputs: { type: "list of globs", required: "no", limit: `at most ${String(INPUTS_MAX)} globs of at most ${String(INPUT_GLOB_MAX)} characters and ${String(INPUT_DEPTH_MAX)} steps, relative to a session's folder`, contract: INPUTS_CONTRACT, what: "Files the program reads from each agent session's folder. They are untrusted data: show them, never run them." },
   description: { type: "text", required: "no", limit: `at most ${String(DESCRIPTION_MAX)} characters, plain text`, contract: TRICK_CONTRACT_DEFAULT, what: "One plain line that says what the trick does. Settings shows it under the name." },
   about: { type: "text", required: "no", limit: `at most ${String(ABOUT_MAX)} characters, plain text, a blank line splits paragraphs`, contract: TRICK_CONTRACT_DEFAULT, what: "The text of the About sheet." },
+  version: { type: "text", required: "no", limit: `1 to ${String(VERSION_MAX)} characters: letters, digits, \`.\`, \`+\` and \`-\`, such as \`1.2.0\``, contract: TRICK_CONTRACT_DEFAULT, what: "The trick's own version. The About sheet shows it. Collie never compares it and reads no tag." },
   rules: { type: "file name", required: `yes, with \`${AGENT_VIEW_PLACE}\`; refused without it`, limit: `a file in the trick's folder of at most ${String(RULES_NAME_MAX)} characters ending in \`.md\`, such as \`rules.md\``, contract: AGENT_VIEW_CONTRACT, what: "The instructions the agent of a session reads. The person reads them whole before they switch the trick on." },
+  access: { type: "word", required: "no", limit: `${orList(ACCESS_WORDS)}. Default \`${ACCESS_WORDS[0]}\``, contract: ACCESS_CONTRACT, what: "How much of Collie's local API the trick reads through `t.api`. `see` reads lists and states, `read` adds the text of a screen. A right: a version that raises it asks again. See [Reading Collie through the local API](#reading-collie-through-the-local-api). Experimental." },
+  decides: { type: "word", required: "no", limit: `${orList(DECIDES_WORDS)}. Refused on a trick that is only an agent view`, contract: TRICK_CONTRACT_DEFAULT, what: "Whether its Decisions answer into a session. `reply` lets a Decision name `replyTo`, and the person's answer is typed into that session as their own message. Without it, a Decision with `replyTo` is refused. It is a right: a version that adds it asks again." },
+  field: { type: "list of tables", required: "no", limit: `at most ${String(FIELDS_MAX)} \`[[field]]\` tables. Each has \`key\` (spelled like a trick id, each once), \`kind\` (${orList(FIELD_KINDS)}), \`label\` (at most ${String(FIELD_LABEL_MAX)} characters) and may have \`hint\` (at most ${String(FIELD_HINT_MAX)}), \`default\` and \`required\`. A \`choice\` lists ${String(FIELD_OPTIONS_MIN)} to ${String(FIELD_OPTIONS_MAX)} \`options\` of at most ${String(FIELD_OPTION_MAX)} characters; a \`number\` names whole \`min\` and \`max\` within ${String(FIELD_NUMBER_ABS_MAX)} either way; a \`text\` value is one line of at most ${String(FIELD_TEXT_MAX)} characters; a \`switch\` is never \`required\`` , contract: FIELDS_CONTRACT, what: "Settings the person keeps for the trick, set in its About sheet on the phone. The program reads them in its facts as `values`. A value is the person's data and untrusted for the program: show it, never run it. A setting is never a secret: a key comes through `env`. A new or changed field is a new version and asks again; a changed value does not ask, and runs the trick once." },
 } as const satisfies { readonly [K in (typeof MANIFEST_KEYS)[number]]: Omit<ManifestEntry, "key"> };
 
 /** A whole `trick.toml` of a program trick, in the smallest useful shape. */
@@ -1239,6 +1431,14 @@ export const LIMITS: readonly LimitGroup[] = [
     ],
   },
   {
+    group: "Bound parts, contract 2",
+    limits: [
+      { what: "Sessions one part names", value: `1 to ${String(BOUND_SESSIONS_MAX)}, agent sessions of this run's facts. Another id is dropped with a note` },
+      { what: "Bound parts of one place per trick", value: `${String(BOUND_PARTS_MAX)}, beside one unbound part` },
+      { what: "A part with no session left", value: "not kept, with a note. It never shows in every session instead" },
+    ],
+  },
+  {
     group: "Facts",
     limits: [
       { what: "Sessions in the facts", value: `at most ${String(FACT_SESSIONS_MAX)}, and ${sizeWords(FACT_SESSIONS_MAX_BYTES)} of them. \`sessionsOmitted\` counts the rest` },
@@ -1254,6 +1454,16 @@ export const LIMITS: readonly LimitGroup[] = [
       { what: "A picture", value: `at most ${sizeWords(INPUT_IMAGE_MAX_BYTES)}` },
       { what: "One answer of one machine", value: `at most ${sizeWords(INPUT_ANSWER_MAX_BYTES)}` },
       { what: "One run", value: `at most ${sizeWords(INPUT_RUN_MAX_BYTES)}` },
+    ],
+  },
+  {
+    group: `Fields, contract ${String(FIELDS_CONTRACT)}`,
+    limits: [
+      { what: "Fields of one trick", value: `at most ${String(FIELDS_MAX)}` },
+      { what: "A label, a hint", value: `at most ${String(FIELD_LABEL_MAX)} and ${String(FIELD_HINT_MAX)} characters` },
+      { what: "A text value", value: `one line of at most ${String(FIELD_TEXT_MAX)} characters, no control character` },
+      { what: "A choice", value: `${String(FIELD_OPTIONS_MIN)} to ${String(FIELD_OPTIONS_MAX)} options of at most ${String(FIELD_OPTION_MAX)} characters` },
+      { what: "A number", value: `a whole number from \`min\` to \`max\`, each within ${String(FIELD_NUMBER_ABS_MAX)} either way` },
     ],
   },
   {
@@ -1276,6 +1486,17 @@ export const LIMITS: readonly LimitGroup[] = [
     ],
   },
   {
+    group: `A repository's index, \`${REPO_INDEX_FILE}\``,
+    limits: [
+      { what: "The file", value: `at most ${sizeWords(REPO_INDEX_BYTES_MAX)} of JSON at the top of the repository, \`contract\` ${String(REPO_INDEX_CONTRACT)}, no other key` },
+      { what: "Tricks listed", value: `at most ${String(REPO_INDEX_TRICKS_MAX)}, each \`folder\`, \`name\` and \`about\` and nothing else` },
+      { what: "`folder`", value: "spelled as a trick id: one folder at the top, no `/`, no `..`, no leading dot" },
+      { what: "`name`, `about`", value: `one line each of at most ${String(REPO_INDEX_NAME_MAX)} and ${String(REPO_INDEX_ABOUT_MAX)} characters, no control or invisible character` },
+      { what: "Hosts the phone reads from", value: `${REPO_INDEX_HOSTS.map((host) => `\`${host}\``).join(", ")}, https, written exactly. Any other host: \`collie trick add <url>\` at the terminal` },
+      { what: "A read or an add on the phone", value: `one at a time per machine, at most ${spanWords(REPO_INDEX_TIMEOUT_MS)}, the size cap of the official list, no redirect, no git config of yours` },
+    ],
+  },
+  {
     group: "Card groups",
     limits: [
       { what: "Cards", value: `card 1 holds the facts and at most ${String(GROUP_CODE_CARDS)} cards hold the code, ${String(GROUP_CARD_CODE_BYTES / KIB)} KB each` },
@@ -1295,14 +1516,11 @@ export interface LaterEntry {
 /** What each later place is called in the table. Typed against the parser's own list of later places. */
 const LATER_PLACE_NAMES = {
   "header.line": "A line in the header.",
-  menu: "An entry in a menu, as `menu:<match>`.",
   settings: "A part of the Settings screen.",
 } as const satisfies { readonly [K in keyof typeof LATER_PLACE_WORDS]: string };
 
-/** What each later trigger is: the manifest keys `watch` and `on`, and the mode `serve`. */
+/** What each later trigger is: the mode `serve`. (`watch` and `on` are built since M105 step one.) */
 const LATER_TRIGGER_NAMES = {
-  watch: "Run again when a watched file changes (manifest key `watch`).",
-  on: "Run on an event, such as `session.status` (manifest key `on`).",
   serve: "Keep the program running between triggers (manifest `mode = \"serve\"`).",
 } as const satisfies { readonly [K in (typeof LATER_TRIGGERS)[number]]: string };
 
@@ -1315,7 +1533,7 @@ export const LATER: readonly LaterEntry[] = [
 // ── Commands ─────────────────────────────────────────────────────────────────────────────────
 
 /** The three verb trees: `collie trick`, `collie trick view` and `collie hill`. */
-export type CommandGroup = "trick" | "trick view" | "hill";
+export type CommandGroup = "trick" | "tricks" | "trick view" | "hill";
 
 export interface CommandFlag {
   readonly flag: string;
@@ -1333,10 +1551,10 @@ export interface CommandEntry {
 
 const JSON_FLAG: CommandFlag = { flag: "--json", what: "Print one JSON document instead of text." };
 
-/** Every verb of `collie trick`, `collie trick view` and `collie hill`. The test holds this list to the CLI's own verb lists. */
+/** Every verb of `collie trick`, `collie tricks`, `collie trick view` and `collie hill`. The test holds this list to the CLI's own verb lists. */
 export const COMMANDS: readonly CommandEntry[] = [
   { group: "trick", verb: "list", usage: "trick list [--json] [--official]", what: "Lists every trick folder with its switch, state, last run and last error.", flags: [JSON_FLAG, { flag: "--official", what: "List the official tricks this Collie can add from the phone." }] },
-  { group: "trick", verb: "add", usage: "trick add [<name> | <https-url>[//<folder>][#<ref>]]", what: "Copies a trick from a git repository into the tricks folder, off. With no source it lists the official tricks and adds nothing.", flags: [] },
+  { group: "trick", verb: "add", usage: "trick add [<name> | <https-url>[//<folder>][#<ref>]]", what: "Copies a trick from a git repository into the tricks folder, off. With no source, or a repository's `collie-tricks.json` and no `//<folder>`, it lists and adds nothing.", flags: [] },
   { group: "trick", verb: "update", usage: "trick update <id> [--ref <branch|tag|commit>] [--dry-run]", what: "Fetches an added trick again and replaces its code, keeping `config.toml`.", flags: [{ flag: "--ref", what: "Fetch this branch, tag or commit instead of the same ref." }, { flag: "--dry-run", what: "Print what would change and change nothing." }] },
   { group: "trick", verb: "remove", usage: "trick remove <id>", what: "Deletes a trick that is off, with its state folder.", flags: [] },
   { group: "trick", verb: "on", usage: "trick on <id>", what: "Switches a trick on, approving its code as it is now. It refuses inside an agent's pane.", flags: [] },
@@ -1360,12 +1578,15 @@ export const COMMANDS: readonly CommandEntry[] = [
       { flag: "--watch", what: "Run again when a file in the folder changes." },
     ],
   },
-  { group: "trick", verb: "init", usage: "trick init [--sh] <id>", what: "Makes a new trick folder with a program and the helper.", flags: [{ flag: "--sh", what: "Write a shell program instead of a TypeScript one." }] },
+  { group: "trick", verb: "init", usage: "trick init [--sh] [--dir <folder>] <id>", what: "Makes a new trick folder with a program and the helper. In an agent's pane the folder is a draft in the working folder, outside the tricks folder.", flags: [{ flag: "--sh", what: "Write a shell program instead of a TypeScript one." }, { flag: "--dir", what: "Make `<folder>/<id>` as a draft, outside the tricks folder, instead of the tricks folder." }] },
   { group: "trick", verb: "helper", usage: "trick helper <id|folder>", what: "Rewrites a trick's `trick.ts` with the helper this Collie carries.", flags: [] },
   { group: "trick", verb: "skill", usage: "trick skill [<id>]", what: "Prints what a trick that is on asks of an agent. With no id, prints how to write a trick.", flags: [] },
   { group: "trick", verb: "guide", usage: "trick guide [--json]", what: "Prints how to write a trick and hand it to the person, as plain text for an agent.", flags: [JSON_FLAG] },
-  { group: "trick", verb: "propose", usage: "trick propose <folder> [--request-id <uuid>] [--json]", what: "Hands a trick folder to the person as a card on the lead's Hill. Nothing runs before their yes.", flags: [{ flag: "--request-id", what: "The proposal's request id, a UUID. The same sender, id and files get the same answer." }, JSON_FLAG] },
+  { group: "trick", verb: "propose", usage: "trick propose <folder> [--request-id <uuid>] [--json]", what: "Hands a trick folder to the person as a card of Collie's own on the lead: in the proposing session on the phone and in Settings, Tricks, and on the Hill while it is on. Nothing runs before their yes.", flags: [{ flag: "--request-id", what: "The proposal's request id, a UUID. The same sender, id and files get the same answer." }, JSON_FLAG] },
   { group: "trick", verb: "view", usage: "trick view <trick> <verb> [args]", what: "Runs one verb of an agent view, from the agent's pane. The verbs are the `trick view` commands below.", flags: [] },
+  { group: "tricks", verb: "on", usage: "tricks on [--json]", what: "Switches tricks on for this machine. They are an experiment and off until switched on. Each trick still has its own switch.", flags: [JSON_FLAG] },
+  { group: "tricks", verb: "off", usage: "tricks off [--json]", what: "Switches tricks off for this machine: no trick runs or draws. Each trick keeps its own switch.", flags: [JSON_FLAG] },
+  { group: "tricks", verb: "status", usage: "tricks status [--json]", what: "Says whether tricks are on for this machine.", flags: [JSON_FLAG] },
   { group: "trick view", verb: "start", usage: 'trick view <trick> start [--session <address>] [--rules <id>] ["<what you do>"] [--json]', what: "Says the agent is drawing. The phone shows Drawing and the note until `show` lands.", flags: [{ flag: "--session", what: "The session's address, copied from the request's head." }, { flag: "--rules", what: "The id of the rules the agent holds." }, JSON_FLAG] },
   { group: "trick view", verb: "show", usage: 'trick view <trick> show [--session <address>] <file.json | -> [--title "<one line, at most 80>"] [--image <path>[=<caption>]]... [--json]', what: "Draws one whole screen from a file, or from stdin with `-`.", flags: [{ flag: "--session", what: "The session's address." }, { flag: "--title", what: "The screen's title, one line." }, { flag: "--image", what: "Add a picture, with an optional caption. The first is ref 0." }, JSON_FLAG] },
   { group: "trick view", verb: "set", usage: "trick view <trick> set [--session <address>] <id> <file.json | -> [--after <id> | --first] [--image <path>[=<caption>]]... [--json]", what: "Puts one block on the screen. A block with that id is replaced where it stands.", flags: [{ flag: "--session", what: "The session's address." }, { flag: "--after", what: "Put a new block after this one." }, { flag: "--first", what: "Put a new block first." }, { flag: "--image", what: "Add a picture to the screen's set." }, JSON_FLAG] },

@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readdir, rename, rm, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,9 +12,9 @@ import { CODE_FILES_MAX, diskTrickFs, trickCodeHash, type TrickFs } from "./code
 import { createTrickScanner, MANIFEST_BYTES_MAX, readManifestText, TRICKS_MAX } from "./discover.ts";
 import { buildFacts, crewFactsWorld, factsWorldOf } from "./facts.ts";
 import { switchesPath } from "./paths.ts";
-import { TRICKS_ROUTE_RIGHTS, tricksAutoRoute, tricksMediaRoute, tricksSwitchRoute, tricksTapRoute, tricksUndoRoute, parseSince } from "./routes.ts";
+import { TRICKS_ROUTE_RIGHTS, tricksAutoRoute, tricksCodeRoute, tricksMediaRoute, tricksSwitchRoute, tricksTapRoute, tricksUndoRoute, parseSince } from "./routes.ts";
 import type { TricksSurface } from "./service.ts";
-import { createSwitchReader, parseSwitches, renderSwitches, SWITCH_LOCK_STALE_MS, updateSwitches, withApproval, withEntry, withSwitch, writeSwitches } from "./switches.ts";
+import { createSwitchReader, parseSwitches, renderSwitches, SWITCH_LOCK_BLANK_MS, SWITCH_LOCK_WAIT_MS, type LockFs, updateSwitches, withApproval, withEntry, withSwitch, withSwitchLock, writeSwitches } from "./switches.ts";
 
 const HASH = "a".repeat(64);
 const HASH2 = "b".repeat(64);
@@ -101,17 +101,340 @@ describe("the switch file", () => {
     expect(existsSync(`${switchesPath(stateDir)}.lock`)).toBe(false);
   });
 
-  test("a lock left by a writer that died is taken over after 5 s", async () => {
+  test("a lock left by a writer that died is taken over at once", async () => {
     const stateDir = await tempDir();
     await mkdir(join(stateDir, "tricks"), { recursive: true });
     const lock = `${switchesPath(stateDir)}.lock`;
-    await writeFile(lock, "999999\n");
-    const old = new Date(Date.now() - SWITCH_LOCK_STALE_MS - 1000);
-    await utimes(lock, old, old);
+    // The pid line alone, as an older build wrote it, and no age: a dead pid is the whole rule.
+    await writeFile(lock, `${String(await deadPid())}\n`);
     await updateSwitches(stateDir, (now) => withSwitch(now, "legs", true, "t", HASH));
     expect(parseSwitches(readFileSync(switchesPath(stateDir), "utf8")).switches.on.has("legs")).toBe(true);
+    expect(await leftovers(stateDir)).toEqual(["switches.json"]);
+  });
+
+  test("counsel A1: waiters that all find a stale lock take it one at a time", async () => {
+    // Repeated, because the old take-overs (stat then unlink, then rename aside) lost the race only on some interleavings.
+    const dead = await deadPid();
+    for (let round = 0; round < 5; round += 1) {
+      const stateDir = await tempDir();
+      await mkdir(join(stateDir, "tricks"), { recursive: true });
+      const lock = `${switchesPath(stateDir)}.lock`;
+      await writeFile(lock, `${String(dead)}\nlong-dead-nonce\n`);
+      const { most, done } = await race(stateDir, 8);
+      expect(done).toBe(8);
+      expect(most).toBe(1);
+      expect(existsSync(lock)).toBe(false);
+      // No door, prepared lock or temp file is left behind.
+      expect(await leftovers(stateDir)).toEqual([]);
+    }
+  });
+
+  test("counsel A1, third pass: a live holder that sleeps 7 s is never taken over; its waiters give up with the error", async () => {
+    const stateDir = await tempDir();
+    const lock = `${switchesPath(stateDir)}.lock`;
+    const child = await holder(stateDir, 7000);
+    const text = readFileSync(lock, "utf8");
+    expect(text.startsWith(`${String(child.pid)}\n`)).toBe(true);
+    let entered = 0;
+    const results = await Promise.allSettled(
+      Array.from({ length: 4 }, () =>
+        withSwitchLock(stateDir, async () => {
+          entered += 1;
+        }),
+      ),
+    );
+    expect(entered).toBe(0);
+    for (const result of results) {
+      expect(result.status).toBe("rejected");
+      if (result.status === "rejected") expect(String(result.reason)).toContain("locked by another writer");
+    }
+    // The holder's own file stood the whole time, and its own release removes it.
+    expect(readFileSync(lock, "utf8")).toBe(text);
+    expect(await child.exited).toBe(0);
+    expect(existsSync(lock)).toBe(false);
+  }, 20_000);
+
+  test("counsel A1, third pass: a holder killed inside the lock is taken over by one waiter at a time", async () => {
+    const stateDir = await tempDir();
+    const lock = `${switchesPath(stateDir)}.lock`;
+    const child = await holder(stateDir, 60_000);
+    child.kill("SIGKILL");
+    await child.exited;
+    expect(readFileSync(lock, "utf8").startsWith(`${String(child.pid)}\n`)).toBe(true);
+    const { most, done } = await race(stateDir, 6);
+    expect(done).toBe(6);
+    expect(most).toBe(1);
+    expect(await leftovers(stateDir)).toEqual([]);
+  }, 20_000);
+
+  test("counsel A1, third pass: a door left by a dead waiter is cleared; a live waiter's door is waited for", async () => {
+    const dead = await deadPid();
+    const stateDir = await tempDir();
+    await mkdir(join(stateDir, "tricks"), { recursive: true });
+    const lock = `${switchesPath(stateDir)}.lock`;
+    await writeFile(lock, `${String(dead)}\ndead-holder\n`);
+    await writeFile(`${lock}.takeover`, `${String(dead)}\ndead-waiter\n`);
+    await withSwitchLock(stateDir, async () => {});
+    expect(await leftovers(stateDir)).toEqual([]);
+
+    await writeFile(lock, `${String(dead)}\ndead-holder\n`);
+    // A live waiter (this process, another nonce) holds the door: nobody else replaces the lock meanwhile.
+    await writeFile(`${lock}.takeover`, `${String(process.pid)}\nlive-waiter\n`);
+    let entered = false;
+    const pending = withSwitchLock(stateDir, async () => {
+      entered = true;
+    });
+    await Bun.sleep(200);
+    expect(entered).toBe(false);
+    expect(readFileSync(lock, "utf8")).toBe(`${String(dead)}\ndead-holder\n`);
+    await rm(`${lock}.takeover`);
+    await pending;
+    expect(entered).toBe(true);
+    expect(await leftovers(stateDir)).toEqual([]);
+  });
+
+  test("counsel A1: the lock file carries the holder's nonce beside its pid", async () => {
+    const stateDir = await tempDir();
+    const lock = `${switchesPath(stateDir)}.lock`;
+    let text = "";
+    await withSwitchLock(stateDir, async () => {
+      text = readFileSync(lock, "utf8");
+    });
+    const [pid, nonce, rest] = text.split("\n");
+    expect(pid).toBe(String(process.pid));
+    expect(nonce).toMatch(/^[0-9a-f]{32}$/u);
+    expect(rest).toBe("");
+  });
+
+  test("counsel A1: a release with a foreign nonce leaves the lock alone", async () => {
+    const stateDir = await tempDir();
+    const lock = `${switchesPath(stateDir)}.lock`;
+    await withSwitchLock(stateDir, async () => {
+      // The lock was taken over while this writer was slow: another holder's file stands at the path.
+      await writeFile(lock, "4242\nforeign-nonce\n");
+    });
+    expect(readFileSync(lock, "utf8")).toBe("4242\nforeign-nonce\n");
+  });
+
+  test("counsel A1: a release removes its own lock, also when the work throws", async () => {
+    const stateDir = await tempDir();
+    const lock = `${switchesPath(stateDir)}.lock`;
+    await expect(
+      withSwitchLock(stateDir, async () => {
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  test("counsel A1: a live lock is waited for, not taken, and so is one that does not read as a lock", async () => {
+    const stateDir = await tempDir();
+    await mkdir(join(stateDir, "tricks"), { recursive: true });
+    const lock = `${switchesPath(stateDir)}.lock`;
+    // This process's pid with another nonce: a holder that is alive. Then an empty file and one with no pid.
+    for (const text of [`${String(process.pid)}\nlive-nonce\n`, "", "held"]) {
+      await writeFile(lock, text);
+      // A fake clock: the first reading puts the end of the wait far in the past, so the wait ends at once.
+      let reads = 0;
+      const clock = () => (reads++ === 0 ? Date.now() - 100_000 : Date.now());
+      await expect(withSwitchLock(stateDir, async () => "never", clock)).rejects.toThrow("locked by another writer");
+      expect(readFileSync(lock, "utf8")).toBe(text);
+    }
+  });
+
+  test("counsel A1, blank locks: a fresh empty or pid-less lock makes every waiter fail and is left alone", async () => {
+    const stateDir = await tempDir();
+    await mkdir(join(stateDir, "tricks"), { recursive: true });
+    const lock = `${switchesPath(stateDir)}.lock`;
+    for (const text of ["", "held"]) {
+      await writeFile(lock, text);
+      let entered = 0;
+      const results = await Promise.allSettled(
+        Array.from({ length: 4 }, () => {
+          // Each waiter's wait ends at once (first reading far in the past); the lock's age reads real time.
+          let reads = 0;
+          const clock = () => (reads++ === 0 ? Date.now() - 100_000 : Date.now());
+          return withSwitchLock(
+            stateDir,
+            async () => {
+              entered += 1;
+            },
+            clock,
+          );
+        }),
+      );
+      expect(entered).toBe(0);
+      expect(results.every((result) => result.status === "rejected" && String(result.reason).includes("locked by another writer"))).toBe(true);
+      expect(readFileSync(lock, "utf8")).toBe(text);
+    }
+  });
+
+  test("counsel A1, blank locks: an empty or pid-less lock older than 30 s is taken over by one waiter at a time", async () => {
+    const old = new Date(Date.now() - SWITCH_LOCK_BLANK_MS - 5000);
+    for (const text of ["", "held"]) {
+      const stateDir = await tempDir();
+      await mkdir(join(stateDir, "tricks"), { recursive: true });
+      const lock = `${switchesPath(stateDir)}.lock`;
+      await writeFile(lock, text);
+      await utimes(lock, old, old);
+      const { most, done } = await race(stateDir, 6);
+      expect(done).toBe(6);
+      expect(most).toBe(1);
+      expect(await leftovers(stateDir)).toEqual([]);
+    }
+  });
+
+  test("Windows: a rename over the lock refused twice with EPERM is tried again; the waiter gets the lock and leaves nothing", async () => {
+    const stateDir = await tempDir();
+    await mkdir(join(stateDir, "tricks"), { recursive: true });
+    const lock = `${switchesPath(stateDir)}.lock`;
+    await writeFile(lock, `${String(await deadPid())}\ndead-holder\n`);
+    const fs = refusing({ rename: 2 });
+    let entered = false;
+    await withSwitchLock(
+      stateDir,
+      async () => {
+        entered = true;
+        expect(readFileSync(lock, "utf8").startsWith(`${String(process.pid)}\n`)).toBe(true);
+      },
+      Date.now,
+      fs,
+    );
+    expect(entered).toBe(true);
+    expect(fs.refused.rename).toBe(2);
+    expect(await leftovers(stateDir)).toEqual([]);
+  });
+
+  test("Windows: a link onto the lock and its release refused with EBUSY and EACCES are tried again", async () => {
+    const stateDir = await tempDir();
+    const fs = refusing({ link: 2, unlinkLock: 1 });
+    await withSwitchLock(stateDir, async () => {}, Date.now, fs);
+    expect(fs.refused.link).toBe(2);
+    expect(fs.refused.unlinkLock).toBe(1);
+    expect(await leftovers(stateDir)).toEqual([]);
+  });
+
+  test("Windows: a rename that keeps being refused ends in the existing error at the limit, never before, and leaves nothing of the waiter's", async () => {
+    const stateDir = await tempDir();
+    await mkdir(join(stateDir, "tricks"), { recursive: true });
+    const lock = `${switchesPath(stateDir)}.lock`;
+    const dead = `${String(await deadPid())}\ndead-holder\n`;
+    await writeFile(lock, dead);
+    const fs = refusing({ rename: Number.POSITIVE_INFINITY });
+    const started = Date.now();
+    await expect(withSwitchLock(stateDir, async () => "never", Date.now, fs)).rejects.toThrow("locked by another writer");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(SWITCH_LOCK_WAIT_MS);
+    expect(fs.refused.rename).toBeGreaterThan(10);
+    expect(readFileSync(lock, "utf8")).toBe(dead);
+    expect(await leftovers(stateDir)).toEqual(["switches.json.lock"]);
+  }, 20_000);
+
+  test("counsel A1, blank locks: an old empty door is cleared, a fresh empty door is waited for", async () => {
+    const dead = await deadPid();
+    const stateDir = await tempDir();
+    await mkdir(join(stateDir, "tricks"), { recursive: true });
+    const lock = `${switchesPath(stateDir)}.lock`;
+    const door = `${lock}.takeover`;
+    await writeFile(lock, `${String(dead)}\ndead-holder\n`);
+    await writeFile(door, "");
+    const old = new Date(Date.now() - SWITCH_LOCK_BLANK_MS - 5000);
+    await utimes(door, old, old);
+    await withSwitchLock(stateDir, async () => {});
+    expect(await leftovers(stateDir)).toEqual([]);
+
+    await writeFile(lock, `${String(dead)}\ndead-holder\n`);
+    await writeFile(door, "");
+    let entered = false;
+    const pending = withSwitchLock(stateDir, async () => {
+      entered = true;
+    });
+    await Bun.sleep(200);
+    expect(entered).toBe(false);
+    expect(readFileSync(lock, "utf8")).toBe(`${String(dead)}\ndead-holder\n`);
+    await rm(door);
+    await pending;
+    expect(entered).toBe(true);
+    expect(await leftovers(stateDir)).toEqual([]);
   });
 });
+
+/** A lock file system that refuses the first `n` calls of a kind as Windows does when another handle has the file open. */
+function refusing(limits: { rename?: number; link?: number; unlinkLock?: number }) {
+  const refused = { rename: 0, link: 0, unlinkLock: 0 };
+  const no = (code: string): Error => Object.assign(new Error(`${code}: operation not permitted`), { code });
+  const fs: LockFs & { refused: typeof refused } = {
+    refused,
+    rename: async (from, to) => {
+      if (refused.rename < (limits.rename ?? 0)) {
+        refused.rename += 1;
+        throw no("EPERM");
+      }
+      await rename(from, to);
+    },
+    link: async (from, to) => {
+      if (refused.link < (limits.link ?? 0)) {
+        refused.link += 1;
+        throw no("EBUSY");
+      }
+      await link(from, to);
+    },
+    unlink: async (path) => {
+      if (path.endsWith(".lock") && refused.unlinkLock < (limits.unlinkLock ?? 0)) {
+        refused.unlinkLock += 1;
+        throw no("EACCES");
+      }
+      await unlink(path);
+    },
+  };
+  return fs;
+}
+
+/** The pid of a process that ran and was reaped: no process has it now (a reuse in the test's few ms is not expected). */
+async function deadPid(): Promise<number> {
+  const child = Bun.spawn([process.execPath, "-e", ""], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  await child.exited;
+  return child.pid;
+}
+
+/** The files left in `<stateDir>/tricks`, sorted. */
+async function leftovers(stateDir: string): Promise<string[]> {
+  return (await readdir(join(stateDir, "tricks"))).toSorted();
+}
+
+/** `n` writers at once on the switch lock, each inside for 10 ms: how many were ever inside together, and how many finished. */
+async function race(stateDir: string, n: number): Promise<{ most: number; done: number }> {
+  let inside = 0;
+  let most = 0;
+  let done = 0;
+  await Promise.all(
+    Array.from({ length: n }, () =>
+      withSwitchLock(stateDir, async () => {
+        inside += 1;
+        most = Math.max(most, inside);
+        await Bun.sleep(10);
+        inside -= 1;
+        done += 1;
+      }),
+    ),
+  );
+  return { most, done };
+}
+
+/** A child process that takes the switch lock and holds it for `ms`; answered once it holds it. */
+async function holder(stateDir: string, ms: number): Promise<Bun.Subprocess<"ignore", "pipe", "inherit">> {
+  const code = `import { withSwitchLock } from ${JSON.stringify(join(import.meta.dir, "switches.ts"))};
+await withSwitchLock(${JSON.stringify(stateDir)}, async () => { console.log("held"); await Bun.sleep(${String(ms)}); });`;
+  const child = Bun.spawn([process.execPath, "-e", code], { stdin: "ignore", stdout: "pipe", stderr: "inherit" });
+  const reader = child.stdout.getReader();
+  let seen = "";
+  while (!seen.includes("held")) {
+    const { value, done } = await reader.read();
+    if (done) throw new Error(`the holder exited before it held the lock: ${seen}`);
+    seen += new TextDecoder().decode(value);
+  }
+  reader.releaseLock();
+  return child;
+}
 
 /** A trick folder under `root` with a manifest and files (nested paths allowed). */
 async function trickDir(root: string, id: string, files: Record<string, string> = {}): Promise<string> {
@@ -379,7 +702,7 @@ describe("the facts", () => {
     expect(facts.host).toBe("lodge");
     // One contract number on the facts, no `v` beside it: the trick's own, 1 when it names none.
     expect(facts.contract).toBe(TRICK_CONTRACT_DEFAULT);
-    expect(buildFacts(world, { id: "legs", dir: "/c/tricks/legs", state: "/s/tricks/legs" }, { kind: "timer" }, TRICK_CONTRACT).contract).toBe(2);
+    expect(buildFacts(world, { id: "legs", dir: "/c/tricks/legs", state: "/s/tricks/legs" }, { kind: "timer" }, TRICK_CONTRACT).contract).toBe(TRICK_CONTRACT);
     expect(Object.keys(facts)).not.toContain("v");
   });
 
@@ -467,6 +790,9 @@ describe("the routes", () => {
     const calls: [string, string][] = [];
     const surface: TricksSurface = {
       rev: () => 1,
+      switchedOn: () => true,
+      switchTo: () => null,
+      gateLine: () => null,
       noteWatched: () => {},
       reply: async () => ({ rev: 1, tricks: [], parts: [], present: [] }),
       sessionPanes: () => undefined,
@@ -476,6 +802,7 @@ describe("the routes", () => {
       },
       setSwitch: async () => ({ status: 404, body: { error: "unknown-trick" } }),
       media: async () => null,
+      code: async () => ({ status: 404, body: { error: "unknown-trick" } }),
       autoRoute: async () => ({ status: 404, body: { error: "unknown-trick" } }),
       undoRoute: async () => ({ status: 404, body: { error: "unknown-trick" } }),
     };
@@ -494,6 +821,9 @@ describe("the routes", () => {
     const hashes: (string | null)[] = [];
     const surface: TricksSurface = {
       rev: () => 1,
+      switchedOn: () => true,
+      switchTo: () => null,
+      gateLine: () => null,
       noteWatched: () => {},
       reply: async () => ({ rev: 1, tricks: [], parts: [], present: [] }),
       tap: async () => ({ status: 404, body: { error: "unknown-trick" } }),
@@ -504,6 +834,7 @@ describe("the routes", () => {
         return { status: 404, body: { error: "unknown-trick" } };
       },
       media: async () => null,
+      code: async () => ({ status: 404, body: { error: "unknown-trick" } }),
       autoRoute: async () => ({ status: 404, body: { error: "unknown-trick" } }),
       undoRoute: async () => ({ status: 404, body: { error: "unknown-trick" } }),
     };
@@ -533,12 +864,16 @@ describe("the routes", () => {
     const calls: string[] = [];
     const surface: TricksSurface = {
       rev: () => 1,
+      switchedOn: () => true,
+      switchTo: () => null,
+      gateLine: () => null,
       noteWatched: () => {},
       reply: async () => ({ rev: 1, tricks: [], parts: [], present: [] }),
       tap: async () => ({ status: 404, body: { error: "unknown-trick" } }),
       sessionPanes: () => undefined,
       setSwitch: async () => ({ status: 404, body: { error: "unknown-trick" } }),
       media: async () => null,
+      code: async () => ({ status: 404, body: { error: "unknown-trick" } }),
       autoRoute: async (host, id, on) => {
         calls.push(`auto ${host} ${id} ${String(on)}`);
         return { status: 409, body: { error: "off", message: "The trick is off." } };
@@ -571,6 +906,9 @@ describe("the routes", () => {
     const calls: [string, string, string][] = [];
     const surface: TricksSurface = {
       rev: () => 1,
+      switchedOn: () => true,
+      switchTo: () => null,
+      gateLine: () => null,
       noteWatched: () => {},
       reply: async () => ({ rev: 1, tricks: [], parts: [], present: [] }),
       tap: async () => ({ status: 404, body: { error: "unknown-trick" } }),
@@ -580,6 +918,7 @@ describe("the routes", () => {
         calls.push([host, id, rel]);
         return null;
       },
+      code: async () => ({ status: 404, body: { error: "unknown-trick" } }),
       autoRoute: async () => ({ status: 404, body: { error: "unknown-trick" } }),
       undoRoute: async () => ({ status: 404, body: { error: "unknown-trick" } }),
     };
@@ -597,13 +936,53 @@ describe("the routes", () => {
     expect(route.exec("/api/tricks/lodge/legs/trick.toml")).toBeNull();
   });
 
+  test("the code path is decoded and handed on, with the file named by the query; an odd name is a miss", async () => {
+    const calls: [string, string, string | null][] = [];
+    const surface: TricksSurface = {
+      rev: () => 1,
+      switchedOn: () => true,
+      switchTo: () => null,
+      gateLine: () => null,
+      noteWatched: () => {},
+      reply: async () => ({ rev: 1, tricks: [], parts: [], present: [] }),
+      tap: async () => ({ status: 404, body: { error: "unknown-trick" } }),
+      sessionPanes: () => undefined,
+      setSwitch: async () => ({ status: 404, body: { error: "unknown-trick" } }),
+      media: async () => null,
+      code: async (host, id, file) => {
+        calls.push([host, id, file]);
+        return { status: 404, body: { error: "unknown-trick" } };
+      },
+      autoRoute: async () => ({ status: 404, body: { error: "unknown-trick" } }),
+      undoRoute: async () => ({ status: 404, body: { error: "unknown-trick" } }),
+    };
+    const route = /^\/api\/tricks\/([^/]+)\/([^/]+)\/code$/;
+    const match = route.exec("/api/tricks/lod%67e/legs/code");
+    if (match === null) throw new Error("no match");
+    await tricksCodeRoute(surface, match, new URLSearchParams());
+    await tricksCodeRoute(surface, match, new URLSearchParams({ file: "src/main.ts" }));
+    expect(calls).toEqual([
+      ["lodge", "legs", null],
+      ["lodge", "legs", "src/main.ts"],
+    ]);
+    for (const file of ["", "x".repeat(513)]) expect(await tricksCodeRoute(surface, match, new URLSearchParams({ file }))).toEqual({ status: 404, body: { error: "no-file" } });
+    expect(calls.length).toBe(2);
+    const broken = route.exec("/api/tricks/%E0%A4%A/legs/code");
+    if (broken === null) throw new Error("no match");
+    expect(await tricksCodeRoute(surface, broken, new URLSearchParams())).toEqual({ status: 404, body: { error: "unknown-host" } });
+    expect(route.exec("/api/tricks/lodge/legs/code/x")).toBeNull();
+    expect(route.exec("/api/tricks/lodge/legs/media/code")).toBeNull();
+  });
+
   test("server.ts gates the list as a read and the tap as a write, stamps the watch for a paired phone only, the switch as a write, and declares both routes", () => {
     const src = readFileSync(join(import.meta.dir, "..", "server.ts"), "utf8");
     const list = src.slice(src.indexOf('if (pathname === "/api/tricks" && req.method === "GET")'));
     // The rights live in one table in routes.ts; server.ts reads each route's level from it.
-    expect(TRICKS_ROUTE_RIGHTS).toEqual({ reply: "read", tap: "write", switch: "write", media: "read", auto: "write", undo: "write", official: "read", officialAdd: "write" });
+    expect(TRICKS_ROUTE_RIGHTS).toEqual({ reply: "read", tap: "write", switch: "write", media: "read", code: "read", auto: "write", undo: "write", official: "read", officialAdd: "write", repoList: "write", repoAdd: "write", feature: "write", value: "write" });
     expect(list.slice(0, 400)).toContain("guard(req, cfg, TRICKS_ROUTE_RIGHTS.reply, pairingGate)");
     expect(list.slice(0, 600)).toContain("if (pairedLabel(req, pairingGate) !== null) tricks.noteWatched();");
+    // The runner's PATH for the host's own CLI only is held by a real request in the crew harness
+    // (integration/crew-harness.test.ts, "the tricks list: the runner's PATH").
     const tap = src.slice(src.indexOf("const tricksTap = TRICKS_TAP_ROUTE.exec(pathname);"));
     expect(tap.slice(0, 300)).toContain("guard(req, cfg, TRICKS_ROUTE_RIGHTS.tap, pairingGate)");
     const sw = src.slice(src.indexOf("const tricksSwitch = TRICKS_SWITCH_ROUTE.exec(pathname);"));
@@ -616,6 +995,11 @@ describe("the routes", () => {
     expect(media.slice(0, 200)).toContain('req.method === "GET"');
     expect(media.slice(0, 300)).toContain("guard(req, cfg, TRICKS_ROUTE_RIGHTS.media, pairingGate)");
     expect(media.slice(0, 900)).toContain("secure(new Response(file.bytes, { headers: { \"content-type\": file.mime, ...HILL_MEDIA_HEADERS } }))");
+    // A trick's code for the About sheet's folds: read-gated like the list, a GET only.
+    expect(src).toContain("const TRICKS_CODE_ROUTE = /^\\/api\\/tricks\\/([^/]+)\\/([^/]+)\\/code$/;");
+    const code = src.slice(src.indexOf("const tricksCode = TRICKS_CODE_ROUTE.exec(pathname);"));
+    expect(code.slice(0, 200)).toContain('req.method === "GET"');
+    expect(code.slice(0, 300)).toContain("guard(req, cfg, TRICKS_ROUTE_RIGHTS.code, pairingGate)");
     // The official list: its read gated like the list, its add and update like the switch.
     expect(src).toContain("const TRICKS_OFFICIAL_ROUTE = /^\\/api\\/tricks\\/official\\/([^/]+)\\/(add|update)$/;");
     const officialList = src.slice(src.indexOf('if (pathname === "/api/tricks/official" && req.method === "GET")'));

@@ -3,7 +3,6 @@
 - **Status:** Proposed (2026-11-13), not built; for the maintainer to accept or turn down
 - **Date:** 2026-11-13, after a throwaway PoC of opencode 2.2.7 (service, `--standalone`, Herdr
   0.9.5 two-pane) against a logging fake model
-- **Shipped in:** pending
 - **Trail:** the bridge as an HTTP client of opencode's service (`service.json`, HTTP Basic,
   `POST /api/session/{sid}/prompt`) · a process witness (the service's `/api/info` pid matched to
   the pane's process tree with `ps` / `lsof`) · Herdr reporting the server a pane is attached to ·

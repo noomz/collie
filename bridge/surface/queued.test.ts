@@ -31,6 +31,29 @@ describe("QueuedSends", () => {
     expect(cards.filter((card) => card.state === "queued")).toHaveLength(QUEUED_SENDS_MAX);
   });
 
+  test("cannot tell: Discard on a card that is not unconfirmed answers false, and a second Discard of the same card answers false", () => {
+    // The queued card's Send again drops the card first and sends only on a true answer (M102 spec 04), so a stale card never sends twice.
+    const m = memory();
+    for (let i = 0; i <= QUEUED_SENDS_MAX; i++) {
+      m.add(`queued-gone-${String(i).padStart(4, "0")}`, `message ${String(i)}`);
+      m.clock.now += 10;
+    }
+    const unconfirmed = "queued-gone-0000";
+    const waiting = `queued-gone-${String(QUEUED_SENDS_MAX).padStart(4, "0")}`;
+    expect(m.sends.of("main", "%1").find((card) => card.requestId === unconfirmed)?.state).toBe("unconfirmed");
+    expect(m.sends.of("main", "%1").find((card) => card.requestId === waiting)?.state).toBe("queued");
+    // A card still waiting is not an unconfirmed one: nothing is dropped.
+    expect(m.sends.dismissUnconfirmed("main", "%1", waiting)).toBe(false);
+    expect(m.sends.of("main", "%1").some((card) => card.requestId === waiting)).toBe(true);
+    // A card of another pane or session is nobody's here.
+    expect(m.sends.dismissUnconfirmed("main", "%2", unconfirmed)).toBe(false);
+    expect(m.sends.dismissUnconfirmed("other", "%1", unconfirmed)).toBe(false);
+    // The unconfirmed card goes once. The second Discard of the same card finds nothing.
+    expect(m.sends.dismissUnconfirmed("main", "%1", unconfirmed)).toBe(true);
+    expect(m.sends.dismissUnconfirmed("main", "%1", unconfirmed)).toBe(false);
+    expect(m.sends.of("main", "%1").some((card) => card.requestId === unconfirmed)).toBe(false);
+  });
+
   test("memory has an end: unconfirmed cards past twice the cap go, oldest first", () => {
     const m = memory();
     for (let i = 0; i < 3 * QUEUED_SENDS_MAX; i++) {
@@ -66,6 +89,29 @@ describe("QueuedSends", () => {
       m.sends.boxRead("main", "%1", { box: "", at: m.clock.now, turn: "idle", poll: true });
     }
     expect(m.sends.of("main", "%1")).toEqual([]);
+  });
+
+  // The owner's lead pane, 2026-11-07: a send that started a turn came back to the box on a Stop, with no card.
+  test("a submitted send is no card until the box gives it back, and its prompt edge does not end it", () => {
+    const m = memory();
+    m.sends.add({ id: "queued-sub-0001", session: "main", paneId: "%1", generation: "omp:session", text: "P text", collapse: null, at: m.clock.now, submitted: true });
+    expect(m.sends.of("main", "%1")).toEqual([]);
+    // Claude Code's prompt hook fires at the submit: the send stays a candidate.
+    m.sends.taken("queued-sub-0001");
+    expect(m.sends.panes("main")).toEqual(["%1"]);
+    m.clock.now += 7_000;
+    expect(m.sends.boxRead("main", "%1", { box: "P text", at: m.clock.now, turn: "idle", poll: false })).toEqual(["queued-sub-0001"]);
+    expect(m.sends.of("main", "%1")).toMatchObject([{ requestId: "queued-sub-0001", text: "P text", state: "returned" }]);
+    expect(m.sends.returnedText("main", "%1", "queued-sub-0001")).toBe("P text");
+  });
+
+  test("a prompt edge still ends a queued send and a steer", () => {
+    const m = memory();
+    m.add("queued-sub-0002", "Q text");
+    m.add("queued-sub-0003", "S text", true);
+    m.sends.taken("queued-sub-0002");
+    m.sends.taken("queued-sub-0003");
+    expect(m.sends.panes("main")).toEqual([]);
   });
 
   test("a steer is no card until the box gives it back, and the run is steers first", () => {

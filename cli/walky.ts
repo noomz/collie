@@ -13,7 +13,7 @@ import { BARE_BAD_REQUEST, UNREAD_BY_OLDER_BRIDGE } from "../bridge/walky/refusa
 import type { WalkyTotals } from "../bridge/walky/service.ts";
 import { walkySocketPath } from "../bridge/walky/socket.ts";
 import type { WalkySpace } from "../bridge/walky/space.ts";
-import { formatRead, mintWalkyId, OUTCOME_ON_LEAD, RESTING, SENDER_OFF, WALKY_ID, WALKY_OFF, type WalkyMessage, type WalkyReceipt } from "../bridge/walky/types.ts";
+import { formatRead, mintWalkyId, OUTCOME_ON_LEAD, readSubject, replyLine, SUBJECT_LEFT_OUT, RESTING, SENDER_OFF, WALKY_ID, WALKY_OFF, type WalkyMessage, type WalkyReceipt } from "../bridge/walky/types.ts";
 
 // `collie walky`: walky talky from a terminal (M62 spec 02). It talks to the
 // running bridge over its local socket, `<stateDir>/walky/sock`, one JSON request per connection.
@@ -118,10 +118,23 @@ export type PaneKind = "agent" | "shell" | "unknown";
 /**
  * Ask the local bridges whether this pane runs an agent (crew slice 3). Outside a pane, with no bridge
  * answering, or with only bridges that do not know the op, the answer is `unknown`: the caller decides
- * what that means. `collie trick on` treats it as a shell, a speed bump and not a wall.
+ * what that means. The person-only verbs refuse on it (`paneNotProvenShell`); `collie trick init` does not.
  */
 export async function askPaneKind(deps: WalkyDeps): Promise<PaneKind> {
   return (await askPanePlace(deps)).kind;
+}
+
+/**
+ * Whether a verb that is a person's choice (`collie trick on`, `collie tricks on`, `collie hill on`, and the
+ * other person-only verbs) must refuse here. It fails closed: a process with pane markers runs in a
+ * multiplexer pane, and it passes only when the bridge proves the pane a shell. `agent`, `unknown` (no
+ * bridge answers, or an older one) and a check that throws all refuse. A process with no pane markers is a
+ * person's own terminal and never refuses; so does one that gives no `paneKind` to ask (a unit's deps, not
+ * the program, which always gives it).
+ */
+export async function paneNotProvenShell(env: Parameters<typeof readEnvMarkers>[0], paneKind: (() => Promise<PaneKind>) | undefined): Promise<boolean> {
+  if (readEnvMarkers(env).length === 0 || paneKind === undefined) return false;
+  return (await paneKind().catch(() => "unknown" as const)) !== "shell";
 }
 
 /**
@@ -380,6 +393,28 @@ export function outsideLine(count: number): string {
 }
 
 /**
+ * The columns of `who`'s table. SPACE is the workspace, FOLDER the pane's `<repo>#<branch>` (the row's
+ * `label`), NAME the name a person gave the session, TITLE the title the agent gave it. An agent
+ * addresses "the session in workspace X" by matching any of the four. A bridge before 1.29.0 sends no
+ * name and no title, and those cells read `-`.
+ */
+export const WHO_HEAD = ["ADDRESS", "MACHINE", "HARNESS", "SPACE", "FOLDER", "NAME", "TITLE", "STATE"] as const;
+
+/** One row's cells, in {@link WHO_HEAD}'s order. A missing cell is undefined. */
+export function whoCells(row: JsonObject): (string | undefined)[] {
+  return [
+    asJsonString(row.address),
+    asJsonString(row.machine),
+    asJsonString(row.harness),
+    spaceCell(row),
+    asJsonString(row.label),
+    asJsonString(row.name),
+    asJsonString(row.title),
+    stateCell(row),
+  ];
+}
+
+/**
  * `walky who [--all] [--workspace <repo>[#<branch>]] [--json]` (M98): from an agent pane, the panes of
  * its own space, with a last line for the ones outside it; `--all` lists every pane. A shell that is no
  * agent pane lists every pane. On a crew member the bridge lists the crew as its lead does.
@@ -424,8 +459,8 @@ export async function cmdWalkyWho(deps: WalkyDeps, args: readonly string[]): Pro
     if (answer.body.selfOff === true) deps.io.out(YOU_ARE_OFF_WORDS);
     return EXIT.OK;
   }
-  const rows = targets.map((row) => [asJsonString(row.address), asJsonString(row.machine), asJsonString(row.harness), asJsonString(row.label), spaceCell(row), stateCell(row)].map((cell) => shown(cell ?? "-")));
-  const head = ["ADDRESS", "MACHINE", "HARNESS", "LABEL", "SPACE", "STATE"];
+  const rows = targets.map((row) => whoCells(row).map((cell) => shown(cell ?? "-")));
+  const head = WHO_HEAD;
   const widths = head.map((title, column) => Math.max(title.length, ...rows.map((row) => row[column]!.length)));
   const line = (cells: readonly string[]): string => cells.map((cell, column) => cell.padEnd(widths[column]!)).join("  ").trimEnd();
   deps.io.out(line(head));
@@ -445,15 +480,18 @@ interface SendArgs {
   readonly wake: boolean;
   /** `--outside` (M98): the message may leave the sender's space. */
   readonly outside: boolean;
+  /** `--subject <words>` (M98 spec 07): what the message is about, cleaned and within the limits. Null: none. */
+  readonly subject: string | null;
 }
 
-/** `send <address> [text...]`, `--to` and `--reply-to` as aliases, `--wake`, `--outside`, `--` before a text that starts with a dash. */
+/** `send <address> [text...]`, `--to` and `--reply-to` as aliases, `--wake`, `--outside`, `--subject <words>`, `--` before a text that starts with a dash. */
 export function parseSendArgs(args: readonly string[]): SendArgs | { readonly error: string } {
   let to: string | null = null;
   let replyTo: string | null = null;
   let json = false;
   let wake = false;
   let outside = false;
+  let subject: string | null = null;
   const words: string[] = [];
   let i = 0;
   for (; i < args.length; i++) {
@@ -464,11 +502,17 @@ export function parseSendArgs(args: readonly string[]): SendArgs | { readonly er
     }
     // Once the address (or the id) is named, the first word that is not a flag starts the text.
     if (to !== null && !arg.startsWith("--")) break;
-    if (arg === "--to" || arg === "--reply-to") {
+    if (arg === "--to" || arg === "--reply-to" || arg === "--subject") {
       const value = args[i + 1];
       if (value === undefined) return { error: `\`${arg}\` needs a value` };
       if (arg === "--to") to = value;
-      else replyTo = value;
+      else if (arg === "--reply-to") replyTo = value;
+      else {
+        // Refused here, before any bridge is asked, with the same sentence the bridge would answer.
+        const read = readSubject(value);
+        if ("error" in read) return { error: read.error };
+        subject = read.subject;
+      }
       i += 1;
       continue;
     }
@@ -489,7 +533,7 @@ export function parseSendArgs(args: readonly string[]): SendArgs | { readonly er
   }
   words.push(...args.slice(i));
   if (replyTo !== null && !WALKY_ID.test(replyTo)) return { error: `\`${replyTo}\` is not a message id` };
-  return { to, replyTo, text: words.length === 0 ? null : words.join(" "), json, wake, outside };
+  return { to, replyTo, text: words.length === 0 ? null : words.join(" "), json, wake, outside, subject };
 }
 
 function usage(deps: WalkyDeps, verb: (typeof WALKY_SUBCOMMANDS)[number], why: string): number {
@@ -500,8 +544,8 @@ function usage(deps: WalkyDeps, verb: (typeof WALKY_SUBCOMMANDS)[number], why: s
 
 const USAGE = {
   who: "usage: collie walky who [--all | --here] [--workspace <repo>[#<branch>]] [--json]   (from an agent pane the list is your space, the default; --all lists every pane)",
-  send: "usage: collie walky send <address> [--wake] [--outside] [text...]   (no text: the body is read from stdin; --wake types a scope or all into sessions that rest too; --outside lets the message leave your space, only when your operator asked)",
-  reply: "usage: collie walky reply <id> [--outside] [text...]   (no text: the body is read from stdin)",
+  send: "usage: collie walky send <address> [--subject <words>] [--wake] [--outside] [text...]   (no text: the body is read from stdin; --subject says in 4 to 6 words what the message is about; --wake types a scope or all into sessions that rest too; --outside lets the message leave your space, only when your operator asked)",
+  reply: "usage: collie walky reply <id> [--subject <words>] [--outside] [text...]   (no text: the body is read from stdin)",
   inbox: "usage: collie walky inbox [<id>] [--all] [--keep] [--json]",
   status: "usage: collie walky status <id> [--json]",
   cancel: "usage: collie walky cancel <id> [--json]   (a held message you sent; it stays in the inbox, not typed)",
@@ -531,12 +575,13 @@ function targetLine(target: JsonValue | undefined, fallback: string): string {
  * Send, then wait up to 15 s for each receipt to leave `accepted`, and print three lines: the id, the
  * pane it went to, and the state in words. A message not typed yet adds where to look later.
  */
-async function sendAndWait(deps: WalkyDeps, to: string | null, replyTo: string | null, body: string, json: boolean, first?: string, wake = false, outside = false): Promise<number> {
+async function sendAndWait(deps: WalkyDeps, to: string | null, replyTo: string | null, body: string, json: boolean, first?: string, wake = false, outside = false, subject: string | null = null): Promise<number> {
   const id = (deps.mintId ?? mintWalkyId)();
-  // `wake` and `outside` ride the request only when true: a request without them is the one every bridge reads.
+  // `wake`, `outside` and `subject` ride the request only when set: a request without them is the one every bridge reads.
   const line: JsonObject = { op: "send", id, to, body, replyTo };
   if (wake) line.wake = true;
   if (outside) line.outside = true;
+  if (subject !== null) line.subject = subject;
   const answer = await request(deps, line, undefined, first);
   if (!answer.ok) return failure(deps, answer);
   let receipts = receiptsOf(answer.body.receipts);
@@ -554,8 +599,10 @@ async function sendAndWait(deps: WalkyDeps, to: string | null, replyTo: string |
     elsewhere = elsewhereOf(status.body.elsewhere);
     if (fresh.length > 0) receipts = fresh;
   }
+  // M98 spec 07: the bridge signed the message without its subject, because the crew's lead cannot read one.
+  const leftOut = answer.body.subjectLeftOut === true;
   if (json) {
-    deps.io.out(JSON.stringify({ id, receipts }));
+    deps.io.out(JSON.stringify(leftOut ? { id, receipts, subjectLeftOut: true } : { id, receipts }));
     return exitOf(receipts);
   }
   deps.io.out(id);
@@ -564,6 +611,7 @@ async function sendAndWait(deps: WalkyDeps, to: string | null, replyTo: string |
   else if (receipts.length === 1) deps.io.out(receiptLine(receipts[0]!, false, elsewhere));
   else for (const receipt of receipts) deps.io.out(receiptLine(receipt, true, elsewhere));
   if (receipts.some(isHeld)) deps.io.out(HELD_HINT);
+  if (leftOut) deps.io.out(SUBJECT_LEFT_OUT);
   if (receipts.length === 0 || receipts.some(notTypedYet)) deps.io.out(`check later: collie walky status ${id}`);
   return exitOf(receipts);
 }
@@ -588,7 +636,7 @@ export async function cmdWalkySend(deps: WalkyDeps, args: readonly string[]): Pr
   if (body === null) return usage(deps, "send", "no text: give it after the address, or on stdin");
   // `here` is the sender's space whatever else is said: the flag is accepted and not sent, so nothing about it changes.
   const outside = parsed.outside && parseAddress(parsed.to)?.kind !== "here";
-  return sendAndWait(deps, parsed.to, parsed.replyTo, body, parsed.json, undefined, parsed.wake, outside);
+  return sendAndWait(deps, parsed.to, parsed.replyTo, body, parsed.json, undefined, parsed.wake, outside, parsed.subject);
 }
 
 /** The first bridge that holds a message, and the message; else the words for why none does. */
@@ -626,7 +674,7 @@ export async function cmdWalkyReply(deps: WalkyDeps, args: readonly string[]): P
   const body = await bodyOf(deps, parsed.text);
   if (body === null) return usage(deps, "reply", "no text: give it after the id, or on stdin");
   // No address: the bridge sends a reply to the stored sender of what it answers, never elsewhere.
-  return sendAndWait(deps, null, id, body, parsed.json, holder, false, parsed.outside);
+  return sendAndWait(deps, null, id, body, parsed.json, holder, false, parsed.outside, parsed.subject);
 }
 
 /**
@@ -665,6 +713,8 @@ export async function cmdWalkyInbox(deps: WalkyDeps, args: readonly string[]): P
   messages.forEach(({ message, receipt }, index) => {
     if (index > 0) deps.io.out("");
     for (const line of formatRead(message, receipt?.via).split("\n")) deps.io.out(line);
+    // An agent's message ends with the command that answers it (M98 spec 07): the typed line no longer names it.
+    if (message.from.address !== null) deps.io.out(replyLine(message.id));
     if (all && receipt !== null) deps.io.out(`-- ${receiptLine(receipt, true)}`);
   });
   return EXIT.OK;

@@ -7,9 +7,16 @@ import { ARM_DWELL_MS, ARM_MS } from "@/lib/arm";
 import { HILL_ACK_MS } from "@/lib/hill/motion";
 import type { HillDecision, HillGroupAnswer, HillReceipt } from "@/lib/hill/wire";
 import { groupDecision, hillDecision, hillReceipt, trickDecision } from "@/test/hill-fixtures";
+import { stubAllSeen } from "@/test/seen-end";
 
 import { versionRules } from "@/playground/fixtures/hill/decisions";
 import { DecisionCard } from "./decision-card";
+
+// Where the card stood still for a second is the test of hooks/use-still.ts and decision-card.still.test.tsx;
+// here every card has stood still, and every end mark is on screen unless a case watches its own.
+vi.mock("@/hooks/use-still", () => ({ STILL_MS: 1000, STILL_TICK_MS: 100, useStill: (el: HTMLElement | null) => el !== null }));
+beforeEach(() => stubAllSeen());
+afterEach(() => vi.unstubAllGlobals());
 import { VIEW_CAP_PX, foldCut } from "./decision-view";
 
 // The Decision card (M96): what it shows, that nothing is chosen for the person, the numbered options,
@@ -408,6 +415,18 @@ describe("Add a note", () => {
     expect(slot("decision-send")).toHaveTextContent("Send answer");
   });
 
+  it("tells every change of the words, and draws a noted note again open, so it never rides on a tap unseen (M96 spec 10)", () => {
+    const onDraft = vi.fn<(text: string) => void>();
+    const first = render(<DecisionCard decision={hillDecision()} answer={HILL_IDLE} onSend={() => {}} onDraft={onDraft} />);
+    fireEvent.click(first.container.querySelector('[data-slot="decision-note"]')!);
+    fireEvent.change(first.container.querySelector('[data-slot="decision-text"]')!, { target: { value: "after the leg" } });
+    expect(onDraft).toHaveBeenLastCalledWith("after the leg");
+    first.unmount();
+    const again = render(<DecisionCard decision={hillDecision()} answer={HILL_IDLE} onSend={() => {}} initialDraft="after the leg" />);
+    expect(again.container.querySelector('[data-slot="decision-text"]')).toHaveValue("after the leg");
+    expect(again.container.querySelector('[data-slot="decision-note"]')).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("takes no note on a card that takes no answers", () => {
     const { slot } = renderCard(hillDecision(), { phase: "sending", intent: "yes", text: null });
     expect(slot("decision-note")).toBeDisabled();
@@ -656,7 +675,8 @@ describe("after the tap", () => {
 
   it("says what Collie did for its own Decision, wears the app's mark, and says nothing of a trick", () => {
     const from: HillDecision["from"] = { kind: "collie", address: null, trickId: null, trickKey: null, memberId: "lodge", harness: null, label: "Collie", host: "lodge", trickHost: null, ref: { type: "version", id: "legs", hash: "a".repeat(64) } };
-    const decision = hillDecision({ from, target: null, options: [{ intent: "use", label: "Use the new version" }, { intent: "keep", label: "Keep the old version" }] });
+    // With code to show: a version card with none offers no yes (2026-11-17).
+    const decision = hillDecision({ from, target: null, view: [{ kind: "diff", text: "+console.log(1);", attrs: { file: "program.ts" } }], options: [{ intent: "use", label: "Use the new version" }, { intent: "keep", label: "Keep the old version" }] });
     const used = renderCard(decision, answered(hillReceipt({ delivery: "none" }), "use"));
     expect(used.slot("decision-receipt")?.textContent).toBe("Now running the new version.");
     expect(used.container.querySelector('[data-slot="decision-collie-mark"]')).not.toBeNull();
@@ -866,12 +886,9 @@ describe("the Decision card, with a group of cards", () => {
     fireEvent.click(at("decision-group-next")!);
     fireEvent.click(at("decision-group-next")!);
     expect(at("decision-group-unopened")).toBeNull();
-    // "Switch it on" asks twice; the second tap sends the digest and every card.
-    vi.useFakeTimers();
+    // "Switch it on" is one tap: it sends the digest and every card at once.
     fireEvent.click(yes());
-    act(() => vi.advanceTimersByTime(ARM_DWELL_MS + 1));
-    fireEvent.click(yes());
-    vi.useRealTimers();
+    expect(onSend).toHaveBeenCalledTimes(2);
     expect(onSend).toHaveBeenLastCalledWith("on", null, { digest: "d".repeat(64), opened: [1, 2, 3] });
   });
 
@@ -962,12 +979,30 @@ describe("the Decision card, a single card of Collie's own with code", () => {
       target: null,
       text: "none",
       options: [
-        { intent: "on", label: "Switch it on", confirm: "Yes, switch on" },
+        { intent: "on", label: "Switch it on" },
         { intent: "later", label: "Not now" },
       ],
       view: code,
       ...over,
     });
+
+  it("offers no yes on a trick card with no code to show, only the decline, with the line that says why (2026-11-17)", () => {
+    for (const [decision, decline, yes] of [
+      [proposal({ view: [{ kind: "para", text: "It asks for no new rights." }] }), "later", "on"],
+      [proposal({ view: undefined }), "later", "on"],
+      [hillDecision({ from: collie("version"), target: null, text: "none", options: [{ intent: "use", label: "Use the new version" }, { intent: "keep", label: "Keep the old version" }] }), "keep", "use"],
+    ] as const) {
+      const card = renderCard(decision);
+      expect(card.option(decline)).toBeEnabled();
+      expect(card.container.querySelector(`[data-slot="decision-option"][data-intent="${yes}"]`)).toBeNull();
+      expect(card.slot("decision-code-unshown")).toHaveTextContent("This phone cannot show all of this card, so the trick cannot be switched on here.");
+      card.unmount();
+    }
+    // With code, both options show and no such line.
+    const shown = renderCard(proposal());
+    expect(shown.option("on")).toBeInTheDocument();
+    expect(shown.slot("decision-code-unshown")).toBeNull();
+  });
 
   /** Every view taller than the screen and far over the fold's cap, and an observer the case drives. */
   function tallScreen() {
@@ -1010,13 +1045,9 @@ describe("the Decision card, a single card of Collie's own with code", () => {
     act(() => watched()[0]!.callback([{ isIntersecting: true }]));
     expect(option("on")).toBeEnabled();
     expect(slot("decision-code-unread")).toBeNull();
-    vi.useFakeTimers();
-    onTestFinished(() => {
-      vi.useRealTimers();
-    });
+    // One tap answers: the proposal's yes has no confirm, so it is not armed first (decided 2026-11-17).
     fireEvent.click(option("on"));
-    act(() => vi.advanceTimersByTime(ARM_DWELL_MS + 1));
-    fireEvent.click(option("on"));
+    expect(onSend).toHaveBeenCalledTimes(1);
     expect(onSend).toHaveBeenLastCalledWith("on", null, { digest: "a".repeat(64), opened: [1] });
   });
 
@@ -1054,10 +1085,53 @@ describe("the Decision card, a single card of Collie's own with code", () => {
     expect(option("always")).toBeEnabled();
   });
 
-  it("a card no taller than the screen counts as read as it draws", () => {
-    const { slot, option } = renderCard(proposal());
+  /** An observer that watches and reports nothing until the test says so; `roots` are the `root` options it was given. */
+  function silentObserver() {
+    type Seen = (entries: readonly { isIntersecting: boolean }[]) => void;
+    const watching: { callback: Seen; target: Element | null; root: Element | null }[] = [];
+    class Silent {
+      private readonly at: { callback: Seen; target: Element | null; root: Element | null };
+      constructor(callback: Seen, options?: { root?: Element | null }) {
+        this.at = { callback, target: null, root: options?.root ?? null };
+        watching.push(this.at);
+      }
+      observe(target: Element): void {
+        this.at.target = target;
+      }
+      disconnect(): void {
+        this.at.target = null;
+      }
+    }
+    vi.stubGlobal("IntersectionObserver", Silent);
+    return () => watching.filter((one) => one.target !== null);
+  }
+
+  it("a card no taller than the screen gets no shortcut: its end mark is watched and the yes waits for it (security read, point 1)", () => {
+    const watched = silentObserver();
+    const { slot, option, onSend } = renderCard(proposal());
+    expect(watched().map((one) => one.target?.getAttribute("data-slot"))).toEqual(["decision-view-end"]);
+    expect(option("on")).toBeDisabled();
+    expect(slot("decision-code-unread")).toHaveTextContent("Scroll to the end of the code first.");
+    fireEvent.click(option("on"));
+    expect(onSend).not.toHaveBeenCalled();
+    act(() => watched()[0]!.callback([{ isIntersecting: true }]));
     expect(option("on")).toBeEnabled();
     expect(slot("decision-code-unread")).toBeNull();
+  });
+
+  it("a short card inside a scroll box is watched with that box as the root, and is read only when the box shows its end", () => {
+    const watched = silentObserver();
+    const view = render(
+      <div data-testid="box" data-scroll-root style={{ maxHeight: "60dvh", overflowY: "auto" }}>
+        <DecisionCard decision={proposal()} answer={HILL_IDLE} onSend={vi.fn()} />
+      </div>,
+    );
+    const on = view.container.querySelector<HTMLButtonElement>('[data-slot="decision-option"][data-intent="on"]')!;
+    expect(watched()).toHaveLength(1);
+    expect(watched()[0]!.root).toBe(view.getByTestId("box"));
+    expect(on).toBeDisabled();
+    act(() => watched()[0]!.callback([{ isIntersecting: true }]));
+    expect(on).toBeEnabled();
   });
 
   it("a card with no code folds as before, Collie's own or an agent's, and waits for nothing", () => {

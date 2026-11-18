@@ -56,7 +56,8 @@ screen Collie could not read). The counts name no pane, no text and no person.
 The device header gates writes and two reads: the [Files view](changes.md#files), which can show
 every file under a workspace's folder, and the New page's
 [Browse](configure.md#favourite-and-recent-folders), which lists folder names under home
-([ADR 0086](../.adr/0086-reads-need-the-pairing-token.md)).
+([ADR 0086](../.adr/0086-reads-need-the-pairing-token.md)). The [Changes view](changes.md#who-may-use-it)
+asks the same right when it reads your home folder or above it.
 
 ```bash
 bin/collie devices list             # what holds a credential, and when each was last seen
@@ -82,8 +83,8 @@ counters live in memory and reset when the bridge restarts.
 
 `collie pair` refuses in a pane where an agent works. A paired device can read and drive every
 session, approve a trick and answer a Decision. An agent that pairs one for itself skips every tap
-Collie asks of you. So the command asks the running bridge whether its pane runs an agent, the same
-check `collie trick on` makes, and refuses there. `collie pair --json` refuses too. Run it in a
+Collie asks of you. So the command asks the running bridge whether its pane runs an agent, a check
+like the one `collie trick on` makes, and refuses there. `collie pair --json` refuses too. Run it in a
 shell pane or a terminal of your own. With no bridge running, or a bridge that does not know the
 pane, it does not refuse. The check is a speed bump, not a wall
 ([What a program running as you can still do](#what-a-program-running-as-you-can-still-do)).
@@ -158,14 +159,24 @@ the token.
 ### The CLI's own reads
 
 At each start the bridge writes a new random secret to `local-secret` in its state folder.
-`collie doctor` and `collie crew update` send it to read their own bridge on the same machine.
-The file is owner-only, so only your account can read it, and a clean stop deletes it. The
-bridge takes it for reads only, never for a write or the Files view, and never from another machine.
-It accepts the secret from loopback only, and never on a request that carries a proxy's header such
+`collie doctor`, `collie status`, `collie sessions`, `collie trick list` and `collie crew update`
+send it to read their own bridge on the same machine. The file is owner-only, so only your account
+can read it, and a clean stop deletes it.
+
+This local key reads no screen and no message. It reaches five reads: the snapshot, the tricks list,
+the telemetry switch, the update check and the config. The snapshot gives it pane ids, agents,
+states and space names, with no title, ask or held send. The tricks list gives each trick's state
+and last error, with no output. Every other route refuses it with `403`, a member's pane too.
+
+> **Note.** A script that read panes with `local-secret` now needs a paired device's token. Pair
+> once with `collie pair`, then send that token as `COLLIE_TOKEN`.
+
+The bridge never takes the key for a write or the Files view, and never from another machine.
+It accepts the key from loopback only, and never on a request that carries a proxy's header such
 as `X-Forwarded-For`. A crew member that binds `COLLIE_HOST` to its tailnet address has nothing on
 loopback, so there the bridge also accepts it from this machine's own addresses. A plain TCP relay
-on the same machine, such as `socat` or `ssh -L`, can still pass the secret on. The file is what
-keeps the secret yours, so keep the state folder owner-only.
+on the same machine, such as `socat` or `ssh -L`, can still pass the key on. The file is what
+keeps the key yours, so keep the state folder owner-only.
 
 ### Give a device an expiry
 
@@ -270,7 +281,7 @@ Key security boundaries and risks:
 - **The Files view reads files off your disk.** It shows any file under a workspace's folder, except
   a `.git` folder, Collie's own state and config folders, and files named like a Collie state
   secret. So it asks for an authorised device, like a write
-  ([ADR 0083](../.adr/0083-the-files-view-reads-the-changes-root.md)).
+  ([ADR 0150](../.adr/0150-files-and-changes-read-under-a-root-the-bridge-picks.md)).
 - **The New page's Browse lists folder names under your home.** Names only, with the Files view's
   limits: no dot-folders unless typed, no `.git`, no Collie state or config folder, no link out of
   home, at most 200 rows. It needs an authorised device too
@@ -291,7 +302,7 @@ Key security boundaries and risks:
   sends to it directly. The lead already holds the pairing, so this adds no power over what a paired
   phone can do in a shell
   ([Your own launchers](configure.md#launchers-added-from-a-phone),
-  [ADR 0094](../.adr/0094-launchers-added-from-a-phone.md)).
+  [ADR 0145](../.adr/0145-a-start-names-what-to-run-and-a-retry-lands-on-its-receipt.md)).
 - **A paired device can run a one-off command.** With the default `[phone] run = true`, a phone may
   type a line it wrote into a fresh shell on a machine. This adds no power, because a paired phone can
   already open a shell and type into it. The line follows the free-line character rule, and the bridge
@@ -303,7 +314,7 @@ Key security boundaries and risks:
   list as it is, because running a line again needs a paired device. Set `run = false` to remove the
   shortcut
   ([One-off commands](configure.md#one-off-commands-and-their-history),
-  [ADR 0095](../.adr/0095-one-off-commands-and-their-history.md)).
+  [ADR 0145](../.adr/0145-a-start-names-what-to-run-and-a-retry-lands-on-its-receipt.md)).
 - **Each machine keeps the shell lines you send through Collie.** Sent keeps a line you send to a
   shell pane, and each one-off command, in `sent.jsonl` in the state folder (mode 0600). A paired
   device can read it, as it can read the panes. Some secrets are still kept
@@ -371,7 +382,8 @@ facts. It is not a list of fixes. The state folder is `~/.local/state/collie` un
 | A pairing code on screen | `collie pair` prints its code in a pane. A program that reads that pane through the multiplexer can claim the code before your phone does. The phone then hears that no code waits, and the audit log shows a pairing you did not make. |
 | `POST /api/pair/request` on loopback | A program can ask for a pairing request, show its code in a pane and send the front door's header to choose the network line the phone shows. It still needs a person to tap the right code on a paired device. |
 | `POST /api/pair` on loopback | It needs a live code. Its `Origin` rule stops a web page, not a local program: a local program writes its own `Origin` and `Host` headers, and a request with no `Origin` is taken from a loopback host name. |
-| `local-secret` in the state folder | The CLI's read credential. It reads every session through the bridge on the same machine. It never writes, and never opens the Files view. |
+| `local-secret` in the state folder | The CLI's read credential, on the bridge of the same machine. It reads pane ids, agents, states and space names, the tricks list, each crew member's update verdict, and whether a durable session is loaded. It reads no screen and no message, never writes, and never opens the Files view. |
+| `walky/sock` in the state folder | The WalkyTalky socket. Its owner-only file mode is its only credential: it asks for no token. It gives the body of every WalkyTalky message on this bridge, from every session: the newest fifty, or any one by its id. It also gives the list of panes a message can go to. |
 | The profile of a paired browser | The browser keeps its token in local storage. A program that reads the profile files gets a full device token. A program that drives the browser, for example through a debugging port, taps as you. |
 | `tricks/switches.json` in the state folder, and `tricks/.collie-approved/` in the config folder | A program that writes an approved copy and its hash into the switch file switches a trick on, with take changes without asking too. No tap is asked. |
 | A trick folder in the config folder, its `rules.md` included | A program can write a trick folder, or edit the files of one that is on, an agent view's instructions included. An agent cannot propose instructions through `collie trick propose`, but that refusal is for an agent that follows the rules. A trick with instructions never takes a change without asking, so the edit waits as a new version, and the version card that shows the change is the only gate. |
@@ -570,10 +582,25 @@ member runs 1.18.0.
 If the lead cannot read a member's answer to mask it, it does not pass the answer on. The phone then
 shows that read as failed, as it does for a member it cannot reach.
 
-A push notification also names a pane only by the name you gave it: the pane's label, Claude's
-`/rename` name, or a one-pane tab's name. It never uses the title a program in the pane set, because
-any program can set that title, and a title can hold a path, a command or a secret. A pane with no
-such name is called by its harness, for example `claude`.
+A push notification names a pane by its session name, in this order: the pane's label in Collie, a
+name you set in the harness (Claude Code's `/rename`, pi's `/name`), the title the agent gave its
+session in its own log, or a one-pane tab's name. A pane with none of these is called by its harness,
+for example `claude`. A push never uses the terminal title, which any program in the pane can set
+with an escape sequence.
+
+The agent's own title is text the agent wrote, so it can hold a path, a command or a secret. Collie
+strips control and direction characters from it and cuts it to 80 characters. With `COLLIE_REDACT`
+on, Collie masks it in the app and in the push, as it masks the terminal title. With the mask off, a
+push can show that title on your lock screen and send it through the browser's push service.
+
+Collie keeps the last names of up to 512 sessions in `session-titles.json` in its state folder, with
+owner-only access, so a name stays after a restart. With `COLLIE_REDACT` on, it keeps only the name you
+set there, never the agent's title.
+
+The prompt cache watch list names a pane the same way, after its workspace. Collie stores that label
+in `cache-watch.json` in its state folder and shows it in the watch list. With `COLLIE_REDACT` on,
+Collie masks the label before it stores it and again when it lists it, so a label stored with the mask
+off is masked in the list too.
 
 ## Sent: the shell lines you sent
 
@@ -662,15 +689,23 @@ error, with the fix. A folder that Collie cannot check is a warning: `cannot con
 From 1.27.0 each Collie bridge sends one small anonymous ping a day to our own analytics. It carries
 the Collie version, the operating system, how Collie was installed, and whether the bridge runs
 alone or in a crew, under a random ID made on your machine. No IP address is stored with the ping.
-Nothing else is sent: no host name, no folder, nothing you type or read. We need these numbers to
+No host name, no folder and nothing you type or read is sent. We need these numbers to
 spot regressions and slow degradations after a release, and to steer what gets built next. Up to
 1.26.x Collie sent nothing ([ADR 0129](../.adr/0129-an-anonymous-install-count-on-by-default.md)).
 
-When Collie shows one of its two trouble cards, the next ping also carries how often, in six fields:
-which card, the name and version of the agent program, the multiplexer it ran on, a count and, from
-1.27.4, a screen field on a dialog card. The screen field is a short hash of the dialog's key-hint
+When Collie shows one of its two trouble cards, the next ping also carries how often:
+which card, the name and version of the agent program, the multiplexer it ran on, whether the optional
+data link was on for that pane, a count and, from 1.27.4, a screen field on a dialog card. The screen field is a short hash of the dialog's key-hint
 row only, never a row with your text, never the screen or what you typed. It is absent unless that
 row is a short list of key hints, such as `enter select · esc back`.
+
+The ping also says which agents ran on which multiplexers since the last ping, about a day, one row per
+pair, for example `claude` on `tmux`. Each row has one more fact: whether the optional data link was on
+for at least one session of that pair (`collie harness link`). A row of the trouble count above carries
+the same fact for its own pane. The names come from fixed lists in Collie, and any other name reads
+`other`. It is never how many sessions ran, and never a name, folder, title, prompt or model. The bridge
+keeps only the pairs it has seen, in its state file, and the list goes with the install ID when the count
+is off. A crew member reports its own agents and pings for itself.
 
 Turning it off is one switch: Settings, System, **Telemetry**. `COLLIE_TELEMETRY=0`,
 `telemetry = false` in `config.toml` or `DO_NOT_TRACK=1` do the same, and so does blocking the one
@@ -683,6 +718,19 @@ start of a build that has it. The exact message is written down in the contract 
 Besides the daily ping, the one unprompted outbound call is the update check: an anonymous HTTPS `GET` to GitHub's public
 tags API (`bridge/update.ts`) that compares your version to the newest tag. It carries no data about
 you or your machine, only the static user-agent `collie-update-check`.
+
+A trick's About sheet adds one more read, made by the bridge and never by the phone. When a trick came
+from a repository on `github.com`, the sheet shows its stars and the date of its last commit. The bridge
+asks GitHub's public API once per repository with an anonymous HTTPS `GET`, with the user-agent
+`collie-trick-facts` and nothing about you:
+
+```text
+https://api.github.com/repos/<owner>/<repo>
+```
+
+It reads only when a paired phone lists your tricks, never on a timer. It keeps a good answer for 6 hours
+and a failed one for an hour, in the `tricks` folder of its state folder, and makes at most 20 such reads an
+hour. It follows no redirect, gives up after 5 seconds or 64 KB, and keeps only the two numbers it shows.
 
 The Whistle model download is another outbound call. It happens only when a person taps **Download
 to host** or runs `collie stt whistle`, and it sends no data about you ([The speech engine

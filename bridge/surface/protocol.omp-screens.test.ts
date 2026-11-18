@@ -11,7 +11,7 @@ import { muxAck, muxOk, type MuxAck, type MuxGrid, type MuxGridRequest, type Mux
 import { loadProfiles, profileFor, type Profile } from "../../web/src/lib/surface/profile.ts";
 import type { SendAnswer } from "../../web/src/lib/surface/send.ts";
 import { KeyGate } from "./key-gate.ts";
-import { RowRing, rowsAgree, rowsTokenOf, SendProtocol, SessionLocks, tickingRows, type SendRequest } from "./protocol.ts";
+import { RowRing, SendProtocol, SessionLocks, tickingRows, type SendRequest } from "./protocol.ts";
 import { RequestStore } from "./requests.ts";
 import { FOREGROUND_UNREAD, LaunchWindow, harnessOfProcesses, type ForegroundUnread } from "../launch-window.ts";
 
@@ -376,7 +376,7 @@ describe("a pane where omp is starting that the bridge did not launch (gang thre
     const first = await send("ls -la");
     pane.load(OMP_UP);
     const confirmed = await send("ls -la", { rowsHash: first.rowsHash });
-    expect(confirmed.receipt).toMatchObject({ outcome: "refused", reason: "stale_surface", keys: [] });
+    expect(confirmed.receipt).toMatchObject({ outcome: "refused", reason: "not_free", keys: [] });
     expect(pane.calls).toEqual([]);
     expect(pane.keysSeen).toEqual([]);
   });
@@ -536,16 +536,16 @@ describe("a clock seen ticking between S0's two reads (ADR 0140 pt 2)", () => {
     expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "not_free", detail: "The input box moved between two reads.", keys: [] });
   });
 
-  test("the rows hash reads the ticking row's digits as a fixed mark", async () => {
+  test("the confirmation hash preserves ticking digits even when S0 can settle", async () => {
     const { send } = rig(clocked(), { harness: "inkling" });
     const first = (await send("", { mode: "prepare" })).rowsHash;
     const second = (await send("", { mode: "prepare" })).rowsHash;
     expect(first).toBeString();
-    expect(second).toBe(first);
+    expect(second).not.toBe(first);
   });
 });
 
-describe("two taps are two reads too: a clock that ticked between them holds the confirm (ADR 0140 pt 2)", () => {
+describe("a manual confirmation never ignores a changed number before Enter", () => {
   /** A 1 Hz clock on a frameless agent screen, as Hermes Ink draws it: S0's two reads 120 ms apart rarely see it tick. */
   function wallClock(word: () => string = () => "ready") {
     const pane = new OmpPane("╰─");
@@ -559,7 +559,7 @@ describe("two taps are two reads too: a clock that ticked between them holds the
     return { pane, at };
   }
 
-  test.each([0, 340, 999, 58_500, 59_950])("the confirm 3 s after the first tap is probed and sent, clock phase %d ms", async (phase) => {
+  test.each([0, 340, 999, 58_500, 59_950])("a clock change 3 s after the first tap refuses the confirm, phase %d ms", async (phase) => {
     const { pane, at } = wallClock();
     const { send, clock } = rig(pane, { harness: "inkling" });
     clock.now += phase;
@@ -568,8 +568,9 @@ describe("two taps are two reads too: a clock that ticked between them holds the
     expect(first.receipt).toMatchObject({ outcome: "refused", reason: "unconfirmed", keys: [] });
     clock.now += 3_000;
     const confirmed = await send("hello", { rowsHash: first.rowsHash });
-    expect(confirmed.receipt).toMatchObject({ outcome: "sent", keys: ["probe", "Backspace", "Enter"], profileId: null });
-    expect(pane.submitted).toEqual(["hello"]);
+    expect(confirmed.receipt).toMatchObject({ outcome: "refused", reason: "stale_surface", keys: [], profileId: null });
+    expect(pane.calls).toEqual([]);
+    expect(pane.submitted).toEqual([]);
   });
 
   test("a word that changed between the taps still moves the screen", async () => {
@@ -583,38 +584,6 @@ describe("two taps are two reads too: a clock that ticked between them holds the
     const confirmed = await send("hello", { rowsHash: first.rowsHash });
     expect(confirmed.receipt).toMatchObject({ outcome: "refused", reason: "stale_surface", keys: [] });
     expect(pane.calls).toEqual([]);
-  });
-});
-
-describe("rowsTokenOf / rowsAgree", () => {
-  const before = ["title", "─ ready │ 20m 9s", "│ draft 1 │", "13:04"];
-  const after = ["title", "─ ready │ 20m 10s", "│ draft 1 │", "13:05"];
-  const box = { top: 2, bottom: 2 };
-
-  test("the token is opaque hex the route takes: raw half, then masked half", () => {
-    const token = rowsTokenOf(before, before, box);
-    expect(token).toMatch(/^[0-9a-f]{28}$/u);
-    expect(rowsAgree(token, token)).toBe(true);
-  });
-
-  test("rows that changed in their digits alone agree on the masked half", () => {
-    const a = rowsTokenOf(before, before, box);
-    const b = rowsTokenOf(after, after, box);
-    expect(a.slice(0, 14)).not.toBe(b.slice(0, 14));
-    expect(rowsAgree(a, b)).toBe(true);
-  });
-
-  test("a digit that changed in the box's own rows is a change; so is a word anywhere", () => {
-    const draft = after.map((row, i) => (i === 2 ? "│ draft 2 │" : row));
-    expect(rowsAgree(rowsTokenOf(before, before, box), rowsTokenOf(draft, draft, box))).toBe(false);
-    const worded = after.map((row, i) => (i === 1 ? "─ busy │ 20m 10s" : row));
-    expect(rowsAgree(rowsTokenOf(before, before, box), rowsTokenOf(worded, worded, box))).toBe(false);
-  });
-
-  test("a token of another shape never agrees", () => {
-    const token = rowsTokenOf(before, before, box);
-    expect(rowsAgree(token.slice(0, 14), token)).toBe(false);
-    expect(rowsAgree(`${token}00`, token)).toBe(false);
   });
 });
 

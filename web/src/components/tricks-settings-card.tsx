@@ -1,29 +1,38 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Icon } from "@/components/icons/icon";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Collapse } from "@/components/ui/collapse";
 import { OneOf } from "@/components/ui/one-of";
+import { ROW_OPEN_BUTTON, ROW_OPEN_CONTROL, ROW_OPEN_ROW, ROW_OPEN_SWITCH } from "@/components/ui/row-open";
 import { Switch } from "@/components/ui/switch";
-import { HillAboutSheetControl, HillEntryRow } from "@/components/hill-entry";
 import { OfficialTrickAboutSheet, TrickAboutSheet } from "@/components/trick-about-sheet";
-import { SectionLabel } from "@/components/ui/section-label";
+import { TokenUseChip } from "@/components/token-use-label";
+import { RepoAddRow, type RepoAddCall, type RepoListCall } from "@/components/tricks-repo-sheet";
 import { useArm } from "@/hooks/use-arm";
 import { useLocale } from "@/hooks/use-locale";
-import { addOfficialTrick, apiErrorFields, fetchOfficialTricks, setTrickAuto, switchTrick, undoTrick } from "@/lib/api";
+import { addOfficialTrick, apiErrorFields, apiErrorStatus, fetchOfficialTricks, fetchTrickCodeFile, fetchTrickCodeIndex, setTrickAuto, setTrickValue, switchTrick, undoTrick } from "@/lib/api";
+import { fieldProblemWords } from "@/components/trick-settings-group";
 import { t } from "@/lib/i18n";
 import { TrickBoundary } from "@/lib/tricks/boundary";
 import { useBridgeNow } from "@/lib/tricks/clock";
+import { trickListRows, type TrickOrigin } from "@/lib/tricks/list-order";
 import { placesLine, readsLine, runsOnLine, warningLines, type WarningLine } from "@/lib/tricks/row-words";
-import type { OfficialState, OfficialTricksReply, TricksRunsOn, WireOfficialTrick, WireTrickInfo } from "@/lib/tricks/schema";
+import { ACCESS_UNKNOWN, type FieldValue, type OfficialState, type OfficialTricksReply, type TricksRunsOn, type WireOfficialTrick, type WireTrickInfo } from "@/lib/tricks/schema";
 import { tricksStore, useTricksState, type TricksStore } from "@/lib/tricks/store";
 import { trickTimeText } from "@/lib/tricks/time";
+import { trickTokenUse } from "@/lib/tricks/token-use";
 import { usePairing } from "@/lib/pairing";
 import { useOptionalRootData } from "@/lib/route-data";
 import { setStatus } from "@/lib/status";
 import { isReadOnly } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { mintRequestId } from "@/lib/worktree-name";
+import { useOpenTrickCard } from "@/components/trick-cards";
+import { useTrickCards } from "@/lib/hill/store";
+import type { HillDecision } from "@/lib/hill/wire";
 
 // Settings → Tricks (M94 slice 04). One row per trick on this machine, each with one switch. Collie draws
 // this page, not the trick: the words are Collie's, the trick's own name is the only text a trick supplies,
@@ -32,7 +41,7 @@ import { cn } from "@/lib/utils";
 //
 // A ROW IS THREE LINES, ALWAYS, so nothing moves when a trick changes state:
 //   1. the trick's name;
-//   2. its places, in words ("belt, session"), or "No parts" for a manifest that declares none. The
+//   2. its places, in words ("belt, page"), or "No parts" for a manifest that declares none. The
 //      places are the manifest's declared kinds, not the parts held right now, so a trick that is off or
 //      between runs does not change this line;
 //   3. ONE slot, which reads the provenance (who added it, from where, when) for a healthy trick and the
@@ -64,26 +73,40 @@ import { cn } from "@/lib/utils";
 // the card: it is the last group of the trick's About sheet. The card still owns that write (`flipAuto`),
 // which flips at once and holds like the trick's own switch, so a failed post goes back and says so once.
 //
-// A TRICK'S NAME IS A BUTTON (About sheet), with a muted chevron after it as the cue. A tap on the name opens
-// a bottom sheet with the trick's full description (components/trick-about-sheet.tsx). The switch stays its
-// own tap target. A trick whose manifest has a `description` shows that one muted line (at most two lines)
-// under its name; a row without one is drawn as before.
+// THE WHOLE ROW OPENS THE ABOUT SHEET (2026-11-12), with a muted chevron after the name as the cue. The name is
+// the one button (`ui/row-open.ts`): its stretched layer covers the row, so a tap on the description, the
+// places, the source line or the empty space opens the bottom sheet with the trick's full description
+// (components/trick-about-sheet.tsx). The switch, Add, Update and Undo are siblings of that button, lifted
+// above the layer, and stay their own targets: a tap on them never opens the sheet. A trick whose manifest has
+// a `description` shows that one muted line (at most two lines) under its name; a row without one is drawn as before.
 //
-// FROM COLLIE, UNDER THE INSTALLED TRICKS (M94). The bridge's `GET /api/tricks/official` lists the official
-// tricks this release can add, each with its state here. A section labelled "Official tricks" holds one row per
-// entry that is not added: the name (a button that opens the About sheet in its not-added mode), its one
-// line, and a small Add. An entry whose id another trick holds (`taken`) is drawn muted with no Add, and
-// says so. An entry already added is not in the section: it is a trick row above, and when this release
-// names a newer version (`update`) that row carries a quiet line with Update. A tap swaps the word for the
-// spinner in the same slot and holds it until the trick shows among the installed ones (the store's list
-// rides the snapshot's cadence), so the row never blinks out and back. A failure says why in the status
-// line, as the switch does. An empty list, a crew member's (`runsOn`), or a list the phone could not read
-// draws no section. The list is read when the card mounts and again when the installed tricks change; it
-// costs the bridge a read of its own folder, never a fetch.
+// ONE LIST, EACH TRICK ONCE (2026-11-12). The bridge's `GET /api/tricks/official` lists the official tricks
+// this release can add, each with its state here. The card draws them and the installed tricks as one list in
+// the order of `lib/tricks/list-order.ts`: the official ones first, in the release list's order (Morph
+// first), then the community's by name. A row carries a small label, "Official" or "Community". An official
+// entry that is not added holds its place with the shape of an installed row (its name, a button that opens
+// the About sheet in its not-added mode, its one line, where it draws, where it comes from) and a small Add;
+// after Add the installed trick takes the same place, under the same key, with its switch. A state change
+// alters the row, never its place. An entry whose id another trick holds (`taken`) is no row of its own: that
+// trick is a community row, and says why in one quiet line. When this release names a newer version
+// (`update`) the row carries a quiet line with Update. A tap swaps the word for the spinner in the same slot
+// and holds it until the trick shows among the installed ones (the store's list rides the snapshot's
+// cadence), so the row never blinks out and back. A failure says why in the status line, as the switch does.
+// THE ROWS WAIT FOR THE LIST'S FIRST ANSWER (or its failure), so no row is drawn in one place and moved to
+// another a moment later. A crew member's list (`runsOn`) or one the phone could not read orders every trick
+// by name and labels none. The list is read when the card mounts and again when the installed tricks change;
+// it costs the bridge a read of its own folder, never a fetch.
 //
-// THE HILL, FIRST (2026-11-11). One built-in row sits above the person's tricks and opens its own About sheet
-// with the Hill's one switch (components/hill-entry.tsx). It is the Hill's own switch, not a trick's: no row
-// switch, no Remove, no version line. A crew member draws no such row, as it runs no tricks (`runsOn`).
+// THE HILL IS NOT HERE. It had a built-in row above the person's tricks from 2026-11-11 to 2026-11-13; the Hill
+// is an experiment now, and its one switch is on Settings, Experiments (components/hill-switch-card.tsx). A row
+// here says only that a trick's own Decisions wait for the Hill (`hillOff`). A card of Collie's own about a
+// trick needs no Hill (M96 spec 14): a row whose new version waits opens that card from its slot line, and the
+// cards about new tricks are a group of their own above this card (components/trick-cards.tsx).
+//
+// TRICKS SWITCHED OFF AS A WHOLE (2026-11-17, components/tricks-switch-card.tsx). The list stays readable and each
+// row's switch shows that trick's OWN position, which the big switch never moves. Every control that writes is
+// disabled (the switches, Add, Update, Undo and the About sheet's auto switch), one line at the top of the card
+// says why, and the About sheet still opens. The bridge answers 409 `tricks-off` to those writes anyway.
 //
 // NO PROSE but the one muted line at the foot. What a trick may do is the docs' to say.
 
@@ -121,27 +144,47 @@ function whoWords(by: WireTrickInfo["provenance"]): string {
 export interface SlotLine {
   text: string;
   trouble: boolean;
+  /** The line says a new version waits for a yes: the row opens its card from it, when the phone holds one. */
+  waits?: true;
 }
 
 /**
  * The third line: the reason a trick is not well (a trick stopped for its rights in the phone's own words,
- * fault B), else that a new version waits for a yes (`pending`,
- * from a bridge since crew slice 2), else the one note that the Hill is off for a trick that is on and
- * asks Decisions (`hillOff`, the snapshot's; bridge/tricks/hill.ts: they are not posted, the trick keeps
- * running), else where it came from.
+ * fault B; a part the bridge refused, in any state), else that a new version waits for a yes (`pending`,
+ * from a bridge since crew slice 2, or `versionWaits`: the phone holds an open card of Collie's own about a
+ * new version of it; the row opens that card, with the Hill on or off, M96 spec 14), else the one note that
+ * the Hill is off for a trick that is on and asks Decisions (`hillOff`, the snapshot's; bridge/tricks/hill.ts:
+ * they are not posted, the trick keeps running), else that its file watch checks on a clock
+ * (`watchPollSeconds`), else that the local API it reads through is off here (`accessOff`), else where it came from.
  */
-export function slotLine(trick: WireTrickInfo, now: number, hillOff = false): SlotLine {
+export function slotLine(trick: WireTrickInfo, now: number, hillOff = false, versionWaits = false): SlotLine {
   if (trick.state === "skipped") {
     const reason = trick.refusals?.[0]?.reason ?? trick.error;
-    return { text: reason === undefined ? t("settings.tricks.refusedBare") : t("settings.tricks.refused", { reason }), trouble: true };
+    return { text: reason === undefined ? t("settings.tricks.cannotRunBare") : t("settings.tricks.cannotRun", { reason }), trouble: true };
   }
+  // A part the bridge refused, in every other state (the first full trick run, 2026-11-16, decision 5): the
+  // trick runs, but what it drew is not shown, and the row is the one place that says why. Its own words
+  // (`partNotShown`), not those of `skipped`; a note the parser only ignored is not a refusal. A reason is
+  // a whole sentence that names its own key, so no path rides in front of it.
+  const refused = trick.refusals?.find((r) => r.code !== "ignored" && r.code !== "more");
   // Fault B: the bridge's flag, in the phone's words; its `error` is the same line in the bridge's English.
   // Such a trick comes as off (stopped is not on): its switch shows off, and one tap on is the approval.
   if (trick.rightsMoved === true) return { text: t("settings.tricks.rightsMoved"), trouble: true };
   const failing = trick.state === "failing" || trick.state === "stopped";
   if (failing && trick.error !== undefined) return { text: trick.error, trouble: true };
-  if (trick.on && trick.pending !== undefined) return { text: t("settings.tricks.pending"), trouble: false };
+  if (refused !== undefined) return { text: t("settings.tricks.partNotShown", { reason: refused.reason }), trouble: true };
+  // Contract 3: a required setting is empty, or the saved ones do not read. The row opens the About sheet,
+  // where the Settings group is. The trick still runs and draws its own setup part.
+  if (trick.valuesUnread === true) return { text: t("settings.tricks.valuesUnread"), trouble: true };
+  if (trick.needsSetup === true) return { text: t("settings.tricks.needsSetup"), trouble: false };
+  // The new version's card is Collie's own: it needs no Hill (spec 14), and the row opens it.
+  if (trick.on && (trick.pending !== undefined || versionWaits)) return { text: t("settings.tricks.pending"), trouble: false, waits: true };
   if (hillOff && trick.on && trick.decides === true) return { text: t("settings.tricks.hillOff"), trouble: false };
+  // The file watch could not be set up and the bridge checks on a clock: one plain line of its own, never
+  // after the "part is not shown" prefix, because nothing was refused. Only while the trick is on.
+  if (trick.on && trick.watchPollSeconds !== undefined) return { text: t("settings.tricks.watchPolled", { seconds: trick.watchPollSeconds }), trouble: false };
+  // The trick declares `access` and Collie's local API is off on this bridge: `t.api` answers an error. Said once.
+  if (trick.on && trick.accessOff === true) return { text: t("settings.tricks.accessOff"), trouble: false };
   return { text: provenanceLine(trick, now), trouble: false };
 }
 
@@ -156,16 +199,24 @@ export interface TricksSettingsCardProps {
   onAuto?: (host: string, id: string, on: boolean) => Promise<WireTrickInfo>;
   /** The undo call. The real route by default. */
   onUndo?: (host: string, id: string) => Promise<WireTrickInfo>;
+  /** The settings write (contract 3). The real route by default. */
+  onSetValue?: (host: string, id: string, body: { rid: string; key: string; value: FieldValue | null }) => Promise<WireTrickInfo>;
   /** Pin the clock (epoch ms on the bridge's clock), for a test or a playground card. */
   now?: number;
   /** Draw the switches as one that may not write, for the playground. Default: the device's own say. */
   readOnly?: boolean;
   /** Draw the rows as with the Hill switched off, for the playground. Default: the snapshot's `hillOff`. */
   hillOff?: boolean;
+  /** Draw the list as with tricks switched off, for the playground. Default: the snapshot's `tricksOff`, or the reply's `off`. */
+  tricksOff?: boolean;
   /** The official list read. The real route by default. */
   onOfficialList?: (signal?: AbortSignal) => Promise<OfficialTricksReply>;
   /** The add or update from that list. The real route by default. */
   onOfficialAdd?: (id: string, mode: "add" | "update") => Promise<{ id: string; state: OfficialState }>;
+  /** The read of a repository's trick list ("Add from a repository"). The real route by default. */
+  onRepoList?: RepoListCall;
+  /** The add of one trick of that list. The real route by default. */
+  onRepoAdd?: RepoAddCall;
 }
 
 /** The Tricks card, or nothing while the phone holds no tricks reply. */
@@ -173,28 +224,10 @@ export function TricksSettingsCard(props: TricksSettingsCardProps) {
   const store = props.store ?? tricksStore;
   const state = useTricksState(store);
   if (state.rev === null) return null;
-  // A Windows bridge runs no trick (bridge/tricks/service.ts `gated`): one line and the Hill, no rows, no list read.
-  if (state.gate === "windows") return <TricksGatedCard />;
-  return <TricksList {...props} tricks={state.tricks} runsOn={state.runsOn} />;
-}
-
-/** The card of a gated bridge: the one line, then the Hill's own row and its sheet. */
-function TricksGatedCard() {
-  useLocale();
-  const [hillAbout, setHillAbout] = useState(false);
-  return (
-    <>
-      <Card className="gap-0 py-0" data-testid="tricks-settings">
-        <p data-line="windows-gate" className="border-b border-border px-4 py-3 text-sm text-muted-foreground">
-          {t("settings.tricks.windows")}
-        </p>
-        <div data-slot="list-group">
-          <HillEntryRow onAbout={() => setHillAbout(true)} />
-        </div>
-      </Card>
-      {hillAbout && <HillAboutSheetControl onClose={() => setHillAbout(false)} />}
-    </>
-  );
+  // A Windows bridge runs no trick (bridge/tricks/service.ts `gated`): no rows and no list read. The switch
+  // card above says the Windows line, once on the page (components/tricks-switch-card.tsx), so this card draws nothing.
+  if (state.gate === "windows") return null;
+  return <TricksList {...props} tricks={state.tricks} runsOn={state.runsOn} replyOff={state.off === true} />;
 }
 
 /** The warnings under a row: one quiet line each, then the line that they are a text search. */
@@ -252,7 +285,7 @@ function TrickChanges({
           onClick={() => {
             if (tap("undo") === "fire") onUndo();
           }}
-          className={cn("-mr-3 h-11 shrink-0 px-3", undoArmed ? "border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/10 hover:text-destructive" : "text-muted-foreground")}
+          className={cn(ROW_OPEN_CONTROL, "-mr-3 h-11 shrink-0 px-3", undoArmed ? "border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/10 hover:text-destructive" : "text-muted-foreground")}
         >
           {/* Both words in one slot, sized by the wider, so arming moves nothing beside it (DESIGN.md §2). */}
           <OneOf
@@ -294,7 +327,7 @@ function OfficialButton({ word, label, slot, busy, canWrite, onTap }: { word: st
       disabled={!canWrite || busy}
       onClick={onTap}
       // The `::before` reaches the 44px floor above and below the 32px button (DESIGN.md §6).
-      className="relative shrink-0 before:absolute before:inset-x-0 before:-inset-y-1.5 before:content-['']"
+      className={cn(ROW_OPEN_CONTROL, "shrink-0 before:absolute before:inset-x-0 before:-inset-y-1.5 before:content-['']")}
     >
       <OneOf
         active={busy ? "busy" : "rest"}
@@ -308,38 +341,84 @@ function OfficialButton({ word, label, slot, busy, canWrite, onTap }: { word: st
   );
 }
 
-/** One official row: the name opens the About sheet, the line under it, and Add; a taken one says so instead. */
-function OfficialRow({ entry, busy, canWrite, onAdd, onAbout }: { entry: WireOfficialTrick; busy: boolean; canWrite: boolean; onAdd: () => void; onAbout: () => void }) {
-  const taken = entry.state === "taken" && !busy;
+/** The small label after a trick's name: where it comes from, "Official" or "Community". */
+function OriginLabel({ origin }: { origin: TrickOrigin }) {
   return (
-    <div data-official={entry.id} data-state={taken ? "taken" : undefined} className="px-4 py-3">
+    <Badge variant="outline" data-slot="trick-origin" data-origin={origin} className="px-1.5 py-0 text-[11px] leading-4 font-normal text-muted-foreground">
+      {t(origin === "official" ? "settings.tricks.origin.official" : "settings.tricks.origin.community")}
+    </Badge>
+  );
+}
+
+/**
+ * THE NAME LINE OF A ROW (2026-11-12): the name with its chevron, then the labels (Official or Community, and
+ * "Uses agent tokens") as ONE group. The line wraps: the labels stay beside the name while they fit, else
+ * the whole group moves to a line of its own right under the name. So a name is never cut while a second
+ * line has room; only a name wider than the line alone truncates, and the chip cuts its words only when the
+ * group alone is wider than the row. The labels are the trick's facts, the same before and after Add and
+ * whether it is on, so a row's height follows its width and language, never its state.
+ */
+const NAME_LINE = "flex w-full flex-wrap items-center gap-x-2 gap-y-0.5 text-left font-medium";
+
+/** The labels' group: one flex item, never split across lines; the chip inside it shrinks last. */
+const LABELS = "flex max-w-full min-w-0 items-center gap-1";
+
+/** The name and the chevron: the name keeps its width up to the line's, then truncates. */
+function RowName({ name }: { name: string }) {
+  return (
+    <span data-slot="row-name" className="flex max-w-full min-w-0 items-center gap-1">
+      <span className="min-w-0 truncate">{name}</span>
+      {/* The cue that the name opens something: the app's own "this row opens another screen" glyph. */}
+      <Icon name="row-go" className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+    </span>
+  );
+}
+
+/** The quiet line of a community trick whose id an official entry names: why that entry is not added here. */
+export function takenLine(entry: Pick<WireOfficialTrick, "changed" | "unlisted">): string {
+  if (entry.changed === true) return t("settings.tricks.official.changed");
+  return t(entry.unlisted === true ? "settings.tricks.official.takenRepo" : "settings.tricks.official.taken");
+}
+
+/**
+ * An official entry that is not added yet, in the shape of an installed row, so Add changes the row and moves
+ * nothing: the name (it opens the About sheet), the label, its one line, where it draws, where it comes from, and Add.
+ */
+function OfficialRow({ entry, busy, canWrite, onAdd, onAbout }: { entry: WireOfficialTrick; busy: boolean; canWrite: boolean; onAdd: () => void; onAbout: () => void }) {
+  const places = entry.places ?? [];
+  const view = entry.agentView === true;
+  return (
+    <div data-official={entry.id} className={cn(ROW_OPEN_ROW, "px-4 py-3")}>
       <div className="flex min-h-11 items-center justify-between gap-4">
         <div className="min-w-0 flex-1">
-          {taken ? (
-            <p className="truncate font-medium text-muted-foreground">{entry.name}</p>
-          ) : (
-            <button
-              type="button"
-              data-slot="official-about"
-              aria-label={t("settings.tricks.about.open", { name: entry.name })}
-              aria-haspopup="dialog"
-              onClick={onAbout}
-              className="relative flex w-full items-center gap-1 text-left font-medium before:absolute before:inset-x-0 before:-inset-y-2.5 before:content-['']"
-            >
-              <span className="min-w-0 truncate">{entry.name}</span>
-              <Icon name="row-go" className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-            </button>
-          )}
+          <button
+            type="button"
+            data-slot="official-about"
+            data-row-open=""
+            aria-label={t("settings.tricks.about.open", { name: entry.name })}
+            aria-haspopup="dialog"
+            onClick={onAbout}
+            className={cn(ROW_OPEN_BUTTON, NAME_LINE)}
+          >
+            <RowName name={entry.name} />
+            <span data-slot="row-labels" className={LABELS}>
+              <OriginLabel origin="official" />
+              {trickTokenUse(entry) !== null && <TokenUseChip />}
+            </span>
+          </button>
           <p data-line="description" className="line-clamp-2 break-words text-sm text-muted-foreground">
             {entry.description}
           </p>
-          {taken && (
-            <p data-line="taken" className="text-xs text-muted-foreground">
-              {t(entry.changed === true ? "settings.tricks.official.changed" : entry.unlisted === true ? "settings.tricks.official.takenRepo" : "settings.tricks.official.taken")}
+          {(places.length > 0 || view) && (
+            <p data-line="places" className="truncate text-sm text-muted-foreground">
+              {placesLine(places, view)}
             </p>
           )}
+          <p data-line="slot" className="truncate text-xs text-muted-foreground">
+            {t("settings.tricks.by.repo", { repo: entry.repoName, sha: entry.commit.slice(0, 7) })}
+          </p>
         </div>
-        {!taken && <OfficialButton word={t("settings.tricks.official.add")} label={t("settings.tricks.official.addAria", { name: entry.name })} slot="official-add" busy={busy} canWrite={canWrite} onTap={onAdd} />}
+        <OfficialButton word={t("settings.tricks.official.add")} label={t("settings.tricks.official.addAria", { name: entry.name })} slot="official-add" busy={busy} canWrite={canWrite} onTap={onAdd} />
       </div>
     </div>
   );
@@ -352,6 +431,8 @@ export function officialFailureLine<TThrown>(thrown: TThrown, mode: "add" | "upd
   if (code === "unreachable") return t(add ? "settings.tricks.official.unreachable" : "settings.tricks.official.updateUnreachable");
   // A repository that sent more than a listed commit can be is the same class of refusal as a mismatch.
   if (code === "mismatch" || code === "too-large") return t(add ? "settings.tricks.official.mismatch" : "settings.tricks.official.updateMismatch");
+  // A POSIX trick (a shell run line) on a Windows machine (fault d): the same words as the switch's refusal.
+  if (code === "windows-shell") return t("settings.tricks.switchShellOnWindows");
   if (code === "busy") return t("settings.tricks.official.busy");
   if (code === "taken") return t("settings.tricks.official.taken");
   // The new code needs a name the person's own files hold in the trick's folder: nothing was changed.
@@ -373,31 +454,55 @@ interface TrickRowProps {
   onAbout: () => void;
   /** This release names a newer version of the trick (official `update`), and whether its update is in flight. */
   update?: { busy: boolean; onUpdate: () => void } | undefined;
+  /** Where the trick comes from, for the label after its name. Undefined: not known, no label. */
+  origin?: TrickOrigin | undefined;
+  /** An official entry of this id that the trick holds (`taken`): the row says why it is not the list's. */
+  taken?: WireOfficialTrick | undefined;
+  /** Opens the open card of Collie's own about a new version of this trick, when the phone holds one (spec 14). */
+  onCard?: (() => void) | undefined;
 }
 
-function TrickRow({ trick, clock, checked, canWrite, hillOff, undoing, onFlip, onUndo, onAbout, update }: TrickRowProps) {
-  const slot = slotLine(trick, clock, hillOff);
+/**
+ * The slot line as its own target, above the row's stretched layer: it opens the waiting version's card. The
+ * line keeps its drawn height; a transparent `::before` reaches 14px above and below, the 44px floor
+ * (DESIGN.md §6), as a Notice's action does (ui/notice.tsx `NOTICE_ACTION_TAP`).
+ *
+ * The button itself never clips: `truncate` is `overflow: hidden`, and on the button it would cut the
+ * `::before` to the drawn 16px (the tap floor would be lost, the row's layer would take those taps) and make the
+ * box scrollable by its 14px, so a scroll (a focus, a script) moved the glyphs out of sight and left only the
+ * underline. The text sits in an inner `SLOT_OPENS_TEXT` block that truncates, as the plain `<p>` line does.
+ */
+const SLOT_OPENS = "relative z-10 block w-full text-left text-xs text-muted-foreground underline decoration-dotted underline-offset-2 before:absolute before:inset-x-0 before:-inset-y-3.5 before:content-['']";
+const SLOT_OPENS_TEXT = "block truncate";
+
+function TrickRow({ trick, clock, checked, canWrite, hillOff, undoing, onFlip, onUndo, onAbout, update, origin, taken, onCard }: TrickRowProps) {
+  const slot = slotLine(trick, clock, hillOff, onCard !== undefined);
   const changed = autoLine(trick, clock);
   const warnings = warningLines(trick);
   // Before the switch: off, or on with code nobody approved yet. A tap on the switch closes the list.
   const showWarnings = warnings.length > 0 && (!checked || trick.changed === true);
   return (
-    <div data-trick={trick.id} className="px-4 py-3">
+    <div data-trick={trick.id} className={cn(ROW_OPEN_ROW, "px-4 py-3")}>
       <div className="flex min-h-11 items-center justify-between gap-4">
         <div className="min-w-0 flex-1">
-          {/* The name is the About button. The `::before` reaches the 44px floor above and below the 24px line
-              (DESIGN.md §6) without growing the row: the places line under it is not a control. */}
+          {/* The name is the About button, and its stretched layer is the whole row (ui/row-open.ts): the lines
+              under it are no controls, so a tap on any of them opens the sheet. */}
           <button
             type="button"
             data-slot="trick-about"
+            data-row-open=""
             aria-label={t("settings.tricks.about.open", { name: trick.name })}
             aria-haspopup="dialog"
             onClick={onAbout}
-            className="relative flex w-full items-center gap-1 text-left font-medium before:absolute before:inset-x-0 before:-inset-y-2.5 before:content-['']"
+            className={cn(ROW_OPEN_BUTTON, NAME_LINE)}
           >
-            <span className="min-w-0 truncate">{trick.name}</span>
-            {/* The cue that the name opens something: the app's own "this row opens another screen" glyph. */}
-            <Icon name="row-go" className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+            <RowName name={trick.name} />
+            {(origin !== undefined || trickTokenUse(trick) !== null) && (
+              <span data-slot="row-labels" className={LABELS}>
+                {origin !== undefined && <OriginLabel origin={origin} />}
+                {trickTokenUse(trick) !== null && <TokenUseChip />}
+              </span>
+            )}
           </button>
           {trick.description !== undefined && (
             <p data-line="description" className="line-clamp-2 break-words text-sm text-muted-foreground">
@@ -412,18 +517,35 @@ function TrickRow({ trick, clock, checked, canWrite, hillOff, undoing, onFlip, o
               {t("settings.tricks.about.rulesUnshown")}
             </p>
           )}
+          {trick.access === ACCESS_UNKNOWN && (
+            <p data-line="access-unknown" className="break-words text-xs text-muted-foreground">
+              {t("settings.tricks.about.access.unknown")}
+            </p>
+          )}
           {trick.inputs !== undefined && (
             <p data-line="reads" className="break-words text-xs text-muted-foreground">
               {readsLine(trick.inputs)}
             </p>
           )}
-          <p data-line="slot" data-trouble={slot.trouble ? "true" : undefined} className="truncate text-xs text-muted-foreground">
-            {slot.text}
-          </p>
+          {slot.waits === true && onCard !== undefined ? (
+            <button type="button" data-line="slot" data-slot="trick-card-open" onClick={onCard} className={SLOT_OPENS}>
+              <span className={SLOT_OPENS_TEXT}>{slot.text}</span>
+            </button>
+          ) : (
+            <p data-line="slot" data-trouble={slot.trouble ? "true" : undefined} className="truncate text-xs text-muted-foreground">
+              {slot.text}
+            </p>
+          )}
+          {taken !== undefined && (
+            <p data-line="taken" className="text-xs text-muted-foreground">
+              {takenLine(taken)}
+            </p>
+          )}
           <Collapse open={showWarnings}>{showWarnings ? <TrickWarnings lines={warnings} /> : null}</Collapse>
         </div>
-        {/* Rules this phone cannot show (review 8 V-N5): no yes from here; a trick that is on can still go off. */}
-        <Switch checked={checked} onCheckedChange={onFlip} disabled={!canWrite || (trick.rulesUnshown === true && !checked)} aria-label={trick.name} />
+        {/* Rules this phone cannot show (review 8 V-N5), or a level of access it does not know (review 3, item 4): no
+            yes from here; a trick that is on can still go off. */}
+        <Switch checked={checked} onCheckedChange={onFlip} disabled={!canWrite || ((trick.rulesUnshown === true || trick.access === ACCESS_UNKNOWN) && !checked)} aria-label={trick.name} className={ROW_OPEN_SWITCH} />
       </div>
       {trick.on && changed !== null && <TrickChanges trick={trick} line={changed} canWrite={canWrite} undoing={undoing} onUndo={onUndo} />}
       {update !== undefined && <OfficialUpdateLine name={trick.name} busy={update.busy} canWrite={canWrite} onUpdate={update.onUpdate} />}
@@ -451,18 +573,30 @@ function TricksList({
   onSwitch = switchTrick,
   onAuto = setTrickAuto,
   onUndo = undoTrick,
+  onSetValue = setTrickValue,
   onOfficialList = fetchOfficialTricks,
   onOfficialAdd = addOfficialTrick,
+  onRepoList,
+  onRepoAdd,
   now,
   readOnly,
   hillOff,
-}: TricksSettingsCardProps & { tricks: readonly WireTrickInfo[]; runsOn?: TricksRunsOn }) {
+  tricksOff,
+  replyOff = false,
+}: TricksSettingsCardProps & { tricks: readonly WireTrickInfo[]; runsOn?: TricksRunsOn; replyOff?: boolean }) {
   useLocale();
   const clock = useBridgeNow(now);
   const root = useOptionalRootData();
   const offHill = hillOff ?? root?.hillOff === true;
+  // The open cards of Collie's own about a trick (spec 14): a new version's opens from its trick's row.
+  const cards = useTrickCards();
+  const openCard = useOpenTrickCard();
   const { refused } = usePairing();
-  const canWrite = readOnly === undefined ? !isReadOnly(root?.device) && !refused : !readOnly;
+  const mayWrite = readOnly === undefined ? !isReadOnly(root?.device) && !refused : !readOnly;
+  // Tricks switched off as a whole (the snapshot's `tricksOff`, or the reply's `off`): the rows stay readable
+  // and the About sheet opens, but every control that writes is disabled, because the bridge would refuse it.
+  const off = tricksOff ?? (root?.tricksOff === true || replyOff);
+  const canWrite = mayWrite && !off;
   // The position a flipped switch holds until the list agrees, and the switches with a post in flight
   // (a second tap on one of those does nothing; the switch itself stays drawn the same).
   const [held, setHeld] = useState<ReadonlyMap<string, boolean>>(new Map());
@@ -473,14 +607,14 @@ function TricksList({
   // follows a new version of the row, and closes by itself when the trick leaves the list.
   const [aboutKey, setAboutKey] = useState<string | null>(null);
   const flying = useRef(new Set<string>());
+  // The request id of each setting edit that has not taken yet, by `host/trick/field` (see `saveValue`).
+  const valueEdits = useRef(new Map<string, { value: FieldValue | null; rid: string }>());
   const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
   const official = useOfficialList(onOfficialList, tricks);
   // The official adds and updates in flight or held until the lists agree, by trick id.
   const [adding, setAdding] = useState<ReadonlyMap<string, "add" | "update">>(new Map());
   // The official entry whose About sheet is open, by id.
   const [officialAboutId, setOfficialAboutId] = useState<string | null>(null);
-  // The Hill's About sheet (components/hill-entry.tsx): open or not. The Hill is no trick, so it has no key.
-  const [hillAbout, setHillAbout] = useState(false);
 
   useEffect(() => {
     const open = timers.current;
@@ -542,6 +676,32 @@ function TricksList({
     }
   }
 
+  // A trick's setting (contract 3): one request id per edit, so a retry of the same edit (the same trick,
+  // field and value, after a failure) reuses it and the bridge writes once. A new edit, or the same value
+  // again after the write took, gets a new id. The receipt is the row the list will show; the group holds
+  // the value until the list agrees. A refusal is said under the field in the phone's words, never the
+  // bridge's English.
+  async function saveValue(trick: WireTrickInfo, key: string, value: FieldValue | null): Promise<string | null> {
+    const field = trick.fields?.find((one) => one.key === key);
+    const editKey = `${trick.host}/${trick.id}/${key}`;
+    const earlier = valueEdits.current.get(editKey);
+    const rid = earlier !== undefined && earlier.value === value ? earlier.rid : mintRequestId();
+    valueEdits.current.set(editKey, { value, rid });
+    try {
+      await onSetValue(trick.host, trick.id, { rid, key, value });
+      valueEdits.current.delete(editKey);
+      return null;
+    } catch (err) {
+      // A field rule rides in `code`; a refusal of the route itself (`not-here`) in `error`.
+      const fields = apiErrorFields(err);
+      const code = fields?.code ?? fields?.error;
+      if (code === "unknown-field" || field === undefined) return t("settings.tricks.fields.refused.gone");
+      if (code === "not-here") return t("settings.tricks.fields.onLead");
+      if (code === "kind" || code === "text" || code === "option" || code === "range" || code === "whole") return fieldProblemWords(field, { code });
+      return t("settings.tricks.fields.failed", { label: field.label });
+    }
+  }
+
   async function undo(trick: WireTrickInfo): Promise<void> {
     const key = trickKey(trick);
     if (undoing.has(key)) return;
@@ -585,8 +745,12 @@ function TricksList({
     } catch (thrown) {
       hold(key, null);
       // The trick changed after the person read it (review 8 V-N1): read it again, nothing was approved.
-      const moved = apiErrorFields(thrown)?.error === "moved";
-      setStatus(moved ? t("settings.tricks.switchMoved") : t("settings.tricks.switchFailed", { name: trick.name }), "error");
+      const code = apiErrorFields(thrown)?.error;
+      // A Windows machine refuses a shell run line (fault d); the bridge's message is `TRICKS_WINDOWS_SHELL_LINE`.
+      // The bridge cannot show every byte of the code as it is (`codeShowsWhole`, a 409 `not-whole`): it stays off, and the phone says why.
+      const notWhole = code === "not-whole" && apiErrorStatus(thrown) === 409;
+      const line = code === "moved" ? t("settings.tricks.switchMoved") : code === "windows-shell" ? t("settings.tricks.switchShellOnWindows") : notWhole ? t("settings.tricks.switchNotWhole") : t("settings.tricks.switchFailed", { name: trick.name });
+      setStatus(line, "error");
     } finally {
       flying.current.delete(key);
     }
@@ -636,13 +800,19 @@ function TricksList({
   }
 
   const aboutTrick = aboutKey === null ? undefined : tricks.find((trick) => trickKey(trick) === aboutKey);
-  const officialRows = official.list?.runsOn !== undefined ? [] : (official.list?.tricks ?? []).filter((e) => e.state === "absent" || e.state === "taken" || adding.get(e.id) === "add");
+  const rows = trickListRows(tricks, official.list);
   const officialUpdates = new Map((official.list?.tricks ?? []).filter((e) => e.state === "update" || adding.get(e.id) === "update").map((e) => [e.id, e]));
-  const officialAbout = officialAboutId === null ? undefined : officialRows.find((e) => e.id === officialAboutId && e.state !== "taken");
+  const officialAbout = officialAboutId === null ? undefined : rows.find((row) => row.kind === "official" && row.entry.id === officialAboutId)?.entry;
 
   return (
     <>
       <Card className="gap-0 py-0" data-testid="tricks-settings">
+        {/* Said once, here, for every disabled control below. */}
+        {off && (
+          <p data-line="tricks-off" className="border-b border-border px-4 py-3 text-sm text-muted-foreground">
+            {t("settings.tricks.switch.offLine")}
+          </p>
+        )}
         {/* A crew member, a deputy or a deposed lead schedules no trick: the lead does (bridge/index.ts). */}
         {runsOn !== undefined && (
           <p data-line="runs-on" className="border-b border-border px-4 py-3 text-sm text-muted-foreground">
@@ -650,62 +820,55 @@ function TricksList({
           </p>
         )}
         <div data-slot="list-group">
-          {/* The Hill, shown as the first, built-in entry. A crew member draws none: the Hill lives on the lead. */}
-          {runsOn === undefined && <HillEntryRow onAbout={() => setHillAbout(true)} />}
-          {/* A fresh install (no tricks folder yet) with an official list: the card holds only the list. */}
-          {tricks.length === 0 && officialRows.length === 0 && (
+          {/* No trick and no official entry: the empty line and the command. */}
+          {official.settled && rows.length === 0 && (
             <div className="px-4 py-3">
               <p className="text-sm text-muted-foreground">{t("settings.tricks.none")}</p>
               {/* The command is a literal, not a sentence: it is typed on the machine, so it is never translated. */}
               <p className="truncate font-mono text-xs text-muted-foreground">collie trick init &lt;id&gt;</p>
             </div>
           )}
-          {tricks.map((trick) => {
-            const checked = held.get(trickKey(trick)) ?? trick.on;
-            const onFlip = (on: boolean) => void flip(trick, on);
-            // One boundary per row: a row that throws leaves the others drawn, and keeps its own switch.
-            return (
-              <TrickBoundary
-                key={trickKey(trick)}
-                fallback="none"
-                fallbackNode={<SwitchOnlyRow id={String(trick.id)} checked={checked} canWrite={canWrite} onFlip={onFlip} />}
-                resetKey={trick}
-              >
-                <TrickRow
-                  trick={trick}
-                  clock={clock}
-                  checked={checked}
-                  canWrite={canWrite}
-                  hillOff={offHill}
-                  undoing={undoing.has(trickKey(trick))}
-                  onFlip={onFlip}
-                  onUndo={() => void undo(trick)}
-                  onAbout={() => setAboutKey(trickKey(trick))}
-                  update={officialUpdate(trick)}
-                />
-              </TrickBoundary>
-            );
-          })}
+          {/* The rows wait for the official list's first answer, so none is drawn in one place and moved later. */}
+          {official.settled &&
+            rows.map((row) => {
+              if (row.kind === "official") {
+                const entry = row.entry;
+                // An add the list already says, while the trick is not listed yet, keeps its spinner.
+                const busy = adding.has(entry.id) || entry.state !== "absent";
+                return <OfficialRow key={row.key} entry={entry} busy={busy} canWrite={canWrite} onAdd={() => void addOfficial(entry, "add")} onAbout={() => setOfficialAboutId(entry.id)} />;
+              }
+              const trick = row.trick;
+              const checked = held.get(trickKey(trick)) ?? trick.on;
+              const onFlip = (on: boolean) => void flip(trick, on);
+              // One boundary per row: a row that throws leaves the others drawn, and keeps its own switch.
+              return (
+                <TrickBoundary
+                  key={row.key}
+                  fallback="none"
+                  fallbackNode={<SwitchOnlyRow id={String(trick.id)} checked={checked} canWrite={canWrite} onFlip={onFlip} />}
+                  resetKey={trick}
+                >
+                  <TrickRow
+                    trick={trick}
+                    clock={clock}
+                    checked={checked}
+                    canWrite={canWrite}
+                    hillOff={offHill}
+                    undoing={undoing.has(trickKey(trick))}
+                    onFlip={onFlip}
+                    onUndo={() => void undo(trick)}
+                    onAbout={() => setAboutKey(trickKey(trick))}
+                    update={officialUpdate(trick)}
+                    origin={row.origin}
+                    taken={row.entry?.state === "taken" ? row.entry : undefined}
+                    onCard={versionCardOpener(cards, trick, openCard)}
+                  />
+                </TrickBoundary>
+              );
+            })}
+          {/* A crew member runs no trick, so it adds none (runsOn). */}
+          {official.settled && runsOn === undefined && <RepoAddRow tricksOff={off} readOnly={!mayWrite} onList={onRepoList} onAdd={onRepoAdd} />}
         </div>
-        {officialRows.length > 0 && (
-          <div data-section="official" className={cn("pt-3", (tricks.length > 0 || runsOn !== undefined) && "border-t border-border")}>
-            <SectionLabel placement="above" className="px-4">
-              {t("settings.tricks.official.label")}
-            </SectionLabel>
-            <div data-slot="list-group">
-              {officialRows.map((entry) => (
-                <OfficialRow
-                  key={entry.id}
-                  entry={entry}
-                  busy={adding.has(entry.id)}
-                  canWrite={canWrite}
-                  onAdd={() => void addOfficial(entry, "add")}
-                  onAbout={() => setOfficialAboutId(entry.id)}
-                />
-              ))}
-            </div>
-          </div>
-        )}
         <p className="border-t border-border px-4 py-3 text-xs text-muted-foreground">{t("settings.tricks.foot")}</p>
       </Card>
       {/* Its own boundary: a sheet that throws closes, and the card and its switches stay drawn. */}
@@ -719,11 +882,11 @@ function TricksList({
             auto={heldAuto.get(trickKey(aboutTrick)) ?? aboutTrick.auto === true}
             canWrite={canWrite}
             onAuto={(on) => void flipAuto(aboutTrick, on)}
+            readCode={{ index: () => fetchTrickCodeIndex(aboutTrick.host, aboutTrick.id), file: (file) => fetchTrickCodeFile(aboutTrick.host, aboutTrick.id, file) }}
+            onValue={async (key, value) => await saveValue(aboutTrick, key, value)}
           />
         </TrickBoundary>
       )}
-      {/* Collie's own sheet, not a trick's: no boundary. It reads the Hill's switch and the list the phone holds. */}
-      {hillAbout && runsOn === undefined && <HillAboutSheetControl onClose={() => setHillAbout(false)} />}
       {officialAbout !== undefined && (
         <TrickBoundary fallback="none" resetKey={officialAbout}>
           <OfficialTrickAboutSheet
@@ -747,33 +910,73 @@ function TricksList({
 }
 
 /**
- * The official list as the card shows it: read once on mount and again whenever the installed tricks
- * change (an id or a commit), or when `reread` asks. A read that fails keeps what the card had, and the
- * first one that fails leaves no list, so no section is drawn.
+ * The opener of the open card about a new version of `trick` (a version the runner found, or one a proposal
+ * sent), or undefined when the phone holds none. A card about a NEW trick has no row of its own: it is in
+ * the group above (components/trick-cards.tsx).
  */
+export function versionCardOpener(cards: readonly HillDecision[], trick: Pick<WireTrickInfo, "id">, open: (decision: HillDecision) => void): (() => void) | undefined {
+  const card = cards.find((decision) => decision.from.ref?.id === trick.id && (decision.from.ref.type === "version" || decision.from.ref.type === "proposal"));
+  return card === undefined ? undefined : () => open(card);
+}
+
 /** What the card holds of the official list. */
 interface OfficialListState {
   list: OfficialTricksReply | null;
+  /** The first read answered or failed: the rows may be drawn in their order. */
+  settled: boolean;
   reread: () => void;
 }
 
+/** How long after the first answer the card reads the list once more, when it lacked a repository's facts. */
+export const FACTS_REREAD_MS = 3000;
+
+/** Whether an entry's repository is one the bridge reads facts for and none came yet. */
+function factsDue(list: OfficialTricksReply): boolean {
+  return list.tricks.some((entry) => entry.repoFacts === undefined && hostOf(entry.repo) === "github.com");
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The official list as the card shows it: read once on mount and again whenever the installed tricks
+ * change (an id or a commit), or when `reread` asks. A read that fails keeps what the card had, and the
+ * first one that fails leaves no list: the rows are then ordered by name with no label. When the first
+ * answer lacks a GitHub repository's facts, the bridge is reading them in the background (repo-facts.ts):
+ * the card reads the list ONCE more after {@link FACTS_REREAD_MS}, never again, so a failed read upstream
+ * costs one more read of the bridge's own folder and nothing else.
+ */
 function useOfficialList(read: (signal?: AbortSignal) => Promise<OfficialTricksReply>, tricks: readonly WireTrickInfo[]): OfficialListState {
   const [list, setList] = useState<OfficialTricksReply | null>(null);
+  const [settled, setSettled] = useState(false);
   const [asked, setAsked] = useState(0);
   const installed = tricks.map((trick) => `${trick.id}@${trick.provenance?.sha ?? ""}`).join(",");
   const reader = useRef(read);
   reader.current = read;
+  const factsAsked = useRef(false);
   useEffect(() => {
     const controller = new AbortController();
     void (async () => {
       try {
         const reply = await reader.current(controller.signal);
-        if (!controller.signal.aborted) setList(reply);
+        if (controller.signal.aborted) return;
+        setList(reply);
+        if (factsAsked.current || !factsDue(reply)) return;
+        factsAsked.current = true;
+        const timer = setTimeout(() => setAsked((n) => n + 1), FACTS_REREAD_MS);
+        controller.signal.addEventListener("abort", () => clearTimeout(timer));
       } catch {
-        // A failed read keeps what the card had: no list, no section.
+        // A failed read keeps what the card had.
+      } finally {
+        if (!controller.signal.aborted) setSettled(true);
       }
     })();
     return () => controller.abort();
   }, [installed, asked]);
-  return { list, reread: () => setAsked((n) => n + 1) };
+  return { list, settled, reread: () => setAsked((n) => n + 1) };
 }

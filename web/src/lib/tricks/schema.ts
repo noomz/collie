@@ -70,11 +70,14 @@ import {
   type HillPriority,
   type HillTextMode,
 } from "../hill/wire";
+import { skeletonWords } from "../fold";
 import { codePointName, firstHiddenChar, hasHiddenChar } from "../hidden-chars";
 import { asJsonNumber, asJsonObject, asJsonString, asJsonBoolean, parseJson, type JsonObject, type JsonValue } from "../json";
-import { AGENT_VIEW_CONTRACT, INPUTS_CONTRACT, TRICK_CONTRACT, TRICK_CONTRACT_DEFAULT } from "./contract";
+import { ACCESS_CONTRACT, AGENT_VIEW_CONTRACT, FIELDS_CONTRACT, INPUTS_CONTRACT, MENU_CONTRACT, TRICK_CONTRACT, TRICK_CONTRACT_DEFAULT } from "./contract";
+import { FIELD_HINT_MAX, FIELD_LABEL_MAX, FIELD_NUMBER_ABS_MAX, FIELD_OPTION_MAX, FIELD_OPTIONS_MAX, FIELD_OPTIONS_MIN, FIELD_TEXT_MAX, FIELDS_MAX } from "./limits";
+import { PERMISSION_LEADS, type PermissionLead, SHEET_LABEL_FOLDS } from "./sheet-labels";
 
-export { AGENT_VIEW_CONTRACT, INPUTS_CONTRACT, TRICK_CONTRACT, TRICK_CONTRACT_DEFAULT };
+export { ACCESS_CONTRACT, AGENT_VIEW_CONTRACT, FIELDS_CONTRACT, INPUTS_CONTRACT, MENU_CONTRACT, TRICK_CONTRACT, TRICK_CONTRACT_DEFAULT };
 
 // ── Versions and byte caps ───────────────────────────────────────────────────────────────────
 
@@ -122,6 +125,12 @@ export const NAME_MAX = 40;
 export const DESCRIPTION_MAX = 140;
 /** The manifest's `about`: the full plain text of a trick's About sheet, paragraphs split by a blank line. */
 export const ABOUT_MAX = 1200;
+/** The manifest's `version`: the author's own version word, shown in the About sheet. */
+export const VERSION_MAX = 24;
+/** The characters a manifest `version` may hold: `1.2.0`, `2026.11.12`, `0.3.0-beta+7`. */
+export const VERSION_RE = /^[0-9A-Za-z.+-]{1,24}$/u;
+/** The refusal of a `version` with another character in it. */
+export const VERSION_REFUSAL = '"version" holds letters, digits, ".", "+" and "-" only, such as "1.2.0".';
 /** A `group`'s `label`. */
 export const TITLE_MAX = 60;
 /** A `para`'s text, and a `run`'s. One paragraph: no line break (the tree strips control characters). */
@@ -159,7 +168,7 @@ export const IMAGE_SIDE_MAX = 4096;
 /** The manifest's `run` command line. */
 export const RUN_MAX = 1024;
 /** One `watch` path in the manifest, and the number of them. */
-export const WATCH_PATH_MAX = 1024;
+export const WATCH_PATH_MAX = 256;
 export const WATCH_MAX = 8;
 /** Bytes of a facts string the bridge copies from the snapshot (a name, a tab, a cwd). */
 export const FACT_TEXT_MAX_BYTES = 4096;
@@ -489,15 +498,34 @@ export const DEFAULT_TRICK_ICON: TrickIcon = "plug";
 export const ACTION_ICONS = ["play", "pause", "check", "x", "refresh", "archive", "flag", "star", "send", "note", "search", "more"] as const satisfies readonly TrickIcon[];
 export type ActionIcon = (typeof ACTION_ICONS)[number];
 
-/** The events a manifest may name in `on` (a later slice, the event bus). */
+/** The events a manifest may name in `on`: the bus's three live types (M105 spec 03). */
 export const TRICK_EVENTS = ["session.status", "turn.end", "ask.open"] as const;
 export type TrickEvent = (typeof TRICK_EVENTS)[number];
 /** `mode`: `once` runs per trigger; `serve` keeps the program running (a later slice). */
 export const TRICK_MODES = ["once", "serve"] as const;
 export type TrickMode = (typeof TRICK_MODES)[number];
 /** The parts of a manifest that a later slice builds. Refused as "later" until a caller enables them. */
-export const LATER_TRIGGERS = ["watch", "on", "serve"] as const;
+export const LATER_TRIGGERS = ["serve"] as const;
 export type LaterTrigger = (typeof LATER_TRIGGERS)[number];
+/**
+ * The two triggers that react (M105 step one): `on` (an event of the bus) and `watch` (a file changed). Built,
+ * but a caller of `parseManifest` names them in `triggers` to have them read; the bridge's one reader does
+ * ({@link MANIFEST_TRIGGERS}), so a folder, a proposal and the CLI's check all read the same manifest.
+ */
+export const REACTING_TRIGGERS = ["watch", "on"] as const;
+export type ReactingTrigger = (typeof REACTING_TRIGGERS)[number];
+/** The triggers a caller may enable in `ParseManifestOptions.triggers`. */
+export type ManifestTrigger = LaterTrigger | ReactingTrigger;
+/** What every real reader of a manifest enables: the two that react. `serve` stays later. */
+export const MANIFEST_TRIGGERS: readonly ManifestTrigger[] = ["on", "watch"];
+/**
+ * Whether a trick's program starts with no phone open: it has a program and an event (`on`) or a watched
+ * path (`watch`). A plain timer (`every`) does not count: timers run only while a phone has looked in the
+ * last five minutes (bridge/tricks/service.ts, WATCH_WINDOW_MS). One test for the cards and the About sheet.
+ */
+export function runsWithNoPhone(trick: { run?: string | undefined; on?: readonly unknown[] | undefined; watch?: readonly unknown[] | undefined }): boolean {
+  return trick.run !== undefined && ((trick.on?.length ?? 0) > 0 || (trick.watch?.length ?? 0) > 0);
+}
 
 /** The session statuses the facts carry (`AgentStatus` in bridge/types.ts). */
 export const SESSION_STATUSES = ["idle", "working", "blocked", "done", "unknown"] as const;
@@ -508,28 +536,136 @@ export type SessionStatus = (typeof SESSION_STATUSES)[number];
 /**
  * Where a part draws. The `at` of a part names one, and the manifest's `places` lists the ones it uses.
  * Every place here is drawn by this Collie: `belt` (agent-chat.tsx), `status` (trick-status-item.tsx),
- * `dashboard` and `tabbar` (trick-place-items.tsx, dashboard-tab-bar.tsx) and `session` (the bridge's
- * Tricks Space, panes.ts, and routes/trick-session.tsx). M94 review 11 removed `tab`, `tab:<match>` and
+ * `dashboard` and `tabbar` (trick-place-items.tsx, dashboard-tab-bar.tsx), `session` (the bridge's
+ * Tricks Space, panes.ts, and routes/trick-session.tsx) and, from contract 2, `menu` (rows in a session's
+ * settings, trick-menu-group.tsx; {@link MENU_CONTRACT}). M94 review 11 removed `tab`, `tab:<match>` and
  * `view:<match>`, which parsed and drew nowhere; a later Collie adds a place back at the same contract,
  * and an older one leaves a part there out (`parseTrickDocument`).
  */
-export const PLACE_KINDS = ["belt", "session", "dashboard", "status", "tabbar"] as const;
+export const PLACE_KINDS = ["belt", "session", "dashboard", "status", "tabbar", "menu"] as const;
 export type PlaceKind = (typeof PLACE_KINDS)[number];
 /** The places a parser call with no `places` accepts: every place. */
 export const NEAR_PLACES: readonly PlaceKind[] = PLACE_KINDS;
 /** The place kinds a later slice builds and a caller may refuse as "later" by leaving them out of `places`. None since step 3. */
 export const LATER_PLACES: readonly PlaceKind[] = [];
-/**
- * Place words of the first schema that come back later, each refused with the code "later" and its
- * place named, in an `at` and in the manifest's `places`. `menu` is the word of `menu:<match>`.
- */
 /** The most place words a manifest's `places` may list, known or not. */
 export const PLACES_LISTED_MAX = 16;
+/**
+ * Place words of the first schema that come back later, each refused with the code "later" and its
+ * place named, in an `at` and in the manifest's `places`. `menu` left this list when the place came
+ * (contract 2): a `menu:<match>` of the first schema is now a word this Collie does not know, left out
+ * with its note like any other.
+ */
 export const LATER_PLACE_WORDS = {
   "header.line": '"header.line" is a later place, not in this Collie yet. The other parts still draw.',
-  menu: '"menu:<match>" is a later place, not in this Collie yet. The other parts still draw.',
   settings: '"settings" is a later place, not in this Collie yet. The other parts still draw.',
 } as const satisfies Readonly<Record<string, string>>;
+
+// ── The menu place and bound parts (contract 2) ─────────────────────────────────────────────────
+//
+// A `menu` part adds rows to a session's settings, the session actions sheet, in a group of its own after
+// Collie's rows and Close. A row is a button or a switch. A tap runs the program with the tap and the
+// session's scope key, nothing more: a trick has no way to type into a session (no `draft`, no send).
+//
+// A belt mark and a menu part may name `sessions`: the facts' ids (`memberId:paneId`) it is drawn in.
+// The bridge resolves each one against the run's facts and stamps the pane's walky instance token on the
+// stored part (`WireTrickPart.bound`), so a pane id the multiplexer gave to a new session never shows it.
+// A bound part replaces the trick's unbound one of that place in its sessions.
+
+/** What a menu row is: a button that runs the trick once, or a switch whose state the program owns. */
+export const MENU_ROW_KINDS = ["button", "switch"] as const;
+export type MenuRowKind = (typeof MENU_ROW_KINDS)[number];
+/** Every key a menu row takes. Nothing else: no tone, hint, badge or value. */
+export const MENU_ROW_KEYS = ["id", "kind", "label", "icon", "intent", "on", "disabled", "confirm"] as const;
+/** The rows of one menu part. A session shows one part of a trick, so this is the rows per trick there. */
+export const MENU_ROWS_MAX = 6;
+/** A row's label, in characters. A longer one is refused, never cut. */
+export const MENU_LABEL_MAX = 24;
+/** The sessions one bound part names. */
+export const BOUND_SESSIONS_MAX = 8;
+/** The bound parts of one place a trick may draw, beside its one unbound part of that place. */
+export const BOUND_PARTS_MAX = 8;
+/** The trick rows one sheet shows. A trick's group is shown whole or left out whole. */
+export const MENU_SHEET_ROWS_MAX = 12;
+/** The characters of a program's answer the group's footer line shows; past it the cut is shown. */
+export const MENU_MESSAGE_MAX = 80;
+/** The words a menu label may not say, as whole words: Collie's own names and the view row's word. */
+export const MENU_RESERVED_WORDS = ["collie", "walkytalky", "walky talky", "hill", "view"] as const;
+/**
+ * The words a menu label may not start with: they read as a permission Collie asks for. With these, the
+ * permission card's own words in all twelve languages (sheet-labels.ts `PERMISSION_LEADS`, review 12 N2).
+ */
+export const MENU_RESERVED_LEADS = ["allow", "approve", "deny", "grant", "trust", "yes", "always"] as const;
+
+/** The lines a contract 1 trick's `menu` place and `sessions` key are refused with. */
+export const MENU_NEEDS_CONTRACT = `"menu" needs contract = ${String(MENU_CONTRACT)}. Add contract = ${String(MENU_CONTRACT)} to trick.toml to add rows to a session's settings.`;
+export const SESSIONS_NEED_CONTRACT = `"sessions" needs contract = ${String(MENU_CONTRACT)}, so the part is left out: an older Collie would draw it in every session. Add contract = ${String(MENU_CONTRACT)} to trick.toml.`;
+
+/**
+ * The words a person reads for the `menu` right, the same in the About sheet (`settings.tricks.about.menu`
+ * and `.menuTap`, held equal by a test), on the official card and in the catalogue.
+ */
+export const MENU_WORDS = "Adds rows to a session's settings.";
+export const MENU_TAP_WORDS = "A tap runs it and tells it which session. Collie gives it no way to type there.";
+
+/** Whether index `at` of folded words sits on a word's edge: a blank or an end beside it, or not two Latin letters or digits. */
+function edgeAt(text: string, at: number): boolean {
+  const before = text[at - 1];
+  const after = text[at];
+  if (before === undefined || after === undefined || before === " " || after === " ") return true;
+  return !(/[a-z0-9]/u.test(before) && /[a-z0-9]/u.test(after));
+}
+
+/** Whether folded words read as one of the sheet's own labels, a template's with anything in its slots. */
+/** {@link MENU_RESERVED_LEADS} then the card's words of every language, folded, each with the word it says. */
+const PERMISSION_WORDS: readonly PermissionLead[] = [
+  ...MENU_RESERVED_LEADS.map((says) => ({ lead: skeletonWords(says).trim(), says })),
+  ...PERMISSION_LEADS,
+];
+
+function readsAsSheetLabel(words: string): boolean {
+  return SHEET_LABEL_FOLDS.some((fold) => {
+    if ("words" in fold) return words === fold.words;
+    if (words.length < fold.head.length + fold.tail.length) return false;
+    if (!words.startsWith(fold.head) || !words.endsWith(fold.tail)) return false;
+    return edgeAt(words, fold.head.length) && edgeAt(words, words.length - fold.tail.length);
+  });
+}
+
+/**
+ * Why a menu row's label cannot be drawn, or undefined when it can; said after `"label" `. 1 to
+ * {@link MENU_LABEL_MAX} characters, no control and no hidden character ({@link hasHiddenChar}, the shared
+ * predicate), and nothing that reads as Collie's own. Folded as the agent view's phrase rule folds (fold.ts:
+ * NFKC, lower case, marks and look-alikes folded, every run of other characters one blank), it may not be
+ * one of the sheet's own labels in any of the twelve languages (sheet-labels.ts, a template's with
+ * anything in its slots), hold the word Collie, WalkyTalky, Hill or view, or start with Allow, Approve,
+ * Deny, Grant, Trust, Yes, Always or a word of the permission card's buttons in any of the twelve
+ * languages (review 12 N2). Compared by skeleton (fold.ts `skeletonWords`, review 12 M3).
+ */
+export function menuLabelProblem(label: string): string | undefined {
+  const text = textProblem(label, { max: MENU_LABEL_MAX });
+  if (text !== undefined) return text;
+  const hidden = firstHiddenChar(label);
+  if (hidden !== null) return `holds a hidden character (${codePointName(hidden)}). Remove it.`;
+  return menuWordsProblem(label);
+}
+
+/**
+ * Why a text a trick shows in a session's settings reads as Collie's own, or undefined (a row's label, and
+ * the message under a trick's group, review 12 N1). Compared by skeleton (review 12 M3): look-alikes of
+ * every script and of Latin itself read alike. The text is drawn and stored as written.
+ */
+export function menuWordsProblem(text: string): string | undefined {
+  const words = skeletonWords(text).trim();
+  if (readsAsSheetLabel(words)) return "reads as one of Collie's own rows in this sheet. Name it another way.";
+  const padded = ` ${words} `;
+  const word = MENU_RESERVED_WORDS.find((reserved) => padded.includes(` ${skeletonWords(reserved).trim()} `));
+  if (word !== undefined) return `holds "${word}", a word of Collie's own. Name it another way.`;
+  // A lead ends at a word's edge, so "Allowance" passes and "許可する" does not (no blank in Japanese).
+  const lead = PERMISSION_WORDS.find((reserved) => words.startsWith(reserved.lead) && edgeAt(words, reserved.lead.length))?.says;
+  if (lead !== undefined) return `starts with "${lead}", which reads as a permission Collie asks for. Name it another way.`;
+  return undefined;
+}
 
 // ── Node kinds ───────────────────────────────────────────────────────────────────────────────
 
@@ -911,6 +1047,39 @@ export interface BeltPart {
   at: "belt";
   id: string;
   mark: Mark;
+  /**
+   * Contract 2: the facts' ids of the sessions the mark is drawn in (1 to {@link BOUND_SESSIONS_MAX}). A
+   * bound mark replaces the trick's unbound one there. Absent: every agent session.
+   */
+  sessions?: string[];
+}
+/**
+ * One row of a trick's group in a session's settings. A `button` runs the trick once with its intent; with
+ * `confirm` it arms on the first tap and shows its whole label. A `switch` shows `on` as the program's last
+ * document says it and never flips before the program answers; a tap sends the state asked for as the
+ * value, `"on"` or `"off"`.
+ */
+export interface MenuRow {
+  id: string;
+  kind: MenuRowKind;
+  /** 1 to {@link MENU_LABEL_MAX} characters, by {@link menuLabelProblem}. */
+  label: string;
+  /** From the trick icon set. Absent: the trick's own icon. */
+  icon?: TrickIcon;
+  intent: string;
+  /** A switch's state, as the program holds it. Required on a switch, refused on a button. */
+  on?: boolean;
+  disabled?: boolean;
+  /** A button only: Collie's two-tap arm. */
+  confirm?: boolean;
+}
+/** Contract 2: a trick's rows in a session's settings. */
+export interface MenuPart {
+  at: "menu";
+  id: string;
+  /** The facts' ids of the sessions the rows show in, as on a belt mark. Absent: every agent session of this machine. */
+  sessions?: string[];
+  rows: MenuRow[];
 }
 /**
  * A trick's item in the status line above the Belt: the attributes of a tree `chip`, and no others. No
@@ -972,7 +1141,7 @@ export interface SessionPart {
   actions?: TrickAction[];
   view: View;
 }
-export type TrickPart = BeltPart | SessionPart | DashboardPart | StatusPart | TabbarPart;
+export type TrickPart = BeltPart | SessionPart | DashboardPart | StatusPart | TabbarPart | MenuPart;
 
 /** A part the parser accepted, with its place. */
 export type ParsedPart =
@@ -980,7 +1149,8 @@ export type ParsedPart =
   | { place: "status"; part: StatusPart }
   | { place: "session"; part: SessionPart }
   | { place: "dashboard"; part: DashboardPart }
-  | { place: "tabbar"; part: TabbarPart };
+  | { place: "tabbar"; part: TabbarPart }
+  | { place: "menu"; part: MenuPart };
 
 /** One control a part draws that sends a tap: its intent, and the value it sends (none for a mark). */
 export interface TapControl {
@@ -991,8 +1161,8 @@ export interface TapControl {
 /**
  * Every control of a part that sends a tap to the program (fault A): what the bridge holds a phone's tap
  * against. A belt mark with an intent; a session's actions and every `button` of its view, at any depth,
- * that sends an intent. A disabled control and a button that only copies send nothing, so they are left
- * out. A status chip, a Dashboard tile and a bottom bar item are no controls: a tap there opens the
+ * that sends an intent; a menu part's rows. A disabled control and a button that only copies send
+ * nothing, so they are left out. A switch row sends the state it asks for, the other one than its `on`. A status chip, a Dashboard tile and a bottom bar item are no controls: a tap there opens the
  * trick's session on the phone and never reaches the bridge.
  */
 export function tapControls(part: TrickPart): TapControl[] {
@@ -1018,11 +1188,18 @@ export function tapControls(part: TrickPart): TapControl[] {
       walk(part.view);
       return out;
     }
+    case "menu":
+      return part.rows.filter((row) => row.disabled !== true).map((row) => (row.kind === "switch" ? { intent: row.intent, value: row.on === true ? "off" : "on" } : { intent: row.intent }));
     case "status":
     case "dashboard":
     case "tabbar":
       return [];
   }
+}
+
+/** The sessions a bound part names (a belt mark or a menu part with `sessions`), or undefined for an unbound one. */
+export function boundSessionsOf(part: TrickPart): readonly string[] | undefined {
+  return part.at === "belt" || part.at === "menu" ? part.sessions : undefined;
 }
 
 // ── Types: decisions (the Hill's decision shape, as a trick lists it) ───────────────────────
@@ -1147,6 +1324,12 @@ export interface TrickManifest {
    */
   about?: string;
   /**
+   * The author's own version word, at most `VERSION_MAX` characters of `[0-9A-Za-z.+-]`, shown in the About
+   * sheet. Text, not a right, like `description`: not in the powers, part of the code hash. Collie reads no tag
+   * and compares no versions; a trick without it shows none.
+   */
+  version?: string;
+  /**
    * Contract 2: the manifest lists the place word `agent-view`, a view of a session that the session's own
    * agent draws ({@link AGENT_VIEW_PLACE}). Kept apart from `places`, which are the places a document's
    * parts draw in. A right: it is in the powers. The bridge draws the view (bridge/agent-view/service.ts).
@@ -1165,6 +1348,24 @@ export interface TrickManifest {
   rulesText?: string;
   /** The SHA-256 (hex) of the rules file's bytes, set with {@link rulesText}. In the powers. */
   rulesSha256?: string;
+  /**
+   * `decides = "reply"`: the trick's Decisions may carry `replyTo`, a session the person's answer is typed
+   * into as their own message. Absent: they never do, and the bridge refuses one that does
+   * ({@link DECIDES_REPLY_LINE}). A right: it is in the powers, so a version that adds it asks again.
+   */
+  decides?: DecidesWord;
+  /**
+   * `access = "see"` or `"read"` (M105 spec 04): how much of Collie's local API the trick reads through the
+   * helper. Absent: `none`. A right: it is in the powers, so a version that raises it asks again; lowering it
+   * does not count as a new right.
+   */
+  access?: TrickAccess;
+  /**
+   * Contract 3: the settings a person keeps for the trick (`[[field]]`, {@link TrickField}), set from the phone
+   * only. Text, not a right: not in the powers, part of the code hash like any manifest change.
+   * The program gets the values in its facts (`values`), never on a command line.
+   */
+  fields?: TrickField[];
 }
 
 /**
@@ -1190,10 +1391,19 @@ export type FactsTrigger =
        */
       seen?: string;
     }
-  /** A later slice: a watched file changed. */
-  | { kind: "watch"; path: string }
-  /** A later slice: an event of the bus, with the session it is about. */
-  | { kind: "event"; event: TrickEvent; session?: string };
+  /**
+   * A watched file changed (M105 step one). `path` is the path as the manifest wrote it. `count` is how
+   * many separate changes were folded into this run (1 for one); a burst inside the debounce window is one.
+   */
+  | { kind: "watch"; path: string; count: number }
+  /**
+   * An event of the bus (M105 step one). `event` is its type. `session` is the facts scope id
+   * (`<memberId>:<paneId>`, as `facts.sessions[].id`) of the session it is about, of the newest event
+   * when several were folded. `count` is how many events were folded into this run (1 for one); events the
+   * bus dropped for this trick are counted too. Delivery is at least once and not ordered across
+   * sessions: a program must be safe against a repeat.
+   */
+  | { kind: "event"; event: TrickEvent; session: string; count: number };
 
 export interface FactsSession {
   /**
@@ -1278,6 +1488,29 @@ export interface TrickFacts {
   spaces: FactsSpace[];
   /** How many sessions the facts left out past {@link FACT_SESSIONS_MAX} or {@link FACT_SESSIONS_MAX_BYTES}. Absent when none. */
   sessionsOmitted?: number;
+  /**
+   * Present only when the trick's approved manifest says `access = "see"` or `"read"` AND the local API socket
+   * stands on this bridge (M105 specs 04 and 05): the socket's path, the declared level and this run's token.
+   * The helper's `t.api` dials it and names the token in `hello`. Nothing of it is in the environment.
+   * Absent: no access declared, or the socket does not stand.
+   */
+  api?: FactsApi;
+  /**
+   * Contract 3, for a trick with `[[field]]`: each field's value by its key, the person's own, else the field's
+   * `default`. A field with neither is absent. The person's data: show it, never run it.
+   */
+  values?: FieldValues;
+}
+/**
+ * The local API as a trick's facts name it. The level is declared, and the bridge holds it for the API (M105
+ * spec 05). The token is this run's own: the socket answers a connection that names it in `hello`, and only
+ * while the run lasts. It keeps a program that only finds the socket out of this socket, and nothing more.
+ */
+export interface FactsApi {
+  socket: string;
+  access: TrickAccess;
+  /** This run's token: 43 base64url characters. It dies when the run ends. */
+  token: string;
 }
 
 // ── Types: taps and the wire ─────────────────────────────────────────────────────────────────
@@ -1375,6 +1608,18 @@ export interface WireTrickPart extends TrickPartKey {
   stale?: true;
   /** One masked line about why it is stale, at most `PROBLEM_MAX`. */
   problem?: string;
+  /**
+   * Contract 2: a part that names `sessions`, as the bridge resolved them against the run's facts: each
+   * session's scope key and the walky instance token its pane held then. The phone draws the part only in
+   * a session whose scope key and instance both match one. Sent only to a phone that asks for bound parts
+   * (`GET /api/tricks?bound=1`), so an older phone never draws a bound part in every session.
+   */
+  bound?: WireBound[];
+}
+/** One session a bound part is drawn in: its scope key and its pane's walky instance token. */
+export interface WireBound {
+  session: string;
+  instance: string;
 }
 export const TRICK_STATES = ["ok", "failing", "stopped", "off", "skipped"] as const;
 /**
@@ -1420,6 +1665,14 @@ export interface WireTrickInfo {
    */
   decides?: boolean;
   /**
+   * The manifest of what runs says `decides = "reply"`: the trick's Decisions may name a session (`replyTo`)
+   * the person's answer is typed into, as their own message. Declared, so it is known before any Decision,
+   * and enforced: the bridge refuses a Decision with `replyTo` from a trick whose approved copy does not
+   * say it ({@link DECIDES_REPLY_LINE}). Not {@link decides}, which says the last document listed some.
+   * Absent: it does not, or an older bridge.
+   */
+  decidesReply?: true;
+  /**
    * Fault B: the trick stopped because its approved copy asks for other rights than the person approved, as
    * this bridge reads them. The row says so in the phone's words; `error` carries the bridge's English line.
    * Absent: the rights hold, or an older bridge.
@@ -1427,6 +1680,35 @@ export interface WireTrickInfo {
   rightsMoved?: true;
   /** The environment names the manifest asks for past the base allow-list, so the person sees them. */
   env?: string[];
+  /**
+   * The manifest's `on`: the bus events that run the trick (M105 step one). A right: the row says
+   * "Runs when a session changes state." Absent: none, or an older bridge.
+   */
+  events?: TrickEvent[];
+  /**
+   * The manifest's `watch`, each path as written: the files whose change runs the trick (M105 step one).
+   * A right: the row names them. Absent: none, or an older bridge.
+   */
+  watch?: string[];
+  /**
+   * Set when the trick's file watch could not be set up, so the bridge checks the files on a clock instead:
+   * the interval in seconds. A note, never a refusal: the row says it alone, in the phone's words, with no
+   * system error in them (that stays in the bridge's log). Absent: the watch works, or an older bridge.
+   */
+  watchPollSeconds?: number;
+  /**
+   * The manifest's `access` (M105 spec 04): `see` or `read`. A right: the About sheet says one line for it.
+   * `unknown` is the phone's own word (wire.ts) for a level word a newer bridge sent that this phone does not
+   * know: the row then says one fixed line and offers no switch on (review 3, item 4). The bridge never sends
+   * it. Absent: `none`, or an older bridge.
+   */
+  access?: TrickAccess | typeof ACCESS_UNKNOWN;
+  /**
+   * Set when the trick declares `access` and Collie's local API does not stand on this bridge, so `t.api` answers
+   * a plain error. A note, never a refusal: the row says it once, in the phone's words. Absent: it stands, no
+   * access is declared, or an older bridge.
+   */
+  accessOff?: true;
   /**
    * Contract 2 (M99): the globs the trick reads from its agent sessions' folders, and whether this bridge
    * leads a crew (the files then come from every machine). The row says it in one sentence
@@ -1475,7 +1757,41 @@ export interface WireTrickInfo {
    * go back to. Settings then offers Undo. Absent otherwise, and from an older bridge.
    */
   autoAt?: string;
+  /** The manifest's `version`, the author's own word ({@link VERSION_RE}). Absent: none, or an older bridge. */
+  version?: string;
+  /**
+   * Stars and the last commit of the trick's repository on GitHub, as the bridge last read them
+   * (bridge/tricks/repo-facts.ts). Absent: not a `github.com` repository, not read yet, a failed read, or an
+   * older bridge. The phone never reads GitHub itself.
+   */
+  repoFacts?: WireRepoFacts;
+  /**
+   * The program's command line, masked as a screen read is (bridge/tricks/service.ts), for the About sheet's
+   * "Starts with" row. Absent: the trick has no program (an agent view alone), or an older bridge.
+   */
+  run?: string;
+  /** The timer, `every` in milliseconds, {@link EVERY_MIN_MS} to {@link EVERY_MAX_MS}. Absent: no timer, or an older bridge. */
+  everyMs?: number;
+  /**
+   * Contract 3: the fields of the manifest of what runs (the approved copy while on, else the folder), as the
+   * bridge read them. The About sheet draws one row per field. Absent: none, or an older bridge.
+   */
+  fields?: TrickField[];
+  /** The values the person set, by field key (never the defaults, which `fields` carries). Absent: none set. */
+  values?: FieldValues;
+  /** A required field has no value and no default: the row says "Needs setup". */
+  needsSetup?: true;
+  /** The saved values could not be read, so they read as empty: the row says so. */
+  valuesUnread?: true;
 }
+/**
+ * A GitHub repository's facts for the About sheet: its stars and when it was last pushed to, an ISO instant.
+ * Exactly these two fields: the bridge keeps nothing else of GitHub's answer.
+ */
+export type WireRepoFacts = {
+  stars: number;
+  pushedAt: string;
+};
 /** A trick's rules on the wire: the file's name and its bytes as text, whole. */
 export type WireTrickRules = {
   file: string;
@@ -1483,7 +1799,7 @@ export type WireTrickRules = {
 };
 
 /** The kinds of warning the check scan gives. A phone reads a kind it does not know as plain text. */
-export const TRICK_WARNING_KINDS = ["spawn", "network", "write", "model", "import"] as const;
+export const TRICK_WARNING_KINDS = ["spawn", "network", "write", "model", "import", "api"] as const;
 export type TrickWarningKind = (typeof TRICK_WARNING_KINDS)[number];
 /** One warning on a trick's row: its kind and one plain English sentence. */
 export interface WireTrickWarning {
@@ -1512,6 +1828,8 @@ export interface TrickProvenance {
   at?: string;
   repo?: string;
   sha?: string;
+  /** The repository's https URL as the origin record names it, for the About sheet's link. Absent: not from a repository, or an older bridge. */
+  url?: string;
   /**
    * Set for a trick `collie trick propose` handed in (crew slice 8): who proposed it and the machine, as
    * the lead named it. Absent for any other trick, and from an older bridge. `by: "terminal"` means no
@@ -1537,8 +1855,6 @@ export interface TricksReply {
   parts: WireTrickPart[];
   /** Every part key present now (`partKey`). A key the phone holds and this list lacks is gone. */
   present: string[];
-  /** The PATH the bridge's runner gives programs, for `collie doctor`. The phone may ignore it. */
-  path?: string;
   /**
    * Set when this bridge schedules no tricks because another machine of its crew does: a crew member,
    * a deputy or a deposed lead (bridge/index.ts). Absent on a lead and a solo bridge.
@@ -1549,6 +1865,12 @@ export interface TricksReply {
    * `TRICKS_WINDOWS_LINE`). The list, the parts and the keys are empty then. Absent everywhere else.
    */
   gate?: TricksGate;
+  /**
+   * Set while tricks as a whole are switched off on this bridge (bridge/tricks/feature-switch.ts, off by
+   * default). The list stays readable (name, kind, About): each row's `on` is that trick's own switch, which
+   * the big switch never changes, and its `state` is `off`. No parts and no keys ride along. Absent while on.
+   */
+  off?: true;
 }
 
 // ── The Windows gate (bridge/tricks/service.ts `gated`) ──────────────────────────────────────
@@ -1560,6 +1882,22 @@ export interface TricksReply {
  * the helper's output, the timeout kill and the shell line are not ready there yet.
  */
 export const TRICKS_WINDOWS_LINE = "Tricks do not run on a Windows machine yet.";
+
+/**
+ * What a bridge, the CLI and the official add say while tricks as a whole are switched off on the machine
+ * (bridge/tricks/feature-switch.ts): one sentence, and where a person switches them on. The phone says it in
+ * its own words (`settings.tricks.switch.offLine`).
+ */
+export const TRICKS_OFF_LINE = "Tricks are switched off on this machine; switch them on at the top of Settings, Tricks, or run `collie tricks on`.";
+
+/**
+ * What a Windows machine says of a shell `run` line (fault d of the Windows milestone): Windows runs the
+ * script form only (`run = "program.ts"`), never a line for a shell, because `cmd.exe` is not `sh` and a
+ * quoted line could run something other than the author wrote. `collie trick check`, `collie trick on`,
+ * `collie trick init --sh`, a switch on from the phone (the phone's copy is
+ * `settings.tricks.switchShellOnWindows`), the official add and the runner itself refuse with it.
+ */
+export const TRICKS_WINDOWS_SHELL_LINE = 'On Windows a trick runs only a script, such as run = "program.ts"; a shell line does not run there.';
 
 /** Whether tricks are gated on a machine of this platform (`process.platform`, injected as a fact). */
 export function tricksGated(platform: string | undefined): boolean {
@@ -1612,6 +1950,27 @@ export interface WireOfficialTrick {
    * stays off until switched on. Absent: it gives none, or an older bridge.
    */
   givesRules?: true;
+  /**
+   * Contract 2: the entry's trick adds rows to a session's settings (the `menu` place). The list pins every
+   * place the trick lists (official.ts `places`) and the add refuses a folder whose places differ, so the
+   * card says so before Add without a fetch. Absent: it adds none, or an older bridge.
+   */
+  addsMenu?: true;
+  /** Stars and the last commit of the entry's repository, as for an added trick ({@link WireTrickInfo.repoFacts}). */
+  repoFacts?: WireRepoFacts;
+  /**
+   * The places the list pins for the entry (official.ts `places`), the ones this Collie draws, so the row says
+   * where it draws before Add, in the line an added trick's row has. Absent: none it draws, or an older bridge.
+   */
+  places?: PlaceKind[];
+  /** The list pins the place `agent-view` for the entry. Absent: it does not, or an older bridge. */
+  agentView?: true;
+  /**
+   * The list pins `decides = "reply"` for the entry (official.ts `decides`): its Decisions may name a session
+   * the person's answer is typed into, so the row says it uses agent tokens before Add. The add refuses a
+   * folder whose manifest says otherwise. Absent: it does not, or an older bridge.
+   */
+  decidesReply?: true;
 }
 
 /** `GET /api/tricks/official`: the list with each entry's state, empty with `runsOn` on a machine that runs no tricks. */
@@ -1919,6 +2278,15 @@ function hasInvisible(text: string): boolean {
   return false;
 }
 
+/**
+ * U+2028 (line separator) and U+2029 (paragraph separator): they end a line in a browser and in JSON-era
+ * tools, but are neither a control character nor invisible. A one-line text value refuses them
+ * (security read of package G, point 4).
+ */
+function hasLineSeparator(text: string): boolean {
+  return text.includes("\u2028") || text.includes("\u2029");
+}
+
 function isOneOf<T extends string>(list: readonly T[], value: string): value is T {
   return list.some((item) => item === value);
 }
@@ -2199,6 +2567,26 @@ export function isTrickText(value: string, rule: { max: number; multiline?: bool
   return textProblem(value, rule) === undefined;
 }
 
+/** The longest repository URL a trick's About sheet links to. */
+export const SOURCE_URL_MAX = 512;
+
+/**
+ * A repository URL that may leave the bridge and that the About sheet may link to: https, a host, no user
+ * name, no password, no query, no fragment, at most {@link SOURCE_URL_MAX} characters, no control or
+ * invisible character. ONE rule for both sides: the bridge sends `provenance.url` only when it holds
+ * (bridge/tricks/service.ts), so a credential, an ssh or `git@` form or a local path in a hand-written
+ * origin record never reaches a paired phone or a crew lead; the phone checks it again (wire.ts).
+ */
+export function isSourceUrl(text: string): boolean {
+  if (text.length > SOURCE_URL_MAX || !isTrickText(text, { max: SOURCE_URL_MAX })) return false;
+  try {
+    const url = new URL(text);
+    return url.protocol === "https:" && url.hostname !== "" && url.username === "" && url.password === "" && url.search === "" && url.hash === "" && !text.includes("@");
+  } catch {
+    return false;
+  }
+}
+
 function valueProblem(value: string): { code: RefusalCode; reason: string } | undefined {
   const bytes = utf8Bytes(value);
   if (bytes > VALUE_MAX_BYTES) return { code: "size", reason: `is ${bytes} bytes. At most ${VALUE_MAX_BYTES}.` };
@@ -2274,8 +2662,7 @@ export interface AtProblem {
 export function parseAt(at: string): AtReading | AtProblem {
   if (codePoints(at) > AT_MAX) return { code: "place", reason: `"at" is longer than ${AT_MAX} characters.` };
   if (isOneOf(PLACE_KINDS, at)) return { place: at };
-  const word = at.startsWith("menu:") ? "menu" : at;
-  const later = reasonOf(LATER_PLACE_WORDS, word);
+  const later = reasonOf(LATER_PLACE_WORDS, at);
   if (later !== undefined) return { code: "later", reason: later };
   return { code: "place", reason: `"${at}" is not a place this Collie knows. The places are: ${quoteList(PLACE_KINDS)}.` };
 }
@@ -3218,22 +3605,26 @@ export const SUB_KEYS = {
   chip: ["text", "icon", "tone", "at", "clock"],
   /** The item of a `dashboard` or a `tabbar` part: an icon over a short name, a badge, a tone. */
   item: ["icon", "label", "badge", "tone"],
+  /** One row of a `menu` part (contract 2). */
+  row: MENU_ROW_KEYS,
 } as const;
 
 export const PART_KEYS = {
-  belt: ["at", "id", "mark"],
+  belt: ["at", "id", "mark", "sessions"],
   session: ["at", "id", "name", "icon", "tone", "subtitle", "badge", "progress", "actions", "view"],
   dashboard: ["at", "id", "item"],
   status: ["at", "id", "chip"],
   tabbar: ["at", "id", "item"],
+  menu: ["at", "id", "sessions", "rows"],
 } as const satisfies { readonly [K in PlaceKind]: readonly string[] };
 
 const PLACE_WORDS = {
   belt: "a belt part",
-  session: "a session part",
+  session: "a page part",
   dashboard: "a dashboard part",
   status: "a status part",
   tabbar: "a tabbar part",
+  menu: "a menu part",
 } as const satisfies { readonly [K in PlaceKind]: string };
 
 export interface ParseTrickDocumentOptions {
@@ -3248,6 +3639,13 @@ export interface ParseTrickDocumentOptions {
    * attribute this Collie does not know, anywhere in the part, refuses that part alone ({@link CLOSED_KEY_LINE}).
    */
   contract?: number;
+  /**
+   * Whether the manifest says `decides = "reply"`. False: a Decision with `replyTo` is refused alone with
+   * {@link DECIDES_REPLY_LINE}, and its key is not kept as refused, so its open post is withdrawn (the
+   * person never answers into a session the trick did not declare). Absent: not checked (a reader that has
+   * no manifest, such as the phone).
+   */
+  decidesReply?: boolean;
 }
 
 /**
@@ -3338,7 +3736,9 @@ export function parseTrickDocument(raw: JsonValue | undefined, opts: ParseTrickD
   const result: ParsedTrickDocument = { parts: [], decisions: [], refusals, refusedParts: [], refusedDecisions: [], documentRefused: false, notes };
 
   const seen = new Set<string>();
-  let belt = false;
+  // A belt mark and a menu part: one unbound per trick, and up to BOUND_PARTS_MAX bound ones, no two
+  // naming one session (a bound part replaces the unbound one in its sessions, so one shows per session).
+  const bound = { belt: new Bound(), menu: new Bound() };
   let status = false;
   let dashboard = false;
   let tabbar = false;
@@ -3357,8 +3757,9 @@ export function parseTrickDocument(raw: JsonValue | undefined, opts: ParseTrickD
     // A part in a place this Collie does not draw is left out: no refusal, no last good version.
     if (parsed.dropped === true) return;
     if (id !== undefined && seen.has(id)) sink.push({ code: "duplicate", path: pointer(path, "id"), reason: `The part id "${id}" is used twice. Each part needs its own.` });
-    if (parsed.part?.place === "belt" && belt) {
-      sink.push({ code: "duplicate", path: pointer(path, "at"), reason: "A trick has one belt mark. This is a second one." });
+    if (parsed.part?.place === "belt" || parsed.part?.place === "menu") {
+      const problem = bound[parsed.part.place].problem(parsed.part.part.sessions, parsed.part.place === "belt" ? "belt mark" : "menu part");
+      if (problem !== undefined) sink.push({ code: "duplicate", path: pointer(path, problem.key), reason: problem.reason });
     }
     if (parsed.part?.place === "status" && status) {
       sink.push({ code: "duplicate", path: pointer(path, "at"), reason: "A trick has one status item. This is a second one." });
@@ -3376,17 +3777,45 @@ export function parseTrickDocument(raw: JsonValue | undefined, opts: ParseTrickD
       if (id !== undefined && closed.length === 0) result.refusedParts.push(id);
       return;
     }
-    if (parsed.part.place === "belt") belt = true;
+    if (parsed.part.place === "belt" || parsed.part.place === "menu") bound[parsed.part.place].take(parsed.part.part.sessions);
     if (parsed.part.place === "status") status = true;
     if (parsed.part.place === "dashboard") dashboard = true;
     if (parsed.part.place === "tabbar") tabbar = true;
     result.parts.push(parsed.part);
   });
-  readDecisions(top, result);
+  readDecisions(top, result, opts);
   readDocumentExtras(top, result);
   result.refusals = capRefusals(refusals);
   result.notes = capRefusals(notes);
   return result;
+}
+
+/**
+ * The parts of one bound place a document drew so far (a belt mark, a menu part): whether its unbound
+ * one came, how many bound ones, and the sessions those name. A later part that breaks the rule is refused.
+ */
+class Bound {
+  private unbound = false;
+  private count = 0;
+  private readonly named = new Set<string>();
+
+  /** Why a part naming `sessions` (undefined: unbound) cannot come after the ones taken, and the key to point at. */
+  problem(sessions: readonly string[] | undefined, what: string): { key: string; reason: string } | undefined {
+    if (sessions === undefined) return this.unbound ? { key: "at", reason: `A trick has one ${what} for every session. This is a second one; name its "sessions" to bind it.` } : undefined;
+    if (this.count >= BOUND_PARTS_MAX) return { key: "sessions", reason: `A trick has at most ${String(BOUND_PARTS_MAX)} bound parts of a place. This is one more.` };
+    const twice = sessions.find((session) => this.named.has(session));
+    if (twice !== undefined) return { key: "sessions", reason: `"${twice}" is named by an earlier ${what} of this trick. A session shows one ${what} of a trick.` };
+    return undefined;
+  }
+
+  take(sessions: readonly string[] | undefined): void {
+    if (sessions === undefined) {
+      this.unbound = true;
+      return;
+    }
+    this.count += 1;
+    for (const session of sessions) this.named.add(session);
+  }
 }
 
 function readDocumentExtras(top: Fields, out: ParsedTrickDocument): void {
@@ -3443,6 +3872,12 @@ function readPart(value: JsonValue, path: string, sink: Refusal[], opts: ParseTr
     return { id };
   }
   const place = reading.place;
+  const contract = opts.contract ?? TRICK_CONTRACT_DEFAULT;
+  // Contract 2: a contract 1 trick draws no menu. Its manifest left `menu` out with a later note.
+  if (place === "menu" && contract < MENU_CONTRACT) {
+    sink.push({ code: "version", path: pointer(path, "at"), reason: MENU_NEEDS_CONTRACT });
+    return { id };
+  }
   if (opts.declared !== undefined && !opts.declared.includes(place)) {
     sink.push({ code: "undeclared", path: pointer(path, "at"), reason: `The manifest's "places" does not list "${place}". Add it there.` });
     return { id };
@@ -3454,11 +3889,11 @@ function readPart(value: JsonValue, path: string, sink: Refusal[], opts: ParseTr
     return undefined;
   });
   const kinds = opts.kinds ?? NODE_KINDS;
-  const part = readPartBody(place, id ?? "", f, kinds);
+  const part = readPartBody(place, id ?? "", f, kinds, contract);
   return { id, part };
 }
 
-function readPartBody(place: PlaceKind, id: string, f: Fields, kinds: readonly NodeKind[]): ParsedPart | undefined {
+function readPartBody(place: PlaceKind, id: string, f: Fields, kinds: readonly NodeKind[], contract: number): ParsedPart | undefined {
   const view = (): View => {
     if (!f.has("view")) {
       f.missing("view", "the nodes it draws");
@@ -3470,7 +3905,13 @@ function readPartBody(place: PlaceKind, id: string, f: Fields, kinds: readonly N
     case "belt": {
       const markFields = f.object("mark", "a mark", true);
       const mark = markFields === undefined ? {} : readMark(markFields);
-      return { place: "belt", part: { at: "belt", id, mark } };
+      const sessions = readBoundSessions(f, contract);
+      return { place: "belt", part: sessions === undefined ? { at: "belt", id, mark } : { at: "belt", id, mark, sessions } };
+    }
+    case "menu": {
+      const sessions = readBoundSessions(f, contract);
+      const rows = readMenuRows(f);
+      return { place: "menu", part: sessions === undefined ? { at: "menu", id, rows } : { at: "menu", id, sessions, rows } };
     }
     case "status": {
       const chipFields = f.object("chip", "a chip", true);
@@ -3486,6 +3927,94 @@ function readPartBody(place: PlaceKind, id: string, f: Fields, kinds: readonly N
       return place === "dashboard" ? { place: "dashboard", part: { at: "dashboard", id, item } } : { place: "tabbar", part: { at: "tabbar", id, item } };
     }
   }
+}
+
+/**
+ * A part's `sessions` (contract 2): 1 to {@link BOUND_SESSIONS_MAX} of the facts' ids, each a real
+ * session's scope key, none twice. A contract 1 part that names them is refused alone
+ * ({@link SESSIONS_NEED_CONTRACT}): an older Collie would draw it in every session.
+ */
+function readBoundSessions(f: Fields, contract: number): string[] | undefined {
+  if (!f.has("sessions")) return undefined;
+  if (contract < MENU_CONTRACT) {
+    f.push("version", "sessions", SESSIONS_NEED_CONTRACT);
+    return undefined;
+  }
+  const list = f.array("sessions", { min: 1, max: BOUND_SESSIONS_MAX, what: "session ids" });
+  if (list === undefined) return undefined;
+  const out: string[] = [];
+  list.forEach((value, i) => {
+    const path = pointer(f.at("sessions"), i);
+    const id = asJsonString(value);
+    if (id === undefined || !isScopeKey(id)) {
+      f.sink.push({ code: "target", path, reason: 'Each of "sessions" is a session\'s "id" from the facts (memberId:paneId, such as lodge:w6X:3), never a name.' });
+      return;
+    }
+    if (out.includes(id)) {
+      f.sink.push({ code: "duplicate", path, reason: `"${id}" is listed twice.` });
+      return;
+    }
+    out.push(id);
+  });
+  return out;
+}
+
+/** A menu part's rows: 1 to {@link MENU_ROWS_MAX}, each id and each intent once. */
+function readMenuRows(f: Fields): MenuRow[] {
+  const list = f.array("rows", { min: 1, max: MENU_ROWS_MAX, required: true, what: "rows" });
+  if (list === undefined) return [];
+  const out: MenuRow[] = [];
+  const ids = new Set<string>();
+  const intents = new Set<string>();
+  list.forEach((value, i) => {
+    const r = itemFields(value, pointer(f.at("rows"), i), f.sink, "a menu row", f.notes);
+    if (r === undefined) return;
+    r.keys(MENU_ROW_KEYS);
+    const idRaw = asJsonString(r.obj.id);
+    if (idRaw === undefined || !isPartId(idRaw)) r.push("id", "id", 'A row needs an "id" of 1 to 32 lower-case letters, digits and hyphens.');
+    if (idRaw !== undefined && ids.has(idRaw)) r.push("duplicate", "id", `The row id "${idRaw}" is used twice.`);
+    if (idRaw !== undefined) ids.add(idRaw);
+    const kind = r.word("kind", MENU_ROW_KINDS, true);
+    const label = readMenuLabel(r);
+    const icon = r.icon("icon");
+    const intent = r.intent("intent", true);
+    if (intent !== undefined && intents.has(intent)) r.push("duplicate", "intent", `The intent "${intent}" is used by two rows. Each row of a part sends its own.`);
+    if (intent !== undefined) intents.add(intent);
+    const on = r.bool("on");
+    const disabled = r.bool("disabled");
+    const confirm = r.bool("confirm");
+    if (kind === "switch" && !r.has("on")) r.missing("on", "the switch's state as the program holds it, true or false");
+    if (kind === "button" && r.has("on")) r.push("target", "on", '"on" is a switch\'s state. A button takes none.');
+    if (kind === "switch" && r.has("confirm")) r.push("target", "confirm", '"confirm" arms a button. A switch takes none.');
+    if (kind === undefined || label === undefined || intent === undefined) return;
+    const row: MenuRow = { id: idRaw ?? "", kind, label, intent };
+    if (icon !== undefined) row.icon = icon;
+    if (on !== undefined && kind === "switch") row.on = on;
+    if (disabled !== undefined) row.disabled = disabled;
+    if (confirm !== undefined && kind === "button") row.confirm = confirm;
+    out.push(row);
+  });
+  return out;
+}
+
+/** A row's label, by {@link menuLabelProblem}: refused when longer than the cap, never cut. */
+function readMenuLabel(r: Fields): string | undefined {
+  const raw = r.obj.label;
+  if (raw === undefined) {
+    r.missing("label", `text of 1 to ${String(MENU_LABEL_MAX)} characters`);
+    return undefined;
+  }
+  const label = asJsonString(raw);
+  if (label === undefined) {
+    r.push("type", "label", '"label" must be text.');
+    return undefined;
+  }
+  const problem = menuLabelProblem(label);
+  if (problem !== undefined) {
+    r.push("text", "label", `"label" ${problem}`);
+    return undefined;
+  }
+  return label;
 }
 
 function readSessionPart(f: Fields, id: string, view: View): ParsedPart {
@@ -3594,7 +4123,7 @@ const HILL_OWNED_KEYS = {
   at: "the bridge stamps when it took the post",
 } as const satisfies Readonly<Record<string, string>>;
 
-function readDecisions(top: Fields, out: ParsedTrickDocument): void {
+function readDecisions(top: Fields, out: ParsedTrickDocument, opts: ParseTrickDocumentOptions): void {
   const list = top.array("decisions", { min: 0, max: DECISIONS_MAX, what: "decisions" });
   if (list === undefined) return;
   const seen = new Set<string>();
@@ -3605,9 +4134,14 @@ function readDecisions(top: Fields, out: ParsedTrickDocument): void {
     const key = reading.key;
     if (key !== undefined && seen.has(key)) sink.push({ code: "duplicate", path: pointer(path, "key"), reason: `The decision key "${key}" is used twice. Each decision needs its own.` });
     if (key !== undefined) seen.add(key);
+    // `replyTo` types the person's answer into a session: only a trick whose manifest says so may name one.
+    // Such a decision is not kept as refused, so an open post of its key (from a build before the check) is
+    // withdrawn too, and no answer to it reaches a session.
+    const undeclared = opts.decidesReply === false && reading.decision?.replyTo !== undefined;
+    if (undeclared) sink.push({ code: "undeclared", path: pointer(path, "replyTo"), reason: DECIDES_REPLY_LINE });
     if (sink.length > 0 || reading.decision === undefined) {
       for (const r of sink) out.refusals.push(key === undefined ? r : { ...r, decision: key });
-      if (key !== undefined) out.refusedDecisions.push(key);
+      if (key !== undefined && !undeclared) out.refusedDecisions.push(key);
       return;
     }
     out.decisions.push(reading.decision);
@@ -3759,7 +4293,48 @@ export const ENV_NAME_MAX = 64;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** Every key `trick.toml` takes. */
-export const MANIFEST_KEYS = ["id", "name", "run", "every", "watch", "on", "mode", "contract", "icon", "places", "env", "inputs", "description", "about", "rules"] as const;
+export const MANIFEST_KEYS = ["id", "name", "run", "every", "watch", "on", "mode", "contract", "icon", "places", "env", "inputs", "description", "about", "version", "rules", "decides", "field", "access"] as const;
+
+// ── `access`: how much of Collie's local API a trick reads (M105 spec 04) ───────────────────────────
+
+/**
+ * The words `access` takes. `none` is the default, also when the key is absent. `see` holds the lists and
+ * states (machines, sessions, usage, the Hill), never the text of a screen. `read` holds `see` and adds the text
+ * of a session's screen. A closed list: any other word refuses the manifest. The level is what the trick
+ * declares and what Collie's helper gives it, not a wall (decision 4).
+ */
+export const ACCESS_LEVELS = ["see", "read"] as const;
+export const ACCESS_WORDS = ["none", ...ACCESS_LEVELS] as const;
+/** The levels a manifest keeps: `none` is the absence of the key. */
+export type TrickAccess = (typeof ACCESS_LEVELS)[number];
+/**
+ * The card's one line for each level, in the card's own English (and the About sheet's, in the phone's words).
+ * Plain since M105 spec 05 (decision 10): the bridge holds the level for the local API, so the line says what
+ * the trick reads, with no caveat.
+ */
+export const ACCESS_LINES = {
+  see: "It reads your machines, sessions, usage and the Hill.",
+  read: "It reads your sessions' screens.",
+} as const satisfies Readonly<Record<TrickAccess, string>>;
+/** The phone's word for a level word it does not know (wire.ts): kept, so the row can say so, never dropped. */
+export const ACCESS_UNKNOWN = "unknown";
+/** The line a contract 1 or 2 trick that names `access` is refused with. */
+export const ACCESS_NEEDS_CONTRACT = `"access" needs contract = ${String(ACCESS_CONTRACT)}. Add contract = ${String(ACCESS_CONTRACT)} to trick.toml to read Collie through the local API.`;
+
+// ── `decides`: whether a trick's Decisions answer into a session ────────────────────────────────────
+
+/**
+ * The words `decides` takes: one, `reply`. A trick that writes `decides = "reply"` may give its Decisions a
+ * `replyTo`, and the person's answer is typed into that session as their own message. Absent, a Decision
+ * with `replyTo` is refused. A closed list, so a later word is a refusal here, never a silent yes.
+ */
+export const DECIDES_WORDS = ["reply"] as const;
+export type DecidesWord = (typeof DECIDES_WORDS)[number];
+
+/** The refusal of a Decision with `replyTo` from a trick whose approved manifest does not say `decides = "reply"`. */
+export const DECIDES_REPLY_LINE = "This trick did not say that its Decisions reply to a session.";
+/** The right in a person's words: `collie trick check` and the version card's sentence. */
+export const DECIDES_REPLY_WORDS = "Your answers to its Decisions go to a session as your own message.";
 
 // ── Agent views: the place word `agent-view` and the key `rules` (contract 2) ───────────────────────
 
@@ -3983,12 +4558,324 @@ export const INPUTS_NEED_CONTRACT = `"inputs" needs contract = ${String(INPUTS_C
 export const AGENT_VIEW_NEEDS_CONTRACT = `"agent-view" needs contract = ${String(AGENT_VIEW_CONTRACT)}. Add contract = ${String(AGENT_VIEW_CONTRACT)} to trick.toml.`;
 export const RULES_NEEDS_CONTRACT = `"rules" needs contract = ${String(AGENT_VIEW_CONTRACT)}. Add contract = ${String(AGENT_VIEW_CONTRACT)} to trick.toml.`;
 /** The keys a trick whose only place is `agent-view` may not name: it has no program. */
-export const VIEW_ONLY_REFUSED = ["run", "every", "inputs", "env"] as const;
+export const VIEW_ONLY_REFUSED = ["run", "every", "inputs", "env", "decides"] as const;
 export function viewOnlyRefusal(key: (typeof VIEW_ONLY_REFUSED)[number]): string {
   return `A trick whose only place is "agent-view" has no program, so it takes no "${key}". Remove it, or add a place it draws in.`;
 }
 export const AGENT_VIEW_NEEDS_RULES = `"agent-view" needs "rules": the file of instructions the session's agent reads. Add rules = "rules.md" to trick.toml.`;
 export const RULES_NEED_AGENT_VIEW = `"rules" goes with the place "agent-view": they are the instructions of the agent that draws the view. Add "agent-view" to places, or remove "rules".`;
+
+// ── Fields: the settings a person keeps for a trick (contract 3) ─────────────────────────────────────
+
+/**
+ * The four kinds a field takes, and no more (decided 2026-11-17): one line of `text`, a `choice` of 2 to 8
+ * options, a `switch`, a whole `number` between `min` and `max`. No secret kind: a key still comes through `env`.
+ */
+export const FIELD_KINDS = ["text", "choice", "switch", "number"] as const;
+export type FieldKind = (typeof FIELD_KINDS)[number];
+
+/** A field's value: text for `text` and `choice`, a boolean for `switch`, a whole number for `number`. */
+export type FieldValue = string | number | boolean;
+/** Values by field key. */
+export interface FieldValues {
+  [key: string]: FieldValue;
+}
+
+interface FieldBase {
+  /** Spelled like a trick id ({@link isTrickId}): the key of its value in the facts and in `values.json`. */
+  key: string;
+  /** What the row on the phone says, at most `FIELD_LABEL_MAX` characters. */
+  label: string;
+  /** A second line under the label, at most `FIELD_HINT_MAX` characters. */
+  hint?: string;
+  /** A field the trick cannot do without: while it has no value and no default, the row says "Needs setup". */
+  required?: true;
+}
+export interface TextField extends FieldBase {
+  kind: "text";
+  default?: string;
+}
+export interface ChoiceField extends FieldBase {
+  kind: "choice";
+  options: string[];
+  default?: string;
+}
+export interface SwitchField extends FieldBase {
+  kind: "switch";
+  /** Off when left out: a switch always has a value, so it is never `required`. */
+  default?: boolean;
+}
+export interface NumberField extends FieldBase {
+  kind: "number";
+  min: number;
+  max: number;
+  default?: number;
+}
+/** One `[[field]]` of `trick.toml`, as read. */
+export type TrickField = TextField | ChoiceField | SwitchField | NumberField;
+
+/** The keys a `[[field]]` table takes, by kind. */
+export const FIELD_KEYS = {
+  text: ["key", "kind", "label", "hint", "default", "required"],
+  choice: ["key", "kind", "label", "hint", "default", "required", "options"],
+  switch: ["key", "kind", "label", "hint", "default"],
+  number: ["key", "kind", "label", "hint", "default", "required", "min", "max"],
+} as const satisfies Record<FieldKind, readonly string[]>;
+
+/** The line a contract 1 or 2 trick that lists `[[field]]` is refused with. */
+export const FIELDS_NEED_CONTRACT = `"field" needs contract = ${String(FIELDS_CONTRACT)}. Add contract = ${String(FIELDS_CONTRACT)} to trick.toml to keep settings for the trick.`;
+
+/**
+ * Why a value breaks its field's rule, as a code the phone branches on. `kind`: the wrong type of
+ * value; `text`: a text over its cap, or with a line break or a control character; `option`: not one of a
+ * choice's options; `range`: a number outside `min` to `max`; `whole`: a number that is not whole.
+ */
+export const FIELD_REFUSALS = ["kind", "text", "option", "range", "whole"] as const;
+export type FieldRefusal = (typeof FIELD_REFUSALS)[number];
+
+/** A value that breaks its field's rule: the code and one sentence that names the next step. */
+export interface FieldProblem {
+  code: FieldRefusal;
+  reason: string;
+}
+
+/**
+ * Why `value` breaks `field`'s rule, or undefined when it keeps it. The one check the manifest (a `default`),
+ * the bridge's write route and the phone both run (only the phone writes a value). A text value is one line of at most
+ * `FIELD_TEXT_MAX` characters with no control or invisible character; it may be empty only when the field is
+ * not required. The sentences never repeat the value: a refusal may be written to a log.
+ */
+export function fieldValueProblem(field: TrickField, value: FieldValue): FieldProblem | undefined {
+  switch (field.kind) {
+    case "switch":
+      return asJsonBoolean(value) === undefined ? { code: "kind", reason: `"${field.label}" is a switch. Send true or false.` } : undefined;
+    case "number": {
+      const number = asJsonNumber(value);
+      if (number === undefined || !Number.isFinite(number)) return { code: "kind", reason: `"${field.label}" is a number. Send a whole number from ${String(field.min)} to ${String(field.max)}.` };
+      if (!Number.isInteger(number)) return { code: "whole", reason: `"${field.label}" takes whole numbers only. Send a whole number from ${String(field.min)} to ${String(field.max)}.` };
+      if (number < field.min || number > field.max) return { code: "range", reason: `"${field.label}" is from ${String(field.min)} to ${String(field.max)}. Send a number in that range.` };
+      return undefined;
+    }
+    case "choice": {
+      const option = asJsonString(value);
+      if (option === undefined) return { code: "kind", reason: `"${field.label}" is a choice. Send one of its options.` };
+      return field.options.includes(option) ? undefined : { code: "option", reason: `"${field.label}" takes one of: ${quoteList(field.options)}. Pick one of them.` };
+    }
+    case "text": {
+      const text = asJsonString(value);
+      if (text === undefined) return { code: "kind", reason: `"${field.label}" is text. Send one line of text.` };
+      if (codePoints(text) > FIELD_TEXT_MAX) return { code: "text", reason: `"${field.label}" takes at most ${String(FIELD_TEXT_MAX)} characters. Make it shorter.` };
+      if (hasControl(text, false, false) || hasInvisible(text) || hasLineSeparator(text)) return { code: "text", reason: `"${field.label}" is one line with no control or invisible character. Remove the line break or the character.` };
+      return undefined;
+    }
+  }
+}
+
+/** A field's value now: the person's, when it keeps the field's rule, else the default, else undefined. */
+export function fieldValueOf(field: TrickField, stored: FieldValues): FieldValue | undefined {
+  const own = Object.hasOwn(stored, field.key) ? stored[field.key] : undefined;
+  if (own !== undefined && fieldValueProblem(field, own) === undefined && !(field.kind === "text" && own === "")) return own;
+  return field.default;
+}
+
+/**
+ * The values a program gets in its facts: each field's value now ({@link fieldValueOf}), by key. A field with
+ * no value and no default is left out, and so is a stored key no field names any more.
+ */
+export function effectiveValues(fields: readonly TrickField[], stored: FieldValues): FieldValues {
+  const out: FieldValues = {};
+  for (const field of fields) {
+    const value = fieldValueOf(field, stored);
+    if (value !== undefined) out[field.key] = value;
+  }
+  return out;
+}
+
+/** The stored values that still keep their field's rule, by key: what the row shows as set. */
+export function keptValues(fields: readonly TrickField[], stored: FieldValues): FieldValues {
+  const out: FieldValues = {};
+  for (const field of fields) {
+    const own = Object.hasOwn(stored, field.key) ? stored[field.key] : undefined;
+    if (own !== undefined && fieldValueProblem(field, own) === undefined && !(field.kind === "text" && own === "")) out[field.key] = own;
+  }
+  return out;
+}
+
+/** Whether a required field has no value and no default: the trick needs setup before it can do its work. */
+export function needsSetup(fields: readonly TrickField[], stored: FieldValues): boolean {
+  return fields.some((field) => field.required === true && fieldValueOf(field, stored) === undefined);
+}
+
+/**
+ * Read `[[field]]` of a manifest: at most `FIELDS_MAX` tables, each closed by its kind ({@link FIELD_KEYS}).
+ * Every rule refuses with its own sentence; nothing is cut. Undefined when the manifest lists none, or when
+ * any field is refused (the refusals are in the sink).
+ */
+function readFields(f: Fields, contract: number | undefined): TrickField[] | undefined {
+  if (!f.has("field")) return undefined;
+  if (contract !== undefined && contract < FIELDS_CONTRACT) {
+    f.push("version", "field", FIELDS_NEED_CONTRACT);
+    return undefined;
+  }
+  const list = f.array("field", { min: 1, max: FIELDS_MAX, what: "fields, each a [[field]] table" });
+  if (list === undefined) return undefined;
+  const out: TrickField[] = [];
+  const keys = new Set<string>();
+  let ok = true;
+  list.forEach((value, i) => {
+    const path = pointer("/field", i);
+    const one = readField(value, path, f.sink);
+    if (one === undefined) {
+      ok = false;
+      return;
+    }
+    if (keys.has(one.key)) {
+      f.sink.push({ code: "duplicate", path: pointer(path, "key"), reason: `The key "${one.key}" is listed twice. Give each field its own key.` });
+      ok = false;
+      return;
+    }
+    keys.add(one.key);
+    out.push(one);
+  });
+  return ok ? out : undefined;
+}
+
+/** One `[[field]]` table, or undefined with its refusals in `sink`. */
+function readField(value: JsonValue, path: string, sink: Refusal[]): TrickField | undefined {
+  const g = itemFields(value, path, sink, "a field");
+  if (g === undefined) return undefined;
+  const before = sink.length;
+  const kind = g.word("kind", FIELD_KINDS, true);
+  const keyText = g.text("key", { max: 32, required: true });
+  if (keyText !== undefined && !isTrickId(keyText)) g.push("id", "key", '"key" must be 1 to 32 lower-case letters, digits and hyphens, starting with a letter or a digit, as a trick id is.');
+  const label = g.text("label", { max: FIELD_LABEL_MAX, required: true });
+  const hint = g.text("hint", { max: FIELD_HINT_MAX });
+  const required = g.bool("required");
+  if (kind === undefined) {
+    g.keys(["key", "kind", "label", "hint", "default", "required", "options", "min", "max"]);
+    return undefined;
+  }
+  g.keys(FIELD_KEYS[kind], (key) => ({ code: "unknown-key", reason: `"${key}" is not part of a ${kind} field. Remove it.` }));
+  if (keyText === undefined || label === undefined || sink.length > before) return undefined;
+  const base: FieldBase = { key: keyText, label };
+  if (hint !== undefined) base.hint = hint;
+  if (required === true) base.required = true;
+  const field = fieldOfKind(g, kind, base);
+  if (field === undefined || sink.length > before) return undefined;
+  if (field.default !== undefined) {
+    const problem = fieldValueProblem(field, field.default);
+    if (problem !== undefined) {
+      g.push(problem.code === "kind" ? "type" : problem.code === "option" ? "word" : problem.code === "text" ? "text" : "range", "default", `"default" breaks the field's own rule: ${problem.reason}`);
+      return undefined;
+    }
+  }
+  return field;
+}
+
+/** The kind's own keys of one field. */
+function fieldOfKind(g: Fields, kind: FieldKind, base: FieldBase): TrickField | undefined {
+  switch (kind) {
+    case "switch": {
+      const value = g.bool("default");
+      return value === undefined ? { ...base, kind } : { ...base, kind, default: value };
+    }
+    case "text": {
+      const raw = g.obj.default;
+      if (raw !== undefined && asJsonString(raw) === undefined) {
+        g.push("type", "default", '"default" of a text field must be text.');
+        return undefined;
+      }
+      const value = asJsonString(raw);
+      return value === undefined ? { ...base, kind } : { ...base, kind, default: value };
+    }
+    case "choice": {
+      const options = readStrings(g, "options", { min: FIELD_OPTIONS_MIN, max: FIELD_OPTIONS_MAX, what: "options", required: true, text: { max: FIELD_OPTION_MAX } });
+      if (options === undefined) return undefined;
+      if (new Set(options).size !== options.length) {
+        g.push("duplicate", "options", '"options" lists one option twice. Give each option once.');
+        return undefined;
+      }
+      const raw = g.obj.default;
+      if (raw !== undefined && asJsonString(raw) === undefined) {
+        g.push("type", "default", '"default" of a choice field must be one of its options.');
+        return undefined;
+      }
+      const value = asJsonString(raw);
+      return value === undefined ? { ...base, kind, options } : { ...base, kind, options, default: value };
+    }
+    case "number": {
+      const rule = { min: -FIELD_NUMBER_ABS_MAX, max: FIELD_NUMBER_ABS_MAX, required: true };
+      const min = g.int("min", rule);
+      const max = g.int("max", rule);
+      if (min === undefined || max === undefined) return undefined;
+      if (min >= max) {
+        g.push("range", "max", `"max" (${String(max)}) must be above "min" (${String(min)}).`);
+        return undefined;
+      }
+      const raw = g.obj.default;
+      if (raw === undefined) return { ...base, kind, min, max };
+      const value = asJsonNumber(raw);
+      if (value === undefined) {
+        g.push("type", "default", '"default" of a number field must be a whole number.');
+        return undefined;
+      }
+      return { ...base, kind, min, max, default: value };
+    }
+  }
+}
+
+/** A JSON value as a field value: text, true or false, or a finite number; anything else is undefined. */
+export function asFieldValue(value: JsonValue | undefined): FieldValue | undefined {
+  const number = asJsonNumber(value);
+  return asJsonString(value) ?? asJsonBoolean(value) ?? (number !== undefined && Number.isFinite(number) ? number : undefined);
+}
+
+/**
+ * A trick row's `fields` and `values` as the bridge sent them (wire.ts): the fields read by the manifest's own
+ * rules, the values kept only where they keep their field's rule. Anything of another shape is undefined, as
+ * from an older bridge, and the phone shows no Settings group.
+ */
+export function readWireFields(fieldsRaw: JsonValue | undefined, valuesRaw: JsonValue | undefined): { fields: TrickField[]; values: FieldValues } | undefined {
+  if (fieldsRaw === undefined) return undefined;
+  const refusals: Refusal[] = [];
+  const fields = readFields(new Fields({ field: fieldsRaw }, "", refusals, "the row"), FIELDS_CONTRACT);
+  if (fields === undefined || refusals.length > 0) return undefined;
+  const raw = asJsonObject(valuesRaw) ?? {};
+  const values: FieldValues = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const one = asFieldValue(value);
+    if (one !== undefined) values[key] = one;
+  }
+  return { fields, values: keptValues(fields, values) };
+}
+
+/**
+ * The values of a facts document (`values`), for `collie trick check --run` with fixture facts: an object of
+ * at most `FIELDS_MAX` keys spelled as trick ids, each text of at most `FIELD_TEXT_MAX` characters, a boolean
+ * or a whole number.
+ */
+function readFactsValues(f: Fields): FieldValues | undefined {
+  const g = f.object("values", "an object of values by field key");
+  if (g === undefined) return undefined;
+  const out: FieldValues = {};
+  const entries = Object.entries(g.obj);
+  if (entries.length > FIELDS_MAX) {
+    f.push("count", "values", `"values" holds ${String(entries.length)}. It holds at most ${String(FIELDS_MAX)}.`);
+    return undefined;
+  }
+  for (const [key, raw] of entries) {
+    const text = asJsonString(raw);
+    const flag = asJsonBoolean(raw);
+    const number = asJsonNumber(raw);
+    const fits = (text !== undefined && codePoints(text) <= FIELD_TEXT_MAX && !hasControl(text, false, false)) || flag !== undefined || (number !== undefined && Number.isInteger(number) && Math.abs(number) <= FIELD_NUMBER_ABS_MAX);
+    if (!isTrickId(key) || !fits) {
+      g.push("type", key, "A value is a field key with one line of text, true or false, or a whole number.");
+      continue;
+    }
+    out[key] = text ?? flag ?? number ?? "";
+  }
+  return out;
+}
 
 /** The highest `contract` a manifest may write before it is refused as a typo rather than a newer Collie. */
 export const CONTRACT_MAX = 999;
@@ -4004,8 +4891,8 @@ export function newerContractReason(asked: number): string {
 export interface ParseManifestOptions {
   /** The folder's name. A manifest whose `id` differs is refused. */
   folder?: string;
-  /** The later triggers this Collie runs. Default none: `watch`, `on` and `mode = "serve"` are skipped with a reason. */
-  triggers?: readonly LaterTrigger[];
+  /** The triggers this Collie runs. Default none: `watch`, `on` and `mode = "serve"` are skipped with a reason. */
+  triggers?: readonly ManifestTrigger[];
   /** The place kinds this Collie draws. Default `NEAR_PLACES`. */
   places?: readonly PlaceKind[];
 }
@@ -4097,6 +4984,9 @@ export function parseManifest(doc: JsonValue | undefined, opts: ParseManifestOpt
   // without them reads as before. Over the cap is a refusal, like the name's.
   const description = f.text("description", { max: DESCRIPTION_MAX });
   const about = f.text("about", { max: ABOUT_MAX, multiline: true });
+  // The author's version word: text for a person, shown in the About sheet, never compared or fetched.
+  const version = f.text("version", { max: VERSION_MAX });
+  if (version !== undefined && !VERSION_RE.test(version)) f.push("text", "version", VERSION_REFUSAL);
 
   // Room for the places of a newer Collie at the same contract: the words this one does not know are left out.
   const placeList = f.array("places", { min: 1, max: PLACES_LISTED_MAX, required: true, what: "places" });
@@ -4120,6 +5010,11 @@ export function parseManifest(doc: JsonValue | undefined, opts: ParseManifestOpt
     const later = word === undefined ? undefined : reasonOf(LATER_PLACE_WORDS, word);
     if (later !== undefined) {
       refusals.push({ code: "later", path, reason: later });
+      return;
+    }
+    // Contract 2: a session's settings rows. A contract 1 trick keeps running with its other places.
+    if (word === "menu" && contract !== undefined && contract < MENU_CONTRACT) {
+      refusals.push({ code: "later", path, reason: MENU_NEEDS_CONTRACT });
       return;
     }
     if (word === undefined) {
@@ -4156,6 +5051,15 @@ export function parseManifest(doc: JsonValue | undefined, opts: ParseManifestOpt
   if (agentView && !f.has("rules")) f.push("missing", "places", AGENT_VIEW_NEEDS_RULES);
   if (f.has("rules") && !agentView) f.push("place", "rules", RULES_NEED_AGENT_VIEW);
 
+  // Whether its Decisions answer into a session: one closed word, at every contract (an optional key adds
+  // inside contract 1). A view-only trick runs no program, so it is refused there with the other program keys.
+  const decides = f.word("decides", DECIDES_WORDS);
+  // How much of the local API the trick reads: one closed word. `none` is the default, kept as no key.
+  const access = f.word("access", ACCESS_WORDS);
+  if (f.has("access") && contract !== undefined && contract < ACCESS_CONTRACT) f.push("version", "access", ACCESS_NEEDS_CONTRACT);
+  // Contract 3: the settings a person keeps for the trick (readFields).
+  const fields = readFields(f, contract);
+
   const fatal = refusals.some((r) => r.code !== "later");
   if (fatal || id === undefined || name === undefined || (run === undefined && !viewOnly) || contract === undefined) return { refusals: capRefusals(refusals) };
   const head = { id, name };
@@ -4163,37 +5067,46 @@ export function parseManifest(doc: JsonValue | undefined, opts: ParseManifestOpt
   const manifest: TrickManifest = run === undefined ? { ...head, ...rest } : { ...head, run, ...rest };
   if (agentView) manifest.agentView = true;
   if (rules !== undefined) manifest.rules = rules;
+  if (decides !== undefined) manifest.decides = decides;
+  if (access !== undefined && access !== "none") manifest.access = access;
   if (every !== undefined && everyMs !== undefined && everyOk) {
     manifest.every = every;
     manifest.everyMs = everyMs;
   }
-  if (watch !== undefined && triggers.includes("watch")) manifest.watch = watch;
-  if (on.length > 0 && triggers.includes("on")) manifest.on = on;
+  if (watch !== undefined && triggers.includes("watch")) manifest.watch = [...new Set(watch)];
+  if (on.length > 0 && triggers.includes("on")) manifest.on = [...new Set(on)];
   if (mode === "serve" && triggers.includes("serve")) manifest.mode = "serve";
   if (env !== undefined && env.length > 0) manifest.env = [...new Set(env)];
   if (inputs !== undefined && inputs.length > 0) manifest.inputs = [...new Set(inputs)];
   if (description !== undefined) manifest.description = description;
   if (about !== undefined) manifest.about = about;
+  if (version !== undefined && VERSION_RE.test(version)) manifest.version = version;
+  if (fields !== undefined) manifest.fields = fields;
   return { manifest, refusals: capRefusals(refusals) };
 }
 
 // ── The facts ────────────────────────────────────────────────────────────────────────────────
 
 /** Every key of the facts document, of a session in it, of a space, of the trick, and of each trigger. */
-export const FACTS_KEYS = ["contract", "trigger", "trick", "memberId", "host", "sessions", "spaces", "sessionsOmitted"] as const;
+export const FACTS_KEYS = ["contract", "trigger", "trick", "memberId", "host", "sessions", "spaces", "sessionsOmitted", "values", "api"] as const;
+export const API_FACT_KEYS = ["socket", "access", "token"] as const;
+/** A run token in the facts: 43 base64url characters (32 random bytes). */
+const API_TOKEN_TEXT = /^[A-Za-z0-9_-]{43}$/u;
 export const SESSION_FACT_KEYS = ["id", "memberId", "sessionId", "paneId", "host", "name", "agent", "status", "cwd", "space", "tab", "lastActiveAt", "reachable", "inputs"] as const;
 export const INPUTS_FACT_KEYS = ["state", "files", "skipped"] as const;
 export const INPUT_FILE_FACT_KEYS = ["rel", "path", "bytes", "sha256", "mtime", "kind"] as const;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 export const SPACE_FACT_KEYS = ["name", "folder"] as const;
 export const TRICK_FACT_KEYS = ["id", "dir", "state"] as const;
+/** The most runs a `watch` or `event` trigger's `count` may name folded together. */
+export const TRIGGER_COUNT_MAX = 1_000_000;
 export const TRIGGER_KINDS = ["start", "timer", "tap", "watch", "event"] as const;
 export const TRIGGER_KEYS = {
   start: ["kind"],
   timer: ["kind"],
   tap: ["kind", "rid", "node", "intent", "value", "from", "seen"],
-  watch: ["kind", "path"],
-  event: ["kind", "event", "session"],
+  watch: ["kind", "path", "count"],
+  event: ["kind", "event", "session", "count"],
 } as const satisfies { readonly [K in (typeof TRIGGER_KINDS)[number]]: readonly string[] };
 
 export interface ParsedFacts {
@@ -4245,12 +5158,22 @@ export function parseFacts(raw: JsonValue | undefined): ParsedFacts {
   });
 
   const omitted = f.int("sessionsOmitted", { min: 1, max: 1_000_000 });
+  // The local API, for a trick that declares `access` while the socket stands (M105 spec 04).
+  const apiFields = f.object("api", 'an object with "socket", "access" and "token"');
+  apiFields?.keys(API_FACT_KEYS);
+  const socket = apiFields?.text("socket", { max: FACT_TEXT_MAX_BYTES, required: true });
+  const apiAccess = apiFields?.word("access", ACCESS_LEVELS, true);
+  const apiToken = apiFields?.text("token", { max: 64, required: true });
+  if (apiToken !== undefined && !API_TOKEN_TEXT.test(apiToken)) apiFields?.push("type", "token", "The run token is 43 base64url characters.");
+  const values = readFactsValues(f);
 
   if (refusals.length > 0 || trigger === undefined || trickId === undefined || dir === undefined || state === undefined || memberId === undefined || host === undefined) {
     return { refusals: capRefusals(refusals) };
   }
   const facts: TrickFacts = { contract: contract ?? TRICK_CONTRACT_DEFAULT, trigger, trick: { id: trickId, dir, state }, memberId, host, sessions, spaces };
   if (omitted !== undefined) facts.sessionsOmitted = omitted;
+  if (socket !== undefined && apiAccess !== undefined && apiToken !== undefined) facts.api = { socket, access: apiAccess, token: apiToken };
+  if (values !== undefined) facts.values = values;
   return { facts, refusals };
 }
 
@@ -4268,14 +5191,17 @@ function readTrigger(f: Fields): FactsTrigger | undefined {
     case "watch": {
       t.keys(TRIGGER_KEYS.watch);
       const path = t.text("path", { max: WATCH_PATH_MAX, required: true });
-      return path === undefined ? undefined : { kind, path };
+      const count = t.int("count", { min: 1, max: TRIGGER_COUNT_MAX, required: true });
+      return path === undefined || count === undefined ? undefined : { kind, path, count };
     }
     case "event": {
       t.keys(TRIGGER_KEYS.event);
       const event = t.word("event", TRICK_EVENTS, true);
-      const session = t.text("session", { max: 256 });
-      if (event === undefined) return undefined;
-      return session === undefined ? { kind, event } : { kind, event, session };
+      const session = t.text("session", { max: 256, required: true });
+      const count = t.int("count", { min: 1, max: TRIGGER_COUNT_MAX, required: true });
+      if (event === undefined || session === undefined || count === undefined) return undefined;
+      if (!isScopeKey(session)) t.push("target", "session", '"session" must be the scope key memberId:paneId.');
+      return { kind, event, session, count };
     }
     case "tap": {
       t.keys(TRIGGER_KEYS.tap);

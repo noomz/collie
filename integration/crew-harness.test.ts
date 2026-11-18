@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { createServer } from "node:net";
 
 import { HOST } from "../bridge/host.ts";
+import { writeTricksFeature } from "../bridge/tricks/feature-switch.ts";
 import type { JsonValue } from "../bridge/json.ts";
 import { EXIT } from "../cli/io.ts";
 import { askSocket, cmdWalkySend, cmdWalkyStatus, type WalkyDeps } from "../cli/walky.ts";
@@ -125,6 +126,23 @@ let root: string;
  * about them look identical. That is what let the beta.9 bug ship. `node:http` performs no content
  * decoding, so the assertion "encoding claimed ⟺ bytes gzipped" is actually decidable.
  */
+// The runner's PATH in `GET /api/tricks` (int/1.29.0, d4de087c0), through the running bridge: only the
+// host's own CLI (its local read credential) gets `path`; a paired phone's reply has no such key.
+describe("the tricks list: the runner's PATH for the local CLI only, through a real request", () => {
+  test("a phone-style request gets no `path`, and the local CLI request gets it", async () => {
+    // The bridge names the PATH only once its tricks folder exists (service.ts `folderExists`).
+    mkdirSync(join(lead.home, ".config", "collie", "tricks"), { recursive: true });
+    const local = async (): Promise<JsonObject | undefined> => parseJsonObject(await (await lead.localApi("/api/tricks?bound=1")).text());
+    await waitFor(async () => asJsonString((await local())?.path) !== undefined, 10_000, () => "the local CLI read never carried `path`");
+    expect((await local())?.path).toBe(process.env.PATH ?? "");
+    const phone = await fetch(`${lead.origin()}/api/tricks?bound=1`, { headers: await lead.pairingAuth() });
+    expect(phone.status).toBe(200);
+    const body = parseJsonObject(await phone.text());
+    expect(body).toBeDefined();
+    expect(body !== undefined && "path" in body).toBe(false);
+  });
+});
+
 async function rawGet(
   target: string,
   headers: Record<string, string>,
@@ -324,11 +342,29 @@ class Instance {
     return { authorization: `Bearer ${this.pairedToken}`, origin: this.origin() };
   }
 
-  /** A GET or other READ of this instance's `/api/*`, carrying its local credential. */
+  /**
+   * A GET or other READ of this instance's `/api/*`, as a paired device: the pairing token, and no
+   * `Origin` unless the caller sets one. A paired device, not the local key, because the local key
+   * reads no screen or message (bridge/local-key.ts) and most of these reads are panes, the crew and
+   * the walky list.
+   */
   async api(path: string, init: RequestInit = {}): Promise<Response> {
+    const headers = new Headers(init.headers);
+    headers.set("authorization", await this.pairedBearer());
+    return fetch(`${this.origin()}${path}`, { ...init, headers });
+  }
+
+  /** A READ of this instance's `/api/*` with the host's local key, exactly as the CLI sends it. */
+  async localApi(path: string, init: RequestInit = {}): Promise<Response> {
     const headers = new Headers(init.headers);
     for (const [name, value] of Object.entries(await this.localAuth())) headers.set(name, value);
     return fetch(`${this.origin()}${path}`, { ...init, headers });
+  }
+
+  /** The `Authorization` value of {@link pairingAuth}, claiming the token first if need be. */
+  private async pairedBearer(): Promise<string> {
+    await this.pairingAuth();
+    return `Bearer ${this.pairedToken ?? ""}`;
   }
 
   /** A write to this instance's `/api/*`, carrying a real pairing token and a same-origin `Origin`. */
@@ -519,11 +555,25 @@ describe("solo zero-tax, measured rather than inferred", () => {
     const packed = await fetch(`${base}${CREW_HELLO_PATH}`);
     expect(packed.status).toBe(unknown.status);
     expect(packed.headers.get("x-crew-protocol")).toBeNull();
-    // Today's codes, WITH the host's own read credential (ADR 0086): reads need the pairing token,
-    // and a drill that sends none would measure the gate and not the routes.
+    // Today's codes, WITH a credential (ADR 0086): reads need the pairing token, and a drill that
+    // sends none would measure the gate and not the routes. The host's local key reads the snapshot
+    // and the config, and no pane (bridge/local-key.ts); a paired device reads all three.
+    expect((await lead.localApi(`/api/snapshot`)).status).toBe(200);
+    expect((await lead.localApi(`/api/config`)).status).toBe(200);
+    const paneByKey = await lead.localApi(`/api/pane/${encodeURIComponent(lead.paneId)}`);
+    expect(paneByKey.status).toBe(403);
+    expect(asJsonString(parseJsonObject(await paneByKey.text())?.code)).toBe("local.no_text");
     expect((await lead.api(`/api/snapshot`)).status).toBe(200);
     expect((await lead.api(`/api/config`)).status).toBe(200);
     expect((await lead.api(`/api/pane/${encodeURIComponent(lead.paneId)}`)).status).toBe(200);
+  });
+
+  test("the host's local key gets a text-free snapshot: no title, no ask, no held send", async () => {
+    const byKey = parseJsonObject(await (await lead.localApi(`/api/snapshot`)).text());
+    const panes = Array.isArray(byKey?.agents) ? byKey.agents : [];
+    expect(panes.length).toBeGreaterThan(0);
+    const allowed = ["paneId", "kind", "agent", "hasSession", "status", "host", "session", "model", "workspaceLabel", "workspaceNumber", "lastActiveAt"];
+    for (const p of panes) for (const key of Object.keys(parseJsonObject(JSON.stringify(p)) ?? {})) expect(allowed).toContain(key);
   });
 
   test("with no credential every read is 403 but health, and a wrong one is no better", async () => {
@@ -596,6 +646,14 @@ describe("agent views: the write gate, through real requests (lead addition 1)",
   const session = "local/w1:p1";
   const sendBody = JSON.stringify({ id: "view-gate-000001", pane: "w1:p1", text: "hello", view: { trick: "morph", session } });
   const switchBody = JSON.stringify({ trick: "morph", session, on: true });
+  // Tricks as a whole are off by default, and the view service refuses `trick_off` before it looks for the trick. These tests
+  // prove the write gate for an UNKNOWN trick, so the switch is on for the block and back off after it.
+  beforeAll(() => {
+    writeTricksFeature(lead.stateDir, true);
+  });
+  afterAll(() => {
+    writeTricksFeature(lead.stateDir, false);
+  });
   const post = (path: string, body: string, headers: Record<string, string>): Promise<Response> =>
     fetch(`${lead.origin()}${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
 
@@ -642,11 +700,13 @@ describe("agent views: the write gate, through real requests (lead addition 1)",
     expect(line).toMatchObject({ action: "trick.view.refused", device: "drill", detail: { trick: "morph", reason: "no_trick", switch: true, address: expect.stringMatching(/^local\/w1:p1#[a-z0-9]+$/u) } });
   });
 
-  test("the list and a picture take the read gate: no credential is refused, the local credential reads, and an unknown picture is 404", async () => {
+  test("the list and a picture take the read gate: no credential and the local key are refused, a paired device reads, and an unknown picture is 404", async () => {
     expect([401, 403]).toContain((await fetch(`${lead.origin()}/api/trick-views`)).status);
+    expect((await lead.localApi("/api/trick-views")).status).toBe(403);
     expect((await lead.api("/api/trick-views")).status).toBe(200);
     const path = "/api/trick-views/media/vs_aaaaaaaaaaaaaaaa/vm_aaaaaaaaaaaaaaaa";
     expect([401, 403]).toContain((await fetch(`${lead.origin()}${path}`)).status);
+    expect((await lead.localApi(path)).status).toBe(403);
     expect((await lead.api(path)).status).toBe(404);
   });
 });
@@ -857,6 +917,8 @@ describe("the lead speaks for the crew", () => {
   test("a proxied pane read is byte-identical and keeps its ETag and its 304", async () => {
     const peerId = peer.store()!.self.memberId;
     const path = `/api/pane/${encodeURIComponent(peer.paneId)}?host=${peerId}`;
+    // The lead's local key never reads a member's pane: the refusal comes before the forward.
+    expect((await lead.localApi(path)).status).toBe(403);
     const first = await lead.api(path);
     expect(first.status).toBe(200);
     const etag = first.headers.get("etag");
@@ -884,7 +946,8 @@ describe("the lead speaks for the crew", () => {
     // agree — which is what the original bug violated, and what is asserted below in both directions.
     const peerId = peer.store()!.self.memberId;
     const url = `${lead.origin()}/api/pane/${encodeURIComponent(peer.paneId)}?host=${peerId}`;
-    const auth = await lead.localAuth();
+    const { authorization } = await lead.pairingAuth();
+    const auth = { authorization: authorization ?? "" };
     // Read at the WIRE, via `node:http`: `fetch` inflates a gzip body for us and leaves the header
     // on, which is precisely the confusion that hid the original bug — under `fetch` a lying header
     // and an honest one are indistinguishable. `rawGet` decodes nothing.
@@ -2713,7 +2776,7 @@ describe("walky talky in a crew of four, on the real wire", () => {
     const lines = typedFor(wb, id);
     expect(lines).toHaveLength(1);
     const line = lines[0];
-    expect(line).toMatch(new RegExp(`\\[walky-talky ${id}\\] from agent ${paneOf(wa)}#[a-z0-9]{4} \\(claude, `, "u"));
+    expect(line).toMatch(new RegExp(`\\[walky-talky ${id}\\] from agent ${paneOf(wa)}#[a-z0-9]{4} on claude in "`, "u"));
     expect(line).toContain(NUDGE_MARK);
     expect(line).toContain(`collie walky inbox ${id}`);
     expect(line).not.toContain(body);
@@ -2749,8 +2812,8 @@ describe("walky talky in a crew of four, on the real wire", () => {
     expect(lines).toHaveLength(1);
     const line = lines[0];
     // Hardening A: ONE line, the header and the nudge. The body reaches the agent as `collie walky inbox <id>`.
-    expect(line).toMatch(new RegExp(`\\[walky-talky ${id}\\] from agent ${paneOf(wl)}#[a-z0-9]{4} \\(claude, `, "u"));
-    expect(line).toContain(`${NUDGE_MARK} Read it: collie walky inbox ${id}. Reply: collie walky reply ${id} "<text>"`);
+    expect(line).toMatch(new RegExp(`\\[walky-talky ${id}\\] from agent ${paneOf(wl)}#[a-z0-9]{4} on claude in "`, "u"));
+    expect(line.endsWith(`${NUDGE_MARK} Read it: collie walky inbox ${id}`)).toBe(true);
     expect(line).not.toContain(body);
     expect(line).not.toContain("\n");
     expect(JSON.stringify(wa.herdr!.writes)).not.toContain(body);
@@ -3095,8 +3158,8 @@ describe("walky talky in a crew of four, on the real wire", () => {
     await settled(wb, id);
     // The receivers are of the sender's space, so the nudge carries no outside word.
     for (const at of [wl, wb]) {
-      expect(typedFor(at, id)[0]).toContain(`)${NUDGE_MARK}`);
-      expect(typedFor(at, id)[0]).not.toContain(") outside");
+      expect(typedFor(at, id)[0]).toContain(`"${NUDGE_MARK}`);
+      expect(typedFor(at, id)[0]).not.toContain(`" outside`);
     }
     // Not the sender's own pane.
     expect(typedFor(wa, id)).toEqual([]);
@@ -3110,7 +3173,7 @@ describe("walky talky in a crew of four, on the real wire", () => {
     const passed = await postAsMember(wa, { id: "wt_borderpass01", to: paneOf(wb), body: "from another space, said outside", at: Date.now(), space: "elsewhere", outside: true });
     expect(passed).toMatchObject({ status: 200, body: { receipts: [{ id: "wt_borderpass01", target: paneOf(wb), state: "accepted", by: idOf(wb) }] } });
     await settled(wb, "wt_borderpass01");
-    expect(typedFor(wb, "wt_borderpass01")[0]).toContain(`) outside${NUDGE_MARK}`);
+    expect(typedFor(wb, "wt_borderpass01")[0]).toContain(`" outside${NUDGE_MARK}`);
   }, 60_000);
 
   test("the phone reads a member pane's list through the lead, from the member's own log, and replies to a message in it", async () => {
@@ -3157,7 +3220,7 @@ describe("walky talky in a crew of four, on the real wire", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ receipt: { id, target: paneOf(wa), by: idOf(wa), verified: "origin" } });
     await waitFor(async () => typedFor(wa, id).length > 0, 15_000, async () => `A's pane never got the reply; writes: ${JSON.stringify(wa.herdr!.writes)}`);
-    expect(typedFor(wa, id)[0]).toContain(`[walky-talky ${id}] from operator (drill) reply to wt_a2bpane00001`);
+    expect(typedFor(wa, id)[0]).toContain(`[walky-talky ${id}] from operator "drill" reply to wt_a2bpane00001`);
     // …and the member's list, read through the lead again, holds the reply where A's log put it.
     expect(await rowsOf(await listOn(wa))).toEqual(expect.arrayContaining([expect.objectContaining({ id, replyTo: "wt_a2bpane00001" })]));
 

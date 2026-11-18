@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 import { RouteHeader } from "@/components/app-header";
 import { ActionRow } from "@/components/action-sheet-rows";
@@ -19,7 +19,8 @@ import { useArm } from "@/hooks/use-arm";
 import { useHillAnswer } from "@/hooks/use-hill-answer";
 import { useLocale } from "@/hooks/use-locale";
 import { HILL_PRIORITIES, type HillDecision, type HillState } from "@/lib/hill/wire";
-import { answerLine, closedWord, priorityWord } from "@/lib/hill/words";
+import { answeredInSession, answerLine, closedWord, priorityWord } from "@/lib/hill/words";
+import { hillDraft, noteHillDraft } from "@/lib/hill/store";
 import { hostSlot } from "@/lib/hosts";
 import { t, tn } from "@/lib/i18n";
 import { useTricksState } from "@/lib/tricks/store";
@@ -45,10 +46,12 @@ import { cn } from "@/lib/utils";
 /**
  * The header: back to the Dashboard, the Hill's mountain mark, the title, and one line under it that
  * is always there ("3 open · 1 now", or "All clear"), so a count arriving or leaving moves nothing.
+ * `held` is the first list still on its way (routes/hill.tsx): the line keeps its place and says
+ * nothing, because "All clear" would be a claim about a hill nobody has read yet.
  */
-export function HillHeader({ count, nowCount, onBack, off = false }: { count: number; nowCount: number; onBack: () => void; off?: boolean }) {
+export function HillHeader({ count, nowCount, onBack, off = false, held = false }: { count: number; nowCount: number; onBack: () => void; off?: boolean; held?: boolean }) {
   useLocale();
-  const line = off ? t("hill.off.line") : count === 0 ? t("hill.clear") : nowCount > 0 ? `${tn("hill.open", count)} · ${t("hill.now", { count: nowCount })}` : tn("hill.open", count);
+  const line = off ? t("hill.off.line") : held ? "\u00a0" : count === 0 ? t("hill.clear") : nowCount > 0 ? `${tn("hill.open", count)} · ${t("hill.now", { count: nowCount })}` : tn("hill.open", count);
   return (
     <RouteHeader
       width="column"
@@ -100,7 +103,10 @@ const STATE_GLYPH = {
   undeliverable: "error",
 } as const satisfies Record<Exclude<HillState, "open">, IconKey>;
 
-/** One closed decision under Answered: its state glyph, its title, its state in words, and for an answer where it went. */
+/**
+ * One closed decision under Answered: its state glyph, its title, its state in words, and for an answer where it
+ * went. A card the person's own message closed also shows its summary.
+ */
 function ClosedRow({ decision, kept }: { decision: HillDecision; kept: string | undefined }) {
   // The closed list holds closed decisions only (lib/hill/reader.ts); an open one would have no words here.
   if (decision.state === "open") return null;
@@ -116,14 +122,42 @@ function ClosedRow({ decision, kept }: { decision: HillDecision; kept: string | 
       />
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="font-content truncate text-sm font-medium">{decision.title}</span>
+        {/* Closed by the person's own message, it stays until they clear it: the summary says what was asked. */}
+        {answeredInSession(decision) && decision.summary !== "" && (
+          <span data-slot="hill-closed-summary" className="font-content line-clamp-2 text-xs text-muted-foreground">
+            {decision.summary}
+          </span>
+        )}
         <span data-slot="hill-closed-line" className="truncate text-xs text-muted-foreground">
           {line}
         </span>
+        {/* The typed line's write was not confirmed (the bridge's `unconfirmed`): nothing sends it again. */}
+        {decision.state === "answered" && decision.answer?.unconfirmed === true && (
+          <span data-slot="hill-closed-unconfirmed" className="text-xs text-muted-foreground">
+            {t("hill.delivery.mayNotHaveArrived")}
+          </span>
+        )}
         {kept !== undefined && (
           <div className="pt-1.5">
             <KeptWords text={kept} />
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The words of a card the bridge no longer serves (it left the Hill, by a clear or by itself), kept by
+ * this page: the card's title and "Your answer, not delivered" with Copy, until the page is left.
+ */
+function KeptRow({ title, text }: { title: string | undefined; text: string }) {
+  return (
+    <div data-slot="hill-kept-row" className="flex min-w-0 items-start gap-3 px-3.5 py-2.5">
+      <Icon name="error" aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+        {title !== undefined && <span className="font-content truncate text-sm font-medium">{title}</span>}
+        <KeptWords text={text} />
       </div>
     </div>
   );
@@ -266,7 +300,7 @@ function HillClear({ answered }: { answered: number }) {
 /**
  * The Hill switched off (bridge/hill/switch.ts): the bare ridge, nobody on it, the words, and the way
  * back on, right here, because a stale notification or a bookmark is how a person lands on an off Hill.
- * The button is the switch in Settings → Alerts; a device that may not write sees it disabled.
+ * The button is the switch in Settings → Experiments; a device that may not write sees it disabled.
  */
 export function HillOff({ canWrite, busy, onTurnOn }: { canWrite: boolean; busy: boolean; onTurnOn: () => void }) {
   useLocale();
@@ -317,6 +351,8 @@ export function HillView({
   renderCard,
   closedTotal = closed.length,
   clear,
+  keptTitles,
+  listed = true,
 }: {
   open: readonly HillDecision[];
   closed: readonly HillDecision[];
@@ -324,12 +360,29 @@ export function HillView({
   renderCard: (decision: HillDecision) => ReactNode;
   closedTotal?: number;
   clear?: HillClearControl;
+  /** The title of each card in `kept`, for the row of one the bridge no longer serves. */
+  keptTitles?: ReadonlyMap<string, string>;
+  /**
+   * Whether `open` is a list the bridge served. False while the route draws past its bounded wait with no
+   * list yet: the fold's open state is then chosen from the first real list when it lands, never from the
+   * empty one that stood in for it. A view with no such wait leaves it true.
+   */
+  listed?: boolean;
 }) {
   useLocale();
   const [answeredOpen, setAnsweredOpen] = useState(open.length === 0);
+  // The fold starts open on a clear hill. If that first look was the empty stand-in, look again, once, at the real list.
+  const seeded = useRef(listed);
+  useEffect(() => {
+    if (!listed || seeded.current) return;
+    seeded.current = true;
+    setAnsweredOpen(open.length === 0);
+  }, [listed, open.length]);
   const answeredId = useId();
   // The closed list holds closed decisions only (lib/hill/reader.ts); an open one would draw an empty row.
   const closedRows = closed.filter((d) => d.state !== "open");
+  // Kept words whose card is neither open nor served closed any more: a row of their own, after the rest.
+  const keptLeft = [...kept].filter(([id]) => !closedRows.some((d) => d.id === id) && !open.some((d) => d.id === id));
   return (
     <div className="flex flex-col gap-7">
       {/* The open cards and the clear hill take turns in one band: the last card collapses while the
@@ -351,7 +404,7 @@ export function HillView({
           (the group is held while it goes, so the header does not show a count of 0 on the way out).
           A clear that fails puts the rows back, and the group grows back with them. */}
       <PresenceList gap={28}>
-        {closedRows.length === 0 && (clear?.spoken ?? 0) === 0
+        {closedRows.length === 0 && keptLeft.length === 0 && (clear?.spoken ?? 0) === 0
           ? []
           : [
               <section key="answered" data-slot="hill-answered" className="flex flex-col gap-2">
@@ -366,9 +419,10 @@ export function HillView({
                 <Collapse open={answeredOpen}>
                   <ListGroup as="ul" id={answeredId}>
                     <PresenceList itemAs="li">
-                      {closedRows.map((decision) => (
-                        <ClosedRow key={decision.id} decision={decision} kept={kept.get(decision.id)} />
-                      ))}
+                      {[
+                        ...closedRows.map((decision) => <ClosedRow key={decision.id} decision={decision} kept={kept.get(decision.id)} />),
+                        ...keptLeft.map(([id, text]) => <KeptRow key={`kept:${id}`} title={keptTitles?.get(id)} text={text} />),
+                      ]}
                     </PresenceList>
                   </ListGroup>
                 </Collapse>
@@ -383,7 +437,7 @@ export function HillView({
  * A card wired to the bridge: its answer state and its send come from `useHillAnswer`, the machine's
  * tint from the crew roster (none on a solo install), and a trick's icon from the tricks list.
  */
-export function LiveDecisionCard({ decision }: { decision: HillDecision }) {
+export function LiveDecisionCard({ decision, localDecline }: { decision: HillDecision; localDecline?: { intent: string; run: () => void } }) {
   const { state, send } = useHillAnswer(decision.id);
   const { servers } = useCrew();
   const { tricks } = useTricksState();
@@ -396,6 +450,9 @@ export function LiveDecisionCard({ decision }: { decision: HillDecision }) {
       onSend={(intent, text, group) => void send(intent, text, group)}
       hostSlot={hostSlot(servers, from.memberId ?? undefined)}
       trickIcon={trickIcon}
+      initialDraft={hillDraft(decision.id)}
+      onDraft={(text) => noteHillDraft(decision.id, text)}
+      localDecline={localDecline}
     />
   );
 }

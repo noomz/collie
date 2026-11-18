@@ -4,9 +4,11 @@
 
 This page lists every place, part, manifest key, limit and command of a ColliePWA trick, and it is complete. It is generated from the code, so it cannot drift. It is the one list: other pages link here and do not repeat its tables.
 
+Tricks are experimental. They may change, lose settings, or be withdrawn in a patch release. They are off until you switch them on at the top of Settings → Tricks, or with `collie tricks on`.
+
 ## Places
 
-A place is a spot on the phone where a trick can show (a surface). A program trick, a program on your machine that prints parts, draws in the first five. An agent view, one screen that the session's own agent draws, is the sixth.
+A place is a spot on the phone where a trick can show (a surface). A program trick, a program on your machine that prints parts, draws in the first six. An agent view, one screen that the session's own agent draws, is the seventh.
 
 | Place | Name | Where it shows | Drawn by |
 | --- | --- | --- | --- |
@@ -15,6 +17,7 @@ A place is a spot on the phone where a trick can show (a surface). A program tri
 | `dashboard` | Dashboard tile | A round tile in the strip at the top of the Dashboard. The strip is hidden while no trick has a tile. | A program |
 | `status` | Status chip | One chip in the status line above the Belt, after Collie's own items. | A program |
 | `tabbar` | Bottom bar item | An item in the Dashboard's bottom bar, after the Hill. | A program |
+| `menu` | Session settings rows | Rows in a session's settings (the sheet of the session's ⋮ button), in a group of the trick's own after Collie's rows and Close, under the heading "From the trick", then the trick's name. Agent sessions only. Adds rows to a session's settings. | A program |
 | `agent-view` | Agent view | A view of one agent session, beside Terminal and Chat. The session's own agent draws it, and the person switches it on per session. | A session's agent |
 
 ### `belt`
@@ -27,10 +30,11 @@ A place is a spot on the phone where a trick can show (a surface). A program tri
 
 | Limit | Value |
 | --- | --- |
-| Parts of this place per trick | one |
+| Parts of this place per trick | one unbound, and up to 8 bound ones with `sessions`. No session is named by two parts |
 | `label`, the face word | at most 12 characters |
 | `badge` | a count from 0 to 9999 as text, or "" for a dot |
 | A mark needs | at least one of `icon`, `label` and `badge` |
+| `sessions`, contract 2 | 1 to 8 of the facts' session ids, agent sessions only. The part shows only in those sessions, in place of the trick's unbound part of this place there. Left out, the part is unbound |
 | One part, as compact JSON | at most 16 KiB |
 
 A program prints:
@@ -46,6 +50,38 @@ A program prints:
         "icon": "check",
         "label": "23/34",
         "tone": "ok",
+        "intent": "open"
+      }
+    }
+  ]
+}
+```
+
+A program prints:
+
+```json
+{
+  "v": 2,
+  "parts": [
+    {
+      "at": "belt",
+      "id": "legs",
+      "mark": {
+        "icon": "check",
+        "label": "23/34",
+        "tone": "ok"
+      }
+    },
+    {
+      "at": "belt",
+      "id": "legs-here",
+      "sessions": [
+        "lodge:w1:2"
+      ],
+      "mark": {
+        "icon": "flask",
+        "label": "2 red",
+        "tone": "danger",
         "intent": "open"
       }
     }
@@ -221,6 +257,94 @@ A program prints:
 }
 ```
 
+### `menu`
+
+**Where.** Rows in a session's settings (the sheet of the session's ⋮ button), in a group of the trick's own after Collie's rows and Close, under the heading "From the trick", then the trick's name. Agent sessions only. Adds rows to a session's settings.
+
+**Shows.** Rows: a `button` or a `switch`, each with a `label`, an `icon` and an `intent`. A switch shows the `on` of the last document and never flips before the program answers.
+
+**A tap.** A tap runs it and tells it which session. Collie gives it no way to type there. A button sends its intent; a switch sends its intent with the state asked for as `value`, "on" or "off". With `confirm` a button arms on the first tap and shows its whole label.
+
+| Limit | Value |
+| --- | --- |
+| Contract | 2 |
+| Rows | 1 to 6 in a part. Each `id` and each `intent` once |
+| A row | `id`, `kind` (`button` or `switch`), `label`, `intent`, and optionally `icon`, `disabled`, `on` (required on a switch) and `confirm` (a button only). Nothing else |
+| `label` | 1 to 24 characters, refused when longer, never cut. No hidden character. It may not read as one of the sheet's own rows in any language Collie speaks, hold the word `Collie`, `WalkyTalky`, `Hill`, `view`, or start with `Allow`, `Approve`, `Deny`, `Grant`, `Trust`, `Yes`, `Always`, or with a word of the permission card's buttons in any language Collie speaks. Look-alike letters count as the letters they pass for: `C0llie` is `Collie` |
+| Parts of this place per trick | one unbound, for every agent session of this machine, and up to 8 bound ones with `sessions`, the only way rows show on a crew member's session. No session is named by two parts |
+| `sessions`, contract 2 | 1 to 8 of the facts' session ids, agent sessions only. The part shows only in those sessions, in place of the trick's unbound part of this place there. Left out, the part is unbound |
+| Rows in one sheet | 12 of every trick together. A trick's group is shown whole or left out whole, in the order of the trick ids, and the sheet says how many tricks it left out |
+| One part, as compact JSON | at most 16 KiB |
+
+A program prints:
+
+```json
+{
+  "v": 2,
+  "parts": [
+    {
+      "at": "menu",
+      "id": "ci",
+      "rows": [
+        {
+          "id": "rerun",
+          "kind": "button",
+          "label": "Rerun CI",
+          "icon": "refresh",
+          "intent": "rerun",
+          "confirm": true
+        },
+        {
+          "id": "watch",
+          "kind": "switch",
+          "label": "Watch branch",
+          "icon": "flag",
+          "intent": "watch",
+          "on": true
+        }
+      ]
+    }
+  ]
+}
+```
+
+In `trick.toml`:
+
+```toml
+id = "ci"
+name = "CI"
+run = "program.ts"
+contract = 2
+places = ["menu"]
+```
+
+A program prints:
+
+```json
+{
+  "v": 2,
+  "parts": [
+    {
+      "at": "menu",
+      "id": "ci-workshop",
+      "sessions": [
+        "m_workshop:w3:1"
+      ],
+      "rows": [
+        {
+          "id": "deploy",
+          "kind": "button",
+          "label": "Deploy here",
+          "icon": "upload",
+          "intent": "deploy",
+          "confirm": true
+        }
+      ]
+    }
+  ]
+}
+```
+
 ### `agent-view`
 
 **Where.** A view of one agent session, beside Terminal and Chat. The session's own agent draws it, and the person switches it on per session.
@@ -285,7 +409,7 @@ The agent passes `show` this file:
 
 ## The Hill
 
-A page of Decisions: questions that a program or an agent asks the person, each answered with one tap. It is built in. A trick does not list it in `places`. Settings → Tricks shows it as the first row, tagged "Built in", with its one switch.
+A page of Decisions: questions that a program or an agent asks the person, each answered with one tap. It ships with Collie as an experiment, off until the person switches it on in Settings → Experiments. A trick does not list it in `places`.
 
 **From a program.** A program lists Decisions in the `decisions` key of its output (the helper's `t.decide`). The list is declarative: after each run that succeeded, Collie makes the Hill agree with it, as [The list is the truth](#the-list-is-the-truth) says below. A document lists at most 20.
 
@@ -304,7 +428,7 @@ A Decision a program lists has these keys:
 | `priority` | word | no | one of `now`, `today`, `later`. Default `today` | A request, not a fact. Only `now` sends a notification, and one sender holds at most 3 open `now` Decisions. |
 | `text` | word | no | one of `none`, `optional`, `required`. Default `optional` | Whether the person may, must, or may not add words to the answer. `none` needs at least one option. |
 | `about` | session id | no | an `id` from the facts' sessions, `memberId:paneId` | The session the card is about. The card opens its Chat. |
-| `replyTo` | session id | no | an `id` from the facts' sessions | The session that gets the person's words, as the person's own WalkyTalky message. |
+| `replyTo` | session id | no | an `id` from the facts' sessions. Only for a trick whose `trick.toml` says `decides = "reply"` | The session that gets the person's words, as the person's own WalkyTalky message. Without `decides = "reply"` the Decision is refused. |
 | `media` | list | no | at most 4; each `file` (a PNG, JPEG or WebP in the trick's folder, 2 MiB at most) and optionally `caption` (at most 80 characters) | Pictures on the card. |
 | `links` | list | no | at most 5; each `label` (at most 40) and `href` (an https or http address, at most 500 characters) | Web pages that give more. |
 | `expiresAt` | instant | no | epoch milliseconds. Left out, 14 days; never more than 30 days | When the Decision closes by itself, as expired. |
@@ -380,6 +504,7 @@ After each run that succeeded, Collie makes the Hill agree with the list of `dec
 | A document with no `decisions` key | Changes nothing. |
 | `decisions` is `[]` | Withdraws every open card of the trick. |
 | A Decision the parser or the Hill refuses, or that names a session that is not there | Changes nothing for its key: the version on the Hill stays. It shows as a refusal. |
+| A Decision with `replyTo` from a trick whose `trick.toml` does not say `decides = "reply"` | Refused with "This trick did not say that its Decisions reply to a session." An open card of its key is withdrawn, so no answer reaches a session. |
 | A failed or timed-out run | Changes nothing. |
 | The trick switched off or removed | Every open card of the trick is withdrawn at once, "the trick is off". |
 | The Hill switched off | No post, replace or withdraw happens, and the trick still runs. Its row says its Decisions are not shown. |
@@ -1125,17 +1250,21 @@ These are all the keys of `trick.toml`. At the same contract, any other key is r
 | `name` | text | yes | at most 40 characters | 1 | The name a person reads on the row. |
 | `run` | text | yes, unless the trick is only an agent view | at most 1024 characters | 1 | What Collie runs: a TypeScript file in the folder ("program.ts"), or a shell command line. An agent view alone has none. |
 | `every` | duration | no | 5s to 24h, one whole number and `s`, `m` or `h`, such as `30s` or `5m` | 1 | How often it runs on its timer. Left out, it runs at start and on taps only. |
-| `watch` | list of paths | no | at most 8 paths of at most 1024 characters, each an absolute path, or a path under the home folder written with a leading tilde | 1 | Kept for a later Collie. This one leaves it out with a note. Leave it out. |
-| `on` | list of words | no | `session.status`, `turn.end`, `ask.open` | 1 | Kept for a later Collie. This one leaves it out with a note. Leave it out. |
+| `watch` | list of paths | no | at most 8 paths of at most 256 characters, each an absolute path, or a path under the home folder written with a leading tilde | 1 | Run when one of these files changes. A right: the card names the paths. See [When a trick reacts](#when-a-trick-reacts). |
+| `on` | list of words | no | `session.status`, `turn.end`, `ask.open` | 1 | Run when a session of an agent changes in one of these ways. A right: the card says it. See [When a trick reacts](#when-a-trick-reacts). |
 | `mode` | word | no | `once` or `serve`. Default `once` | 1 | `once` runs once per trigger and prints one document. `serve` is kept for a later Collie. |
-| `contract` | whole number | no | 1 to 999. Default 1. This Collie speaks 1 to 2 | 1 | The contract the trick is written for. Write 2 to read files with `inputs` or to add an agent view. A higher number than this Collie knows is refused with one line. |
+| `contract` | whole number | no | 1 to 999. Default 1. This Collie speaks 1 to 3 | 1 | The contract the trick is written for. Write 2 to read files with `inputs` or to add an agent view, 3 to keep settings with `[[field]]` or to read Collie with `access`. A higher number than this Collie knows is refused with one line. |
 | `icon` | word | no | one of the icon words in Shared values. Default `plug` | 1 | The trick's icon. `collie trick check` names a wrong one. |
-| `places` | list of words | yes | 1 to 16 of `belt`, `session`, `dashboard`, `status`, `tabbar`, `agent-view`. Each once | 1 | Where its parts draw. Each place a part uses must be listed. `agent-view` adds an agent view and needs contract 2. |
+| `places` | list of words | yes | 1 to 16 of `belt`, `session`, `dashboard`, `status`, `tabbar`, `menu`, `agent-view`. Each once | 1 | Where its parts draw. Each place a part uses must be listed. `agent-view` adds an agent view and needs contract 2. |
 | `env` | list of names | no | at most 32 names of at most 64 characters: letters, digits and `_`, not starting with a digit | 1 | Environment names the program gets beyond the base list, such as `GH_TOKEN`. The person sees each one. |
 | `inputs` | list of globs | no | at most 8 globs of at most 256 characters and 6 steps, relative to a session's folder | 2 | Files the program reads from each agent session's folder. They are untrusted data: show them, never run them. |
 | `description` | text | no | at most 140 characters, plain text | 1 | One plain line that says what the trick does. Settings shows it under the name. |
 | `about` | text | no | at most 1200 characters, plain text, a blank line splits paragraphs | 1 | The text of the About sheet. |
+| `version` | text | no | 1 to 24 characters: letters, digits, `.`, `+` and `-`, such as `1.2.0` | 1 | The trick's own version. The About sheet shows it. Collie never compares it and reads no tag. |
 | `rules` | file name | yes, with `agent-view`; refused without it | a file in the trick's folder of at most 64 characters ending in `.md`, such as `rules.md` | 2 | The instructions the agent of a session reads. The person reads them whole before they switch the trick on. |
+| `decides` | word | no | `reply`. Refused on a trick that is only an agent view | 1 | Whether its Decisions answer into a session. `reply` lets a Decision name `replyTo`, and the person's answer is typed into that session as their own message. Without it, a Decision with `replyTo` is refused. It is a right: a version that adds it asks again. |
+| `field` | list of tables | no | at most 12 `[[field]]` tables. Each has `key` (spelled like a trick id, each once), `kind` (`text`, `choice`, `switch` or `number`), `label` (at most 40 characters) and may have `hint` (at most 120), `default` and `required`. A `choice` lists 2 to 8 `options` of at most 40 characters; a `number` names whole `min` and `max` within 999999999 either way; a `text` value is one line of at most 200 characters; a `switch` is never `required` | 3 | Settings the person keeps for the trick, set in its About sheet on the phone. The program reads them in its facts as `values`. A value is the person's data and untrusted for the program: show it, never run it. A setting is never a secret: a key comes through `env`. A new or changed field is a new version and asks again; a changed value does not ask, and runs the trick once. |
+| `access` | word | no | `none`, `see` or `read`. Default `none` | 3 | How much of Collie's local API the trick reads through `t.api`. `see` reads lists and states, `read` adds the text of a screen. A right: a version that raises it asks again. See [Reading Collie through the local API](#reading-collie-through-the-local-api). Experimental. |
 
 In `trick.toml`:
 
@@ -1167,6 +1296,8 @@ Collie writes the facts on stdin. The program ignores a field it does not know, 
 | `sessions` | always | The agent and shell sessions, at most 256. On a crew's lead they are every member's, the lead's own first. |
 | `spaces` | always | Each space as `name`, `folder` (`folder` is left out when there is none), at most 64. |
 | `sessionsOmitted` | only when some are left out | How many sessions the caps left out. Only a crew's lead counts them: a solo machine past the cap leaves the rest out with no count. Absent when none. |
+| `values` | contract 3, a trick with `[[field]]` | Each field's value by its key: the person's own, else the field's `default`. A field with neither is left out. A value is the person's data and untrusted for the program: show it, never run it. |
+| `api` | only with `access`, while the local API stands | `socket`, `access`, `token`: the path of Collie's local API socket, the level `access` declares (`see` or `read`), and this run's token. `t.api` dials the socket and names the token. The token dies when the run ends. Nothing of it is in the environment, and your program must not print, log or save the token. Absent when the trick declares no `access`, and when the socket does not stand. |
 
 A session in `sessions` has these fields:
 
@@ -1194,10 +1325,12 @@ The `trigger` tells why the run happened:
 | `start` | The first run after the trick loads, is switched on, a new version is approved or its `config.toml` changes. | none |
 | `timer` | Every `every` after the last run, while a phone has looked in the last 5 minutes. A trick with no `every` gets none. | none |
 | `tap` | A person tapped a control of the trick, or answered one of its Decisions. | `rid`, `node`, `intent`, `value`, `from`, `seen` |
-
-The kinds `watch` and `event` are in the facts schema for a later Collie. This Collie never sends them.
+| `watch` | A file of the manifest's `watch` changed. `path` is the path as the manifest wrote it, and `count` is how many files changed in the same burst. | `path`, `count` |
+| `event` | An event of the manifest's `on` reached the trick. `session` is the `id` of the newest event's session, and `count` is how many events were folded into this run. | `event`, `session`, `count` |
 
 A tap on a control of the trick's own part has `node` set to the part's id (`belt` for the Belt mark). Its `intent` is the control's, its `value` the control's one fixed text, and its `from` the session open on the phone, as `{ "session": ... }`, when there is one.
+
+A tap on a row in a session's settings (contract 2) always has `from`: the session whose sheet it was. For a bound part, a belt mark or a menu part with `sessions`, it is one of the part's sessions, at the pane it was bound to; Collie refuses the rest before the program runs.
 
 An answer to a Decision is a tap too: its `node` is `hill/<key>`, and its `seen` is the hash of the version the person saw. See [The Hill](#the-hill).
 
@@ -1225,7 +1358,7 @@ The program prints one JSON document on stdout and exits 0:
 
 | Key | Needed | What it is |
 | --- | --- | --- |
-| `v` | yes | The contract number of the document: a whole number from 1 to 2, this Collie's own. The helper prints the contract of the facts. |
+| `v` | yes | The contract number of the document: a whole number from 1 to 3, this Collie's own. The helper prints the contract of the facts. |
 | `parts` | yes | The parts, at most 24, each at most 16 KiB. `[]` is allowed. See [Places](#places). |
 | `asOf` | no | When the data was true, as an ISO 8601 time with a zone, such as `2026-11-08T09:41:00Z`. Give it when the data is older than the run. |
 | `fresh` | no | How long the parts stay fresh: 5s to 24h, one whole number and `s`, `m` or `h`, such as `90s`. Left out, 3 times `every`, at least 1 minute, or 10 minutes for a trick with no timer, and never more than 24h. Past it, the phone draws every tone as unknown. |
@@ -1242,7 +1375,7 @@ Collie checks strictly what a person or an agent writes: `trick.toml`, `collie h
 | A node of a kind this Collie does not know | Left out, with a `dropped` note. The rest of the view draws. |
 | A part in a place this Collie does not know | Left out whole, with a `dropped` note. The other parts draw. |
 | A key or an attribute this Collie does not know, inside a part, at contract 1 | Ignored, with an `ignored` note. A node with only such attributes draws as if it had none. |
-| A key or an attribute this Collie does not know, at any depth of a part, at contract 2 | That part is refused alone, with an `unknown-key` refusal that names the key and ends: "A contract 2 trick uses only the keys this Collie knows, so the part is left out; the other parts draw." Collie keeps no last good version of it. |
+| A key or an attribute this Collie does not know, at any depth of a part, at contract 2 or newer | That part is refused alone, with an `unknown-key` refusal that names the key and ends: "A contract 2 trick uses only the keys this Collie knows, so the part is left out; the other parts draw." Collie keeps no last good version of it. |
 | A key this Collie does not know at the top of the document, beside `v`, `parts`, `asOf`, `fresh` and `decisions` | Ignored, with an `ignored` note, at every contract. Every part draws. A key that changes how a part draws or what a tap does goes in the part, never at the top. |
 | A bad value of a known field | That part is refused alone, and the other parts draw. The last good version of the part stays on the phone, marked old. |
 | A bad Decision | That Decision is refused alone. Its open card stays as it is. |
@@ -1257,7 +1390,8 @@ Collie checks strictly what a person or an agent writes: `trick.toml`, `collie h
 | --- | --- |
 | `t.facts`, `t.config`, `t.tap` | The facts, `config.toml` parsed (`{}` when there is none), and the tap that started the run or `null`. A tap has `rid`, `node`, `intent`, `value`, `decision` (the key of the Decision it answers, or `null`), `text`, `from` and `seen`. |
 | `t.status({ text, icon?, tone? })` | The chip in the status line. `text` is at most 12 characters. |
-| `t.belt({ label, icon?, tone?, badge?, intent? })` | The mark at the end of the Belt. |
+| `t.belt({ label, icon?, tone?, badge?, intent?, sessions?, id? })` | The mark at the end of the Belt. With `sessions` (contract 2) it shows only in those sessions; a bound mark without an `id` is numbered `belt-1`, `belt-2`. |
+| `t.menu(rows, { sessions?, id? })` | Rows in a session's settings (contract 2): buttons `{ kind: "button", id, label, intent, icon?, confirm? }` and switches `{ kind: "switch", id, label, intent, on, icon? }`. The phone shows a switch's `on` from your next document, never a guess. |
 | `t.dashboard(item)`, `t.tabbar(item)` | The Dashboard tile and the bottom bar item: `{ label, icon?, badge?, tone? }`. |
 | `t.session({ id?, name?, icon?, tone?, subtitle?, badge?, progress?, actions?, view })` | The trick's own Page. Keep the default id `main`. |
 | `v.card`, `v.list`, `v.row`, and one builder for each other kind in Parts | Build a view. `v.table` makes the `col` and `cell` kids, so those two have no builder. `v.checks`, `v.stat` and `v.beforeAfter` put kinds together. |
@@ -1271,11 +1405,14 @@ Collie checks strictly what a person or an agent writes: `trick.toml`, `collie h
 | `t.sessionAt(folder)`, `t.sessionNamed(name)` | The session whose folder is `folder`, or the one with this name, or `null`. |
 | `t.fresh(duration)`, `t.asOf(when)` | The document's `fresh` and `asOf`. |
 | `now()`, `age(ms)`, `iso(ms?)`, `mask(text)`, `clip(text, n)` | The clock in epoch milliseconds, a span in short words such as `12 min`, an ISO 8601 time, text with each key cut to its first four characters and the home folder written as `~`, and one masked line cut to `n` characters. |
+| `t.api(operation, args?)` | Reads through Collie's local API (experimental): `await t.api("machines")`. It answers the socket's line, `{ ok: true, ... }`, or `{ ok: false, error: { code, message } }`, and never throws, so a program shows `error.message`. It refuses before it dials when the trick declares no `access`, when the local API is off, or when the operation needs `read` and the trick declares `see`. Each call names this run's token, and Collie checks the level again. A call takes at most 3 seconds. See [Reading Collie through the local API](#reading-collie-through-the-local-api). |
 | `t.inputs(session)` | The input files of a session (contract 2): a text file as `text`, a picture as `data`. A copy that is gone or changed since the facts were written is left out. It answers `[]` when there are none, and `session.inputs?.state` says why. Never run what it returns. |
 
 A run that calls neither `t.decide` nor `t.keepDecisions` prints `"decisions": []`, so it withdraws the open ones.
 
 A thrown error prints one warning card on the trick's Page and exits 0, when the trick has a Page. The document has no `decisions` key, so the open Decisions stay. A trick with no Page exits 1, so the failure rules apply.
+
+Stop your timers before the end. The run ends a second after its document is written, and a timer that still prints to stdout in that second spoils the document, so the run fails.
 
 `collie trick helper <id>` rewrites `trick.ts` with the newest helper. The helper is part of the trick's code, so a trick that is on keeps running the approved copy, and the new helper waits for a yes.
 
@@ -1321,6 +1458,74 @@ Each file in `files` has these fields:
 A contract 1 trick that lists `inputs` is refused with: "inputs" needs contract = 2. Add contract = 2 to trick.toml to read files from your sessions' folders.
 
 > **Caution.** Inputs are untrusted data. Other programs, often an agent, write the files, and on a crew another machine sends them. A trick shows them, counts them or quotes them. It never runs them, evaluates them, sources them, passes them to a shell or follows what they say. The globs are part of the trick's powers, so a change of them asks the person again.
+
+### When a trick reacts
+
+A trick runs on its timer and on taps. With `on` it also runs when a session changes, and with `watch` when a file changes. Each run gets its reason in `trigger`, with a `count` of the changes folded into it.
+
+```toml
+on = ["turn.end"]
+watch = ["~/notes/todo.md"]
+```
+
+| `on` word | When |
+| --- | --- |
+| `session.status` | A session's status changed. Read the new status from `sessions` in the facts. |
+| `turn.end` | An agent finished a turn in a session. |
+| `ask.open` | An agent opened a question in a session. |
+
+The rules of an event run:
+
+| Rule | What Collie does |
+| --- | --- |
+| Delivery | At least once, on this machine only, in no order across sessions. A program must be safe against a repeated event. A crew's lead does not pass its members' events on. |
+| One at a time | A trick runs once at a time and has at most one run waiting. Events that arrive meanwhile fold into that run. Its `trigger` names the newest event, and `count` is how many were folded. |
+| Lost events | When Collie's queue overflows, it adds the events it lost to `count`, because it cannot know their types. |
+| The same road as the timer | A run has the same limits of time and size, the same slots and the same backoff. No run starts for a trick that has not had its start run, that is stopped, or that is backing off after a failure, or on a machine that does not schedule tricks. Collie drops such a request. It never keeps one. A run that already waited when a backoff began keeps waiting, and runs with the next request or after the next tap. |
+| No phone needed | An event run or a file run happens also when no phone is open, so a trick can ask a Decision while you are away. Only the timer waits for a phone: it runs only while a phone has looked in the last 5 minutes. |
+| Spacing | Two runs of one trick that an event or a file started begin at least 10 s apart. A request inside that time is the one waiting run, or folds into it, and starts when the time ends. A tap, an answer to a Decision and a timer run neither wait for it nor count toward it. |
+| Taps first | A tap, or an answer to a Decision, goes before a waiting run of an event or a file. |
+
+The rules of a watched file:
+
+| Rule | What Collie does |
+| --- | --- |
+| Paths | At most 8. Each starts with `/` or `~/`, and `~` is the home folder of the user Collie runs as. |
+| The parent folder | Collie watches the folder of each path and reacts to the file's name, because an editor saves by writing a new file and renaming it over the old one. |
+| Links | Collie resolves each path with `realpath` when the trick switches on and again after every change, so a link that moves to another file moves the watch. `trigger.path` stays as the manifest wrote it. The card shows each path as written, so a program of yours can point a link elsewhere after your yes: that gives the trick a run, never the file's contents. |
+| A file that is not there yet | It fires when it appears, if its folder exists. If the folder is missing too, Collie checks that path every 5 s. |
+| Waiting for a burst | A change waits 300 ms after the last change of a burst, and at most 2 s after the first, so a steady stream fires at least that often. One run waits, never a queue. |
+| A trick's own writes | Collie records each file's time, size and inode when a run of the trick ends. A change starts a run only when the file differs from that record, so a trick that writes the file it watches does not loop. A write by someone else that lands during a run is absorbed too: the next change after the run starts the next one. |
+| When the system cannot watch | Out of watches, too many open files or a folder it refuses: Collie checks the files' times and presence every 5 s instead, and the trick's row says so. |
+| The same road as events | The same gates, limits and backoff as an event run. |
+
+> **Note.** `on` and `watch` are rights. The card says it "runs when a session changes state" or "runs when these files change", with the paths. A new version that adds one, or names another event or path, asks for a new yes.
+
+### Reading Collie through the local API
+
+A trick reads live facts of Collie (its machines, its sessions, your usage, the Hill) through Collie's local API, with no list of surfaces in its manifest. Your yes to the trick is the grant. The manifest says how much with `access`, which needs `contract = 3`, and the program calls `t.api`. Each run gets its own token in its facts, and the local API answers only a connection that names a live one, at the level the trick declares.
+
+```toml
+contract = 3
+access = "see"
+```
+
+```ts
+const machines = await t.api("machines");
+if (!machines.ok) throw new Error(machines.error.message);
+```
+
+| `access` | What the trick gets | Operations |
+| --- | --- | --- |
+| `none` | The default, also when `access` is left out. No `api` in the facts, and `t.api` answers an error. | none |
+| `see` | Lists and states: your machines, your sessions and their states, your usage and the Hill. Never the text of a screen. One field is text an agent wrote: the title of each card in `hill.list`. | `hello`, `sessions`, `brief`, `accounts`, `hill.list`, `events`, `machines` |
+| `read` | Everything in `see`, and the text of a session's screen, masked as the phone's own read is. | all of `see`, and `read` |
+
+> **Experimental.** `access` and `t.api` are new, and their words may still change.
+
+> **Note.** The run token keeps a program that only finds the socket out of this socket, and nothing more. A program that runs as you can still read a pane through the multiplexer itself, and can read another program's memory. It can also read Collie's local secret file and use it on the bridge's loopback address, which still answers the routes that return a session's text. Collie does not stop that. A trick's own program runs as you too. Collie's text search of the code flags a trick that names the socket, reads its path or token from the facts, opens a socket of its own (`createConnection`, `Bun.connect`, a `unix:` option) or runs `collie api` itself, and the card shows that line like the other findings. Such a trick would have to send its own token from its own facts.
+
+The socket stands while tricks are switched on, on a machine where tricks run. Where it does not (a crew peer, a deputy, Windows), the facts carry no `api`, `t.api` answers `Collie's local API is off here.`, and the trick's row says so once.
 
 ## Limits
 
@@ -1370,6 +1575,14 @@ Tricks do not run on a Windows machine yet. [Collie on Windows](windows.md) says
 | A progress | `max` 1 to 12 |
 | A button's or an action's `value` | at most 1024 bytes |
 
+### Bound parts, contract 2
+
+| Limit | Value |
+| --- | --- |
+| Sessions one part names | 1 to 8, agent sessions of this run's facts. Another id is dropped with a note |
+| Bound parts of one place per trick | 8, beside one unbound part |
+| A part with no session left | not kept, with a note. It never shows in every session instead |
+
 ### Facts
 
 | Limit | Value |
@@ -1387,6 +1600,16 @@ Tricks do not run on a Windows machine yet. [Collie on Windows](windows.md) says
 | A picture | at most 2 MiB |
 | One answer of one machine | at most 8 MiB |
 | One run | at most 24 MiB |
+
+### Fields, contract 3
+
+| Limit | Value |
+| --- | --- |
+| Fields of one trick | at most 12 |
+| A label, a hint | at most 40 and 120 characters |
+| A text value | one line of at most 200 characters, no control character |
+| A choice | 2 to 8 options of at most 40 characters |
+| A number | a whole number from `min` to `max`, each within 999999999 either way |
 
 ### The rules file
 
@@ -1407,6 +1630,17 @@ Tricks do not run on a Windows machine yet. [Collie on Windows](windows.md) says
 | Per hour | 6 per session, 12 per machine |
 | The card closes by itself after | 3 days |
 
+### A repository's index, `collie-tricks.json`
+
+| Limit | Value |
+| --- | --- |
+| The file | at most 32 KiB of JSON at the top of the repository, `contract` 1, no other key |
+| Tricks listed | at most 50, each `folder`, `name` and `about` and nothing else |
+| `folder` | spelled as a trick id: one folder at the top, no `/`, no `..`, no leading dot |
+| `name`, `about` | one line each of at most 40 and 160 characters, no control or invisible character |
+| Hosts the phone reads from | `github.com`, `gitlab.com`, `codeberg.org`, https, written exactly. Any other host: `collie trick add <url>` at the terminal |
+| A read or an add on the phone | one at a time per machine, at most 2 minutes, the size cap of the official list, no redirect, no git config of yours |
+
 ### Card groups
 
 | Limit | Value |
@@ -1423,7 +1657,7 @@ Every verb of `collie trick`.
 | Verb | Usage | What it does |
 | --- | --- | --- |
 | `list` | `collie trick list [--json] [--official]` | Lists every trick folder with its switch, state, last run and last error. |
-| `add` | `collie trick add [<name> \| <https-url>[//<folder>][#<ref>]]` | Copies a trick from a git repository into the tricks folder, off. With no source it lists the official tricks and adds nothing. |
+| `add` | `collie trick add [<name> \| <https-url>[//<folder>][#<ref>]]` | Copies a trick from a git repository into the tricks folder, off. With no source, or a repository's `collie-tricks.json` and no `//<folder>`, it lists and adds nothing. |
 | `update` | `collie trick update <id> [--ref <branch\|tag\|commit>] [--dry-run]` | Fetches an added trick again and replaces its code, keeping `config.toml`. |
 | `remove` | `collie trick remove <id>` | Deletes a trick that is off, with its state folder. |
 | `on` | `collie trick on <id>` | Switches a trick on, approving its code as it is now. It refuses inside an agent's pane. |
@@ -1431,11 +1665,11 @@ Every verb of `collie trick`.
 | `auto` | `collie trick auto <id> on\|off` | Takes new versions without asking while the powers do not change. A trick with rules never takes one. |
 | `check` | `collie trick check [--run] [--json] <folder>` | Checks a trick folder: its manifest, places and command lines. |
 | `dev` | `collie trick dev <folder\|id> [--tap <intent> [--text <words>] [--node <node>] [--rid <uuid>]] [--facts <file.json>] [--state <dir>] [--inputs <dir>] [--json] [--watch]` | Runs a trick once with fixture facts and prints what the phone would get. It never talks to the bridge. |
-| `init` | `collie trick init [--sh] <id>` | Makes a new trick folder with a program and the helper. |
+| `init` | `collie trick init [--sh] [--dir <folder>] <id>` | Makes a new trick folder with a program and the helper. In an agent's pane the folder is a draft in the working folder, outside the tricks folder. |
 | `helper` | `collie trick helper <id\|folder>` | Rewrites a trick's `trick.ts` with the helper this Collie carries. |
 | `skill` | `collie trick skill [<id>]` | Prints what a trick that is on asks of an agent. With no id, prints how to write a trick. |
 | `guide` | `collie trick guide [--json]` | Prints how to write a trick and hand it to the person, as plain text for an agent. |
-| `propose` | `collie trick propose <folder> [--request-id <uuid>] [--json]` | Hands a trick folder to the person as a card on the lead's Hill. Nothing runs before their yes. |
+| `propose` | `collie trick propose <folder> [--request-id <uuid>] [--json]` | Hands a trick folder to the person as a card of Collie's own on the lead: in the proposing session on the phone and in Settings, Tricks, and on the Hill while it is on. Nothing runs before their yes. |
 | `view` | `collie trick view <trick> <verb> [args]` | Runs one verb of an agent view, from the agent's pane. The verbs are the `trick view` commands below. |
 
 | Verb | Flag | What it does |
@@ -1456,9 +1690,26 @@ Every verb of `collie trick`.
 | `dev` | `--json` | Print one JSON document instead of text. |
 | `dev` | `--watch` | Run again when a file in the folder changes. |
 | `init` | `--sh` | Write a shell program instead of a TypeScript one. |
+| `init` | `--dir` | Make `<folder>/<id>` as a draft, outside the tricks folder, instead of the tricks folder. |
 | `guide` | `--json` | Print one JSON document instead of text. |
 | `propose` | `--request-id` | The proposal's request id, a UUID. The same sender, id and files get the same answer. |
 | `propose` | `--json` | Print one JSON document instead of text. |
+
+### `collie tricks`
+
+The switch for tricks as a whole on this machine. Tricks are an experiment and off until switched on.
+
+| Verb | Usage | What it does |
+| --- | --- | --- |
+| `on` | `collie tricks on [--json]` | Switches tricks on for this machine. They are an experiment and off until switched on. Each trick still has its own switch. |
+| `off` | `collie tricks off [--json]` | Switches tricks off for this machine: no trick runs or draws. Each trick keeps its own switch. |
+| `status` | `collie tricks status [--json]` | Says whether tricks are on for this machine. |
+
+| Verb | Flag | What it does |
+| --- | --- | --- |
+| `on` | `--json` | Print one JSON document instead of text. |
+| `off` | `--json` | Print one JSON document instead of text. |
+| `status` | `--json` | Print one JSON document instead of text. |
 
 ### `collie trick view`
 
@@ -1558,8 +1809,5 @@ A trick that names one of these still runs. This Collie leaves the word out, say
 | Kind | Word | What it will be |
 | --- | --- | --- |
 | place | `header.line` | A line in the header. |
-| place | `menu` | An entry in a menu, as `menu:<match>`. |
 | place | `settings` | A part of the Settings screen. |
-| manifest key | `watch` | Run again when a watched file changes (manifest key `watch`). |
-| manifest key | `on` | Run on an event, such as `session.status` (manifest key `on`). |
 | manifest key | `serve` | Keep the program running between triggers (manifest `mode = "serve"`). |

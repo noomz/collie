@@ -26,6 +26,12 @@ import {
   ACTION_ICONS,
   BUTTON_LABEL_MAX,
   COUNT_MAX,
+  DECIDES_REPLY_LINE,
+  ACCESS_CONTRACT,
+  ACCESS_NEEDS_CONTRACT,
+  ACCESS_WORDS,
+  FIELDS_CONTRACT,
+  DECIDES_WORDS,
   DECISIONS_MAX,
   DECISION_KEYS,
   DECISION_OPTION_KEYS,
@@ -36,6 +42,7 @@ import {
   DRAW_TONES,
   FRESH_MAX_MS,
   ITEM_LABEL_MAX,
+  MANIFEST_KEYS,
   NEAR_PLACES,
   NODE_ATTRS,
   NODE_KIDS,
@@ -58,11 +65,18 @@ import {
   TRICK_CONTRACT,
   TRICK_CONTRACT_DEFAULT,
   INPUTS_CONTRACT,
+  MENU_CONTRACT,
+  MENU_LABEL_MAX,
+  MENU_NEEDS_CONTRACT,
+  menuLabelProblem,
+  SESSIONS_NEED_CONTRACT,
   INPUTS_NEED_CONTRACT,
   inputGlobMatches,
   inputGlobProblem,
   inputsSentence,
   ABOUT_MAX,
+  VERSION_MAX,
+  VERSION_REFUSAL,
   DESCRIPTION_MAX,
   isEnvName,
   TRICK_ICON_LUCIDE,
@@ -99,6 +113,7 @@ import {
   type TrickAction,
   type View,
   type ViewNode,
+  isSourceUrl,
 } from "./schema";
 
 const ROOT = resolve(import.meta.dirname, "../../../..");
@@ -180,9 +195,13 @@ describe("the module", () => {
   it("imports only the JSON helpers and the contract number, so the bridge and the CLI load it without a DOM", () => {
     const source = readRepo("web/src/lib/tricks/schema.ts");
     const imports = [...source.matchAll(/^import .* from "([^"]+)";$/gm)].map((m) => m[1]);
-    expect(imports).toEqual(["../hidden-chars", "../json", "./contract"]);
+    // `./limits` holds plain numbers; its one import (`../hill/wire`) takes only types back from here.
+    expect(imports).toEqual(["../fold", "../hidden-chars", "../json", "./contract", "./limits", "./sheet-labels"]);
     // The hidden-character rule is plain code and imports nothing.
     expect(readRepo("web/src/lib/hidden-chars.ts")).not.toMatch(/^import /m);
+    // The fold (shared with the agent view) imports only the hidden-character rule; the sheet's labels are generated data.
+    expect([...readRepo("web/src/lib/fold.ts").matchAll(/^import .* from "([^"]+)";$/gm)].map((m) => m[1])).toEqual(["./hidden-chars"]);
+    expect(readRepo("web/src/lib/tricks/sheet-labels.ts")).not.toMatch(/^import /m);
     expect(source).not.toContain(`from "@/`);
     // The contract module is one number and imports nothing.
     expect(readRepo("web/src/lib/tricks/contract.ts")).not.toMatch(/^import /m);
@@ -232,14 +251,17 @@ describe("the module", () => {
 });
 
 describe("valid fixtures", () => {
+  // The menu place is contract 2's: its document says v 2, and is read as a contract 2 trick's.
+  const contractOf = (place: PlaceKind): number => (place === "menu" ? MENU_CONTRACT : TRICK_CONTRACT_DEFAULT);
+
   it.each(NEAR_PLACES)("the %s document parses clean with the default places", (place) => {
-    const result = parseTrickDocument(PLACE_DOCUMENTS[place]);
+    const result = parseTrickDocument(PLACE_DOCUMENTS[place], { contract: contractOf(place) });
     expect(result.refusals).toEqual([]);
     expect(result.parts.map((p) => p.place)).toEqual([place]);
   });
 
   it.each(NEAR_PLACES)("the %s document is left out with one note when the place is not enabled", (place) => {
-    const by = parseTrickDocument(PLACE_DOCUMENTS[place], { places: PLACE_KINDS.filter((p) => p !== place) });
+    const by = parseTrickDocument(PLACE_DOCUMENTS[place], { places: PLACE_KINDS.filter((p) => p !== place), contract: contractOf(place) });
     expect(by.refusals).toEqual([]);
     expect(by.refusedParts).toEqual([]);
     expect(by.parts).toEqual([]);
@@ -946,18 +968,16 @@ describe("places", () => {
     }
   });
 
-  it("names header.line, menu:<match> and settings as later, with the place named", () => {
+  it("names header.line and settings as later, with the place named; menu:<match> is no place since menu came", () => {
     for (const [at, word] of [
       ["header.line", "header.line"],
-      ["menu:*", "menu:<match>"],
-      ["menu:agent:claude", "menu:<match>"],
       ["settings", "settings"],
     ]) {
       const read = parseAt(at ?? "");
       expect("code" in read && read.code, at).toBe("later");
       expect("reason" in read && read.reason, at).toContain(`"${word}"`);
     }
-    for (const at of ["tab-mark", "tab", "view:*", "nowhere"]) expect(parseAt(at), at).toMatchObject({ code: "place" });
+    for (const at of ["tab-mark", "tab", "view:*", "nowhere", "menu:*", "menu:agent:claude"]) expect(parseAt(at), at).toMatchObject({ code: "place" });
   });
 
   it("parses every place by default: belt, session, dashboard, status, tabbar", () => {
@@ -1339,7 +1359,7 @@ describe("ids and keys", () => {
   });
 
   it("opens an https or an http address and nothing else", () => {
-    for (const url of ["https://github.com/AltanS/collie", "http://lodge:8080/", "http://100.64.0.2:8080/x?y=1"]) expect(isTrickUrl(url), url).toBe(true);
+    for (const url of ["https://github.com/AltanS/collie", "http://lodge:8080/", "http://100.64.10.2:8080/x?y=1"]) expect(isTrickUrl(url), url).toBe(true);
     for (const url of ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,x", "ftp://lodge/", "//lodge:8080/", "http://a b/", "HTTP://lodge/"]) {
       expect(isTrickUrl(url), url).toBe(false);
     }
@@ -1471,16 +1491,17 @@ describe("parseManifest", () => {
 
   it("names one contract number: the default 1, a higher one refused with both numbers, an unknown key still a typo", () => {
     const base = { id: "legs", name: "Legs", run: "./legs.sh", places: ["belt"] };
-    expect(TRICK_CONTRACT).toBe(2);
+    expect(TRICK_CONTRACT).toBe(3);
     expect(parseManifest(base).manifest?.contract).toBe(TRICK_CONTRACT_DEFAULT);
     expect(TRICK_CONTRACT_DEFAULT).toBe(1);
     expect(parseManifest({ ...base, contract: 1 }).manifest?.contract).toBe(1);
     expect(parseManifest({ ...base, contract: 2 }).manifest?.contract).toBe(2);
-    const newer = parseManifest({ ...base, contract: 3, shiny: "a key of contract 3" });
+    expect(parseManifest({ ...base, contract: 3 }).manifest?.contract).toBe(3);
+    const newer = parseManifest({ ...base, contract: 4, shiny: "a key of contract 4" });
     expect(newer.manifest).toBeUndefined();
     // Only the one sentence: a newer contract may hold keys this Collie never heard of.
-    expect(newer.refusals).toEqual([{ code: "version", path: "/contract", reason: newerContractReason(3) }]);
-    expect(newer.refusals[0]?.reason).toBe("This trick needs a newer Collie: it is written for trick contract 3, and this Collie knows contract 2. Update Collie to run it.");
+    expect(newer.refusals).toEqual([{ code: "version", path: "/contract", reason: newerContractReason(4) }]);
+    expect(newer.refusals[0]?.reason).toBe("This trick needs a newer Collie: it is written for trick contract 4, and this Collie knows contract 3. Update Collie to run it.");
     // At the same number an unknown key is a typo, and it refuses.
     expect(parseManifest({ ...base, contract: 1, plcaes: ["belt"] }).refusals.map((r) => [r.code, r.path])).toEqual([["unknown-key", "/plcaes"]]);
     expect(parseManifest({ ...base, contract: 1, plcaes: ["belt"] }).manifest).toBeUndefined();
@@ -1516,7 +1537,7 @@ describe("parseManifest", () => {
     expect(bad({ places: ["sidebar"] }).manifest).toBeUndefined();
     expect(bad({ places: [1] }).refusals.map((r) => r.code)).toEqual(["type"]);
     expect(bad({ places: ["header.line"] }).refusals.map((r) => r.code)).toEqual(["later", "place"]);
-    expect(bad({ places: ["menu"] }).refusals[0]?.reason).toContain('"menu:<match>"');
+    expect(bad({ places: ["menu"] }).refusals[0]?.reason).toBe(MENU_NEEDS_CONTRACT);
     expect(bad({ id: "Legs" }).refusals.map((r) => r.path)).toEqual(["/id"]);
     expect(parseManifest({ id: "legs" }).refusals.map((r) => r.path)).toEqual(["/name", "/run", "/places"]);
   });
@@ -1558,6 +1579,133 @@ describe("the manifest's description and about", () => {
     expect(parseManifest({ ...base, about: "one\n\ntwo" }).manifest?.about).toBe("one\n\ntwo");
     expect(parseManifest({ ...base, description: 3 }).refusals[0]?.reason).toBe('"description" must be text.');
     expect(parseManifest({ ...base, about: "" }).manifest).toBeUndefined();
+  });
+});
+
+describe("the manifest's decides (2026-11-12)", () => {
+  const base = { id: "review", name: "Design Review", run: "./review.ts", places: ["belt"] };
+  const asked = { key: "ship", title: "Ship it?", summary: "One change.", options: [{ intent: "ship", label: "Ship it" }] };
+  const doc = (decision: JsonObject) => ({ v: 1, parts: [], decisions: [decision] });
+
+  it("takes one closed word, reply, in contract 1 and 2; absent is none", () => {
+    expect(DECIDES_WORDS).toEqual(["reply"]);
+    expect(MANIFEST_KEYS).toContain("decides");
+    expect(parseManifest(base).manifest?.decides).toBeUndefined();
+    for (const contract of [1, 2]) {
+      const read = parseManifest({ ...base, contract, decides: "reply" });
+      expect(read.refusals).toEqual([]);
+      expect(read.manifest?.decides).toBe("reply");
+    }
+  });
+
+  it("refuses another word, a value that is not text, and the key on a trick that is only an agent view", () => {
+    const wrongs: JsonValue[] = ["replies", "Reply", "", true, ["reply"]];
+    for (const decides of wrongs) {
+      const read = parseManifest({ ...base, decides });
+      expect(read.manifest, JSON.stringify(decides)).toBeUndefined();
+      expect(read.refusals.map((r) => [r.code, r.path])).toEqual([["word", "/decides"]]);
+    }
+    const view = parseManifest({ id: "morph", name: "Morph", contract: 2, places: ["agent-view"], rules: "rules.md", decides: "reply" });
+    expect(view.manifest).toBeUndefined();
+    expect(view.refusals.map((r) => r.path)).toEqual(["/decides"]);
+    // An agent view without the key is read as before.
+    expect(parseManifest({ id: "morph", name: "Morph", contract: 2, places: ["agent-view"], rules: "rules.md" }).refusals).toEqual([]);
+  });
+
+  it("a Decision with replyTo passes when the manifest says it, and is refused alone when it does not", () => {
+    const replying = doc({ ...asked, replyTo: "lodge:w1:1" });
+    expect(parseTrickDocument(replying, { decidesReply: true }).decisions.map((d) => d.replyTo)).toEqual(["lodge:w1:1"]);
+    const refused = parseTrickDocument(replying, { decidesReply: false });
+    expect(refused.decisions).toEqual([]);
+    expect(refused.refusals).toEqual([{ code: "undeclared", path: "/decisions/0/replyTo", reason: DECIDES_REPLY_LINE, decision: "ship" }]);
+    // Not kept as refused: an open post of the key is withdrawn, not left standing.
+    expect(refused.refusedDecisions).toEqual([]);
+    expect(DECIDES_REPLY_LINE).toBe("This trick did not say that its Decisions reply to a session.");
+  });
+
+  it("a Decision without replyTo passes either way, and a reader with no manifest checks nothing", () => {
+    expect(parseTrickDocument(doc(asked), { decidesReply: false }).decisions).toHaveLength(1);
+    expect(parseTrickDocument(doc({ ...asked, replyTo: "lodge:w1:1" })).decisions).toHaveLength(1);
+  });
+});
+
+describe("the manifest's access (M105 spec 04)", () => {
+  const base = { id: "load", name: "Machine load", run: "./load.ts", places: ["belt"], contract: 3 };
+
+  it("takes none, see or read; none and an absent key keep no field", () => {
+    expect(ACCESS_WORDS).toEqual(["none", "see", "read"]);
+    expect(MANIFEST_KEYS).toContain("access");
+    expect(parseManifest(base).manifest?.access).toBeUndefined();
+    expect(parseManifest({ ...base, access: "none" }).manifest?.access).toBeUndefined();
+    for (const access of ["see", "read"] as const) {
+      const read = parseManifest({ ...base, access });
+      expect(read.refusals).toEqual([]);
+      expect(read.manifest?.access).toBe(access);
+    }
+  });
+
+  it("any other word, or a value that is not text, refuses the manifest", () => {
+    const wrongs: JsonValue[] = ["send", "control", "See", "", true, ["see"], 1];
+    for (const access of wrongs) {
+      const read = parseManifest({ ...base, access });
+      expect(read.manifest, JSON.stringify(access)).toBeUndefined();
+      expect(read.refusals.map((r) => [r.code, r.path])).toEqual([["word", "/access"]]);
+    }
+  });
+
+  it("needs contract 3: at contract 1 or 2 any access word, none too, refuses the manifest with one line", () => {
+    expect(ACCESS_CONTRACT).toBe(3);
+    expect(ACCESS_CONTRACT).toBe(FIELDS_CONTRACT);
+    for (const contract of [undefined, 1, 2]) {
+      for (const access of ["none", "see", "read"]) {
+        const { contract: _three, ...rest } = base;
+        const read = parseManifest(contract === undefined ? { ...rest, access } : { ...rest, contract, access });
+        expect(read.manifest, `${String(contract)} ${access}`).toBeUndefined();
+        expect(read.refusals).toEqual([{ code: "version", path: "/access", reason: ACCESS_NEEDS_CONTRACT }]);
+      }
+    }
+  });
+});
+
+describe("the facts' api (M105 specs 04 and 05)", () => {
+  it("carries the socket, the level and the run token; another level, a missing socket or token, a token of another shape or an unknown key refuses", () => {
+    const socket = "/home/dev/.local/state/collie/api/sock";
+    const token = "Tk".repeat(21) + "x";
+    expect(parseFacts({ ...FACTS.timer, api: { socket, access: "read", token } }).facts?.api).toEqual({ socket, access: "read", token });
+    expect(parseFacts(FACTS.timer).facts?.api).toBeUndefined();
+    const refused: JsonValue[] = [{ socket, access: "none", token }, { socket, access: "send", token }, { access: "see", token }, { socket, token }, { socket, access: "see" }, { socket, access: "see", token: "x" }, { socket, access: "see", token: `${token}=` }, { socket, access: "see", token, extra: 1 }, "sock"];
+    for (const api of refused) {
+      expect(parseFacts({ ...FACTS.timer, api }).facts, JSON.stringify(api)).toBeUndefined();
+    }
+  });
+});
+
+describe("the manifest's version", () => {
+  const base = { id: "gates", name: "Release Gates", run: "./gates.sh", places: ["belt"] };
+
+  it("is optional text of 1 to 24 letters, digits, dots, plus and minus, in contract 1 and 2", () => {
+    expect(VERSION_MAX).toBe(24);
+    expect(parseManifest(base).manifest?.version).toBeUndefined();
+    for (const contract of [1, 2]) {
+      for (const version of ["1.2.0", "2026.11.12", "0.3.0-beta+7", "v2", "v".repeat(VERSION_MAX)]) {
+        const read = parseManifest({ ...base, contract, version });
+        expect(read.refusals).toEqual([]);
+        expect(read.manifest?.version).toBe(version);
+      }
+    }
+  });
+
+  it("refuses a value past the cap, an empty one, another character, and a value that is not text", () => {
+    const long = parseManifest({ ...base, version: "1".repeat(VERSION_MAX + 1) });
+    expect(long.manifest).toBeUndefined();
+    expect(long.refusals.map((r) => [r.code, r.path])).toEqual([["text", "/version"]]);
+    for (const version of ["", "1.2 beta", "1/2", "1_2", "v1\u00e9", "1.2\n", "1.2\u202E"]) {
+      const read = parseManifest({ ...base, version });
+      expect(read.manifest, version).toBeUndefined();
+      expect(read.refusals[0]?.path).toBe("/version");
+    }
+    expect(parseManifest({ ...base, version: "1 2" }).refusals.map((r) => r.reason)).toEqual([VERSION_REFUSAL]);
+    expect(parseManifest({ ...base, version: 2 }).refusals[0]?.reason).toBe('"version" must be text.');
   });
 });
 
@@ -1604,8 +1752,8 @@ describe("contract 2: inputs", () => {
 
   it("a document's v may be any contract from 1 to this Collie's", () => {
     const part = { at: "belt", id: "belt", mark: { icon: "flask", label: "1" } };
-    for (const v of [1, 2]) expect(parseTrickDocument({ v, parts: [part] }).refusals, String(v)).toEqual([]);
-    for (const v of [0, 3, 1.5]) expect(parseTrickDocument({ v, parts: [part] }).refusals.map((r) => r.path), String(v)).toEqual(["/v"]);
+    for (const v of [1, 2, 3]) expect(parseTrickDocument({ v, parts: [part] }).refusals, String(v)).toEqual([]);
+    for (const v of [0, 4, 1.5]) expect(parseTrickDocument({ v, parts: [part] }).refusals.map((r) => r.path), String(v)).toEqual(["/v"]);
   });
 });
 
@@ -1625,7 +1773,7 @@ describe("parseFacts", () => {
     expect(read.facts?.contract).toBe(2);
     expect(read.facts?.sessionsOmitted).toBe(3);
     expect(read.facts?.sessions[0]).toMatchObject({ reachable: false, inputs: { state: "ok", files: [file], skipped: 2 } });
-    expect(parseFacts({ ...FACTS.timer, contract: 3 }).refusals.map((r) => r.path)).toEqual(["/contract"]);
+    expect(parseFacts({ ...FACTS.timer, contract: 4 }).refusals.map((r) => r.path)).toEqual(["/contract"]);
     const badState = { ...facts, sessions: [{ ...first, inputs: { state: "maybe", files: [] } }] };
     expect(parseFacts(badState).refusals.length).toBeGreaterThan(0);
     const badKind = { ...facts, sessions: [{ ...first, inputs: { state: "ok", files: [{ ...file, kind: "binary" }] } }] };
@@ -1780,5 +1928,196 @@ describe("the icon set", () => {
   it("gives actions the twelve words of the bridge's PANE_ACTION_ICONS", () => {
     const bridge = readRepo("bridge/types.ts").match(/export const PANE_ACTION_ICONS = \[([^\]]*)\]/)?.[1] ?? "";
     expect([...bridge.matchAll(/"([^"]+)"/g)].map((m) => m[1])).toEqual([...ACTION_ICONS]);
+  });
+});
+
+// ── The menu place and bound parts (contract 2), tests named by rule ─────────────────────────────
+
+describe("the menu place and bound parts", () => {
+  const S1 = "lodge:w1:3";
+  const S2 = "workshop:w2:1";
+  const btn = (over: JsonObject = {}): JsonObject => ({ id: "rerun", kind: "button", label: "Rerun CI", icon: "refresh", intent: "rerun", ...over });
+  const sw = (over: JsonObject = {}): JsonObject => ({ id: "watch", kind: "switch", label: "Watch branch", icon: "flag", intent: "watch", on: true, ...over });
+  const menu = (over: JsonObject = {}): JsonObject => ({ at: "menu", id: "ci", rows: [btn(), sw()], ...over });
+  const two = { contract: 2 } as const;
+  const codes = (doc: JsonObject, opts: { contract?: number } = two) => parseTrickDocument(doc, opts).refusals.map((r) => [r.code, r.path]);
+
+  it("menu-needs-contract-2: a contract 1 manifest leaves menu out with a later note, and its menu part is refused alone", () => {
+    const base = { id: "ci", name: "CI", run: "program.ts", places: ["belt", "menu"] };
+    const one = parseManifest(base);
+    expect(one.refusals.map((r) => [r.code, r.path, r.reason])).toEqual([["later", "/places/1", MENU_NEEDS_CONTRACT]]);
+    expect(one.manifest?.places).toEqual(["belt"]);
+    expect(parseManifest({ ...base, contract: 2 }).manifest?.places).toEqual(["belt", "menu"]);
+    const doc = { v: 1, parts: [menu(), { at: "belt", id: "b", mark: { label: "1" } }] };
+    for (const opts of [{}, { contract: 1 }]) {
+      const read = parseTrickDocument(doc, opts);
+      expect(read.refusals.map((r) => [r.code, r.path, r.reason])).toEqual([["version", "/parts/0/at", MENU_NEEDS_CONTRACT]]);
+      expect(read.parts.map((p) => p.place)).toEqual(["belt"]);
+    }
+    const read = parseTrickDocument({ ...doc, v: 2 }, two);
+    expect(read.refusals).toEqual([]);
+    expect(read.parts[0]).toEqual({ place: "menu", part: { at: "menu", id: "ci", rows: [btn(), sw()] } });
+  });
+
+  it("bound-mark-contract-1-refused: a contract 1 belt mark with sessions is refused alone, never drawn everywhere", () => {
+    const bound = { at: "belt", id: "b", mark: { label: "1" }, sessions: [S1] };
+    const other = { at: "status", id: "c", chip: { text: "ok" } };
+    for (const opts of [{}, { contract: 1 }]) {
+      const read = parseTrickDocument({ v: 1, parts: [bound, other] }, opts);
+      expect(read.refusals.map((r) => [r.code, r.path, r.reason])).toEqual([["version", "/parts/0/sessions", SESSIONS_NEED_CONTRACT]]);
+      expect(read.parts.map((p) => p.part.id)).toEqual(["c"]);
+      // Not an ignored key with a note: the part is refused, so no reader draws it with its binding lost.
+      expect(read.notes).toEqual([]);
+    }
+    const read = parseTrickDocument({ v: 2, parts: [bound, other] }, two);
+    expect(read.refusals).toEqual([]);
+    expect(read.parts[0]?.part).toEqual(bound);
+  });
+
+  it("bound parts: one unbound per trick and place, up to eight bound ones, no session named by two", () => {
+    const mark = (id: string, sessions?: string[]): JsonObject => (sessions === undefined ? { at: "belt", id, mark: { label: "1" } } : { at: "belt", id, mark: { label: "1" }, sessions });
+    expect(codes({ v: 2, parts: [mark("a"), mark("b", [S1]), mark("c", [S2])] })).toEqual([]);
+    expect(codes({ v: 2, parts: [mark("a"), mark("b")] })).toEqual([["duplicate", "/parts/1/at"]]);
+    expect(codes({ v: 2, parts: [mark("a", [S1]), mark("b", [S2, S1])] })).toEqual([["duplicate", "/parts/1/sessions"]]);
+    const many = Array.from({ length: 9 }, (_, i) => mark(`m${String(i)}`, [`lodge:w1:${String(i)}`]));
+    expect(codes({ v: 2, parts: many })).toEqual([["duplicate", "/parts/8/sessions"]]);
+    expect(codes({ v: 2, parts: [menu(), menu({ id: "ci2" })] })).toEqual([["duplicate", "/parts/1/at"]]);
+    expect(codes({ v: 2, parts: [menu(), menu({ id: "ci2", sessions: [S1] }), mark("a"), mark("b", [S1])] })).toEqual([]);
+    // The ids: 1 to 8 real scope keys, none twice; never a name or a trick session.
+    expect(codes({ v: 2, parts: [mark("a", [])] })).toEqual([["count", "/parts/0/sessions"]]);
+    expect(codes({ v: 2, parts: [mark("a", Array.from({ length: 9 }, (_, i) => `lodge:w1:${String(i)}`))] })).toEqual([["count", "/parts/0/sessions"]]);
+    expect(codes({ v: 2, parts: [mark("a", ["composer", "trick:lodge:ci"])] })).toEqual([
+      ["target", "/parts/0/sessions/0"],
+      ["target", "/parts/0/sessions/1"],
+    ]);
+    expect(codes({ v: 2, parts: [mark("a", [S1, S1])] })).toEqual([["duplicate", "/parts/0/sessions/1"]]);
+  });
+
+  it("menu rows: 1 to 6, each id and intent once, on for a switch only, confirm for a button only, no other key", () => {
+    const rows = (list: JsonValue[]) => ({ v: 2, parts: [menu({ rows: list })] });
+    expect(codes(rows([]))).toEqual([["count", "/parts/0/rows"]]);
+    expect(codes(rows(Array.from({ length: 7 }, (_, i) => btn({ id: `r${String(i)}`, intent: `i${String(i)}` }))))).toEqual([["count", "/parts/0/rows"]]);
+    expect(codes(rows([btn(), btn({ id: "two" })]))).toEqual([["duplicate", "/parts/0/rows/1/intent"]]);
+    expect(codes(rows([btn(), btn({ intent: "two" })]))).toEqual([["duplicate", "/parts/0/rows/1/id"]]);
+    expect(codes(rows([sw({ on: undefined })]))).toEqual([["missing", "/parts/0/rows/0/on"]]);
+    expect(codes(rows([btn({ on: false })]))).toEqual([["target", "/parts/0/rows/0/on"]]);
+    expect(codes(rows([sw({ confirm: true })]))).toEqual([["target", "/parts/0/rows/0/confirm"]]);
+    expect(codes(rows([btn({ kind: "slider" })]))).toEqual([["word", "/parts/0/rows/0/kind"]]);
+    expect(codes(rows([btn({ icon: "spinner" })]))).toEqual([["icon", "/parts/0/rows/0/icon"]]);
+    // Read closed, as every contract 2 part: a key this Collie does not know refuses the part.
+    for (const key of ["tone", "hint", "badge", "value"]) expect(codes(rows([btn({ [key]: "x" })])), key).toEqual([["unknown-key", `/parts/0/rows/0/${key}`]]);
+    // An icon is optional: the phone draws the trick's own.
+    expect(codes(rows([btn({ icon: undefined })]))).toEqual([]);
+  });
+
+  it("a switch row sends the state it asks for; a disabled row sends nothing", () => {
+    const read = parseTrickDocument({ v: 2, parts: [menu({ rows: [btn(), sw(), sw({ id: "off", intent: "mute", on: false }), btn({ id: "gone", intent: "gone", disabled: true })] })] }, two);
+    const part = read.parts[0]?.part;
+    expect(part === undefined ? [] : tapControls(part)).toEqual([{ intent: "rerun" }, { intent: "watch", value: "off" }, { intent: "mute", value: "on" }]);
+  });
+
+  it("menu-label-reserved-phrase-any-locale: a label that reads as the sheet's own row, in any language, or as Collie's word, is refused", () => {
+    const refused = [
+      "Close pane",
+      "close  PANE",
+      "Pane schließen",
+      "Cerrar conversación",
+      "ペインを閉じる",
+      "Focus in tmux",
+      "In zellij anzeigen",
+      "Rename",
+      "Pin to top",
+      "From the trick CI",
+      "Waiting for CI…",
+      "Restart Collie",
+      "Cоllie logs",
+      "WalkyTalky",
+      "Walky Talky off",
+      "Hill",
+      "Claude view",
+      "Allow push",
+      "Approve",
+      "Deny all",
+      "Grant access",
+      "Trust this repo",
+    ];
+    for (const label of refused) {
+      expect(menuLabelProblem(label), label).toBeDefined();
+      expect(codes({ v: 2, parts: [menu({ rows: [btn({ label })] })] }), label).toEqual([["text", "/parts/0/rows/0/label"]]);
+    }
+    for (const label of ["Rerun CI", "Watch branch", "Approved list", "Hillside deploy", "Close the PR", "Focus mode", "Pane count", "Overview"]) {
+      expect(menuLabelProblem(label), label).toBeUndefined();
+    }
+  });
+
+  it("M3: a label written in look-alikes is compared by its skeleton, refused, and drawn as written when it passes", () => {
+    // Each row: the label, and what it passes for. The comparison folds; the label is never rewritten.
+    const cases: [string, string][] = [
+      ["CoIlie logs", "Collie, a capital I for l"],
+      ["CIose pane", "Close pane, a capital I for l"],
+      ["C0llie", "Collie, a zero for o"],
+      ["Co11ie", "Collie, two ones for l"],
+      ["C\u0585llie", "Collie, Armenian o"],
+      ["\u0251llow push", "Allow, Latin alpha"],
+      ["\u2c6dllow push", "Allow, Latin capital alpha"],
+      ["\u13dfollie", "Collie, Cherokee C"],
+      ["\u13b3alky Talky", "WalkyTalky, Cherokee W"],
+      ["VVaIkyTaIky", "WalkyTalky, two Vs and capital Is"],
+      ["HiII", "Hill, capital Is"],
+      ["Claude vievv", "view, two Vs"],
+    ];
+    for (const [label, what] of cases) expect(menuLabelProblem(label), `${label}: ${what}`).toBeDefined();
+    for (const label of ["Rerun CI", "Run 10 tests", "Hillside deploy", "Overview", "Watch branch", "Close the PR", "Approved list"]) {
+      expect(menuLabelProblem(label), label).toBeUndefined();
+    }
+    // A label that passes is stored as written, its look-alikes and all.
+    const parsed = parseTrickDocument({ v: 2, parts: [menu({ rows: [btn({ label: "Run 10 tests" })] })] }, { contract: 2 });
+    expect(parsed.parts[0]?.place === "menu" ? parsed.parts[0].part.rows[0]?.label : undefined).toBe("Run 10 tests");
+  });
+
+  it("N2: a label that starts with the permission card's words in any of the twelve languages, or with yes or always, is refused", () => {
+    const refused = [
+      "Erlauben: push", "Immer erlauben", "Verweigern", "Permitir deploy", "Denegar", "Autoriser le push", "Refuser",
+      "Consenti push", "Nega", "許可する", "常に許可", "拒否", "허용", "항상 허용", "거부", "Sempre permitir", "Negar",
+      "Разрешить push", "Всегда разрешать", "Запретить", "İzin ver", "Her zaman izin ver", "Reddet", "允许推送",
+      "始终允许", "拒绝", "允許", "一律允許", "拒絕", "Yes, deploy", "Always run", "YES",
+    ];
+    for (const label of refused) expect(menuLabelProblem(label), label).toMatch(/^starts with "/u);
+    expect(menuLabelProblem("Erlauben")).toBe(`starts with "Erlauben", which reads as a permission Collie asks for. Name it another way.`);
+    for (const label of ["Yesterday's build", "Negative tests", "Allowance report", "Permits", "Deploy, always"]) {
+      expect(menuLabelProblem(label), label).toBeUndefined();
+    }
+  });
+
+  it("menu-label-hidden-char: a label with a hidden or control character, or past 24 characters, is refused and never cut", () => {
+    for (const label of ["Rerun​CI", "Re‮run", "Rerunㅤ", "Rerun CI", "Rerun CI", "Rerun\u0007", "Rerun"]) {
+      expect(menuLabelProblem(label), JSON.stringify(label)).toBeDefined();
+    }
+    expect(menuLabelProblem("x".repeat(MENU_LABEL_MAX))).toBeUndefined();
+    expect(menuLabelProblem("x".repeat(MENU_LABEL_MAX + 1))).toBe(`is ${String(MENU_LABEL_MAX + 1)} characters. At most ${String(MENU_LABEL_MAX)}.`);
+    expect(menuLabelProblem("")).toBe("is empty.");
+  });
+});
+
+describe("isSourceUrl: the one rule for a repository URL that leaves the bridge", () => {
+  it("takes a plain https URL with a host", () => {
+    for (const url of ["https://github.com/a/b", "https://git.workshop.example/owner/legs.git"]) expect(isSourceUrl(url), url).toBe(true);
+  });
+
+  it("refuses a credential, another protocol, a query, a fragment, a local path, a control character and a long one", () => {
+    for (const url of [
+      "https://user:tok@github.com/a/b",
+      "https://tok@github.com/a/b",
+      "http://github.com/a/b",
+      "ssh://git@github.com/a/b.git",
+      "git@github.com:a/b.git",
+      "https://github.com/a/b?access_token=tok",
+      "https://github.com/a/b#readme",
+      "/srv/tricks/legs",
+      "https://github.com/a/b\u0007",
+      `https://github.com/a/${"b".repeat(600)}`,
+    ]) {
+      expect(isSourceUrl(url), url).toBe(false);
+    }
   });
 });

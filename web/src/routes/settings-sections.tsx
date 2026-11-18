@@ -2,12 +2,16 @@ import { Icon } from "@/components/icons/icon";
 import { useLoaderData } from "react-router";
 
 import { AppearanceIntro } from "@/components/appearance-intro";
+import { CharacterPicker } from "@/components/character-picker";
+import { CharacterSettingsRow } from "@/components/character-settings-row";
 import { SettingsPage } from "@/components/settings-page";
 import { Notice } from "@/components/ui/notice";
 import { useLocale } from "@/hooks/use-locale";
 import { t } from "@/lib/i18n";
 import { BeltSizeControl } from "@/components/belt-size-control";
+import { UsageRowControl } from "@/components/usage-row-control";
 import { ZoomPillControl } from "@/components/zoom-pill-control";
+import { PageZoomControl } from "@/components/page-zoom-control";
 import { ChangesControl } from "@/components/changes-control";
 import { ConnectionInfo } from "@/components/connection-info";
 import { CrewSettingsCard } from "@/components/crew-settings-card";
@@ -21,6 +25,7 @@ import { HarnessBarControl } from "@/components/harness-bar-control";
 import { HarnessPrefsControl } from "@/components/harness-prefs-control";
 import { HillSwitchControl } from "@/components/hill-switch-card";
 import { LanguageControl } from "@/components/language-control";
+import { ClearNotificationsControl } from "@/components/clear-notifications-control";
 import { NotifyPrefsControl } from "@/components/notify-prefs-control";
 import { PaneNavControl } from "@/components/pane-nav-control";
 import { PaneOrderControl } from "@/components/pane-order-control";
@@ -28,6 +33,7 @@ import { WideLayoutControl } from "@/components/wide-layout-control";
 import { PairedDevices } from "@/components/paired-devices";
 import { PushControl, usePushAvailability } from "@/components/push-control";
 import { ReportControl } from "@/components/report-control";
+import { WorktreeFolderControl } from "@/components/worktree-folder-control";
 import { SnoozeControl } from "@/components/snooze-control";
 import { ThemeControl } from "@/components/theme-control";
 import { ThemePickerControl } from "@/components/theme-picker-control";
@@ -37,8 +43,13 @@ import { TourControl } from "@/components/tour-control";
 import { TypefaceControl } from "@/components/typeface-control";
 import { TelemetrySettingsCard, TelemetrySettingsRow } from "@/components/telemetry-settings-card";
 import { MathControl } from "@/components/math-control";
+import { SettingsNavRow } from "@/components/settings-nav-row";
+import { Card } from "@/components/ui/card";
 import { TricksSettingsCard } from "@/components/tricks-settings-card";
+import { TricksSwitchControl } from "@/components/tricks-switch-card";
+import { TrickCardsWaiting } from "@/components/trick-cards";
 import { ZenControl } from "@/components/zen-control";
+import { useNav } from "@/hooks/use-nav";
 import { useServerDiagnostics } from "@/hooks/use-server-diagnostics";
 import { EMPTY_DEVICES, type DevicesData } from "@/lib/loaders";
 import { settingsSectionPath } from "@/lib/nav";
@@ -89,13 +100,17 @@ export function SettingsAppearanceRoute() {
       {/* "Make Collie your own": one line and a docs link over the two cards that make the app
           yours, in the order a person decides them: the theme (Paste, Browse and Try live in its
           card), then which half of the theme you see. The header's character comes with the theme
-          and has no card of its own: it is something a theme maker sets, not a device setting. */}
+          unless this device picks one: that is the Character row below them. */}
       <AppearanceIntro />
       {/* Which theme, then which half of it: the picker sits directly above the three-way (System,
           Light, Dark) because the two are one question asked twice, and a person who finds one
           should find the other. First on the page, because it is the one people come here for. */}
       <ThemePickerControl />
       <ThemeControl />
+      {/* Which character the header draws on this device: one row with its value, and the page it
+          opens lists them (ADR 0136, amended 2026-11-12). Under the theme because its default is
+          "From the theme". */}
+      <CharacterSettingsRow />
       {/* Beside appearance because both are "how this phone presents itself". */}
       <LanguageControl />
       {/* TWO FONT CARDS, ADJACENT, IN THIS ORDER. Adjacency answers the only question either one
@@ -113,6 +128,12 @@ export function SettingsAppearanceRoute() {
       {/* The belt's Zoom pill: in the Screen view or never (lib/zoom-pill.ts). Under the belt's size
           because both decide what that one belt carries. */}
       <ZoomPillControl />
+      {/* Whether a pinch zooms the whole page (lib/page-zoom.ts). Under the Zoom pill because both
+          decide what a zoom does on this phone. On by default, for anyone who needs bigger text. */}
+      <PageZoomControl />
+      {/* How the usage row (the model, context and limits) draws its gauges: a percentage or dots
+          (lib/usage-row.ts). Under the zoom cards because it too decides how the belt's surroundings read. */}
+      <UsageRowControl />
       {/* Which thumb the belt and the reply box are laid out for. Under the belt's size because both
           decide how that one belt is drawn. */}
       <HandControl />
@@ -210,20 +231,17 @@ export function SettingsAlertsRoute() {
   const availability = usePushAvailability();
   return (
     <SettingsPage title="settings.section.alerts.title">
-      {/* The Hill's switch (bridge/hill/switch.ts): first, because it decides whether agents and tricks
-          may ask at all, and drawn from the snapshot, so it never waits on push state like the cards
-          below. Bridge-wide, like the notification switches. */}
-      <HillSwitchControl />
       <PushControl />
       {/* Mounted while push state is still UNKNOWN, and only removed once we positively learn the
           bridge has no VAPID keys. Gating on truthiness instead inserted ~400px into the middle of
-          the page one frame late, shoving everything below it down. These two are bridge-wide
-          settings — which transitions notify, and quiet hours — so they are meaningful whatever
-          this particular device's push status turns out to be. */}
+          the page one frame late, shoving everything below it down. These three are bridge-wide —
+          which transitions notify, quiet hours, and clearing what was sent — so they are meaningful
+          whatever this particular device's push status turns out to be. */}
       {availability !== "server-off" && (
         <>
           <NotifyPrefsControl />
           <SnoozeControl snoozedUntil={root?.snoozedUntil ?? null} />
+          <ClearNotificationsControl />
         </>
       )}
     </SettingsPage>
@@ -261,12 +279,23 @@ function ExperimentsContract() {
  * The section renders even when `lib/experiments.ts` is empty, because the route stays; the
  * SETTINGS INDEX is what hides the row (routes/settings.tsx). A bookmark then lands on a page
  * carrying its contract and nothing else, which is the honest answer to "where did it go".
+ * Today it holds the Hill's one switch and a row for Tricks, whose own switch lives at the top of
+ * Settings, Tricks.
  */
 export function SettingsExperimentsRoute() {
+  const nav = useNav();
+  const scope = useScope();
   return (
     <SettingsPage title="settings.section.experiments.title">
       <ExperimentsContract />
-      {/* Nothing is filed here since Chat graduated (ADR 0082). The next experiment is a card here. */}
+      {/* The Hill (bridge/hill/switch.ts): an experiment, off by default, and this is its one switch. Drawn from
+          the snapshot, so it never waits on a reading of its own. Bridge-wide, like the notification switches. */}
+      <HillSwitchControl />
+      {/* Tricks as a whole are an experiment too (bridge/tricks/feature-switch.ts), but their switch is the first
+          thing on Settings, Tricks: this row only opens that page, so the switch lives in one place. */}
+      <Card className="gap-0 py-0" data-slot="tricks-experiment-row">
+        <SettingsNavRow icon="mods" title={t("settings.section.tricks.title")} caption={t("settings.experiments.tricks.caption")} onOpen={() => nav.down(settingsSectionPath("tricks", scope))} />
+      </Card>
     </SettingsPage>
   );
 }
@@ -280,6 +309,11 @@ export function SettingsExperimentsRoute() {
 export function SettingsTricksRoute() {
   return (
     <SettingsPage title="settings.section.tricks.title">
+      {/* The switch for tricks as a whole is the first thing on the page. It reads the snapshot, not the tricks
+          reply, so it always renders, off included. */}
+      <TricksSwitchControl />
+      {/* Then the cards of Collie's own that wait for a yes (M96 spec 14): with the Hill off, the one list of them. */}
+      <TrickCardsWaiting />
       <TricksSettingsCard />
     </SettingsPage>
   );
@@ -302,6 +336,8 @@ export function SettingsSystemRoute() {
       <PairedDevices data={devices} />
       {/* Renders NOTHING on a solo install — the card owns that gate itself (useCrew().multi). */}
       <CrewSettingsCard />
+      {/* Where this machine's new worktrees go by default (ADR 0093 note): one row per machine. */}
+      <WorktreeFolderControl />
       <ConnectionInfo
         bridge={root?.bridge}
         device={root?.device}
@@ -316,6 +352,16 @@ export function SettingsSystemRoute() {
       {/* Report a problem (ADR 0123): the offer's switch and the sheet's third door, with the diagnostics
           because a report is the one way those leave this phone, and only by the person's taps. */}
       <ReportControl />
+    </SettingsPage>
+  );
+}
+
+/** Settings → Appearance → Character: the radio list of characters, one level below Appearance. */
+export function SettingsCharacterRoute() {
+  const scope = useScope();
+  return (
+    <SettingsPage title="settings.character.title" parent={settingsSectionPath("appearance", scope)}>
+      <CharacterPicker />
     </SettingsPage>
   );
 }

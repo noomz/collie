@@ -8,16 +8,17 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { muxAck, muxOk, muxRefused, muxUnreachable, type MuxAck, type MuxGrid, type MuxGridRequest, type MuxOutcome } from "../mux/types.ts";
+import { muxAck, muxOk, muxRefused, muxUnconfirmed, muxUnreachable, type MuxAck, type MuxGrid, type MuxGridRequest, type MuxOutcome } from "../mux/types.ts";
 import { forPlatform, loadProfiles, profileFor, resetProfileLog, type Profile, type ProfileForOptions, type PopupRule, type ProfileStatus, type VersionRange } from "../../web/src/lib/surface/profile.ts";
 import type { HeldCancelAnswer, SendAnswer } from "../../web/src/lib/surface/send.ts";
 import { parseAnsi } from "../../web/src/lib/ansi.ts";
 import { lineText, splitLines } from "../../web/src/lib/blocks.ts";
 import { findInputFrame } from "../../web/src/lib/surface/frame.ts";
+import { normalizePrompt } from "../../web/src/lib/surface/edges.ts";
 import { surfaceOfScreen } from "../../web/src/lib/surface/fold.ts";
 import { isFree, type Surface, type SurfaceTurn } from "../../web/src/lib/surface/surface.ts";
 import { KeyGate } from "./key-gate.ts";
-import { BOUNDS, BOX_CHANGED, LATE_PROBE, VIEW_AT_DRAFT, VIEW_AT_QUESTION, VIEW_NO_PROFILE, boxMatches, COMMAND_SETTLE_MS, boxMatchesTail, commandBoxMatches, GENERIC_PROBE, uploadAlone, wholePaste, LOCK_BOUND_MS, locateText, neverHeldEntry, probeLanding, RowRing, runsInTurnEntry, SendProtocol, SessionLocks, STALE_SCREEN, steadyRow, type SendDeps, type SendLedger, type SendRequest } from "./protocol.ts";
+import { BOUNDS, BOX_CHANGED, LATE_PROBE, LEFT_TYPED_MS, VIEW_AT_DRAFT, VIEW_AT_QUESTION, VIEW_NO_PROFILE, boxMatches, COMMAND_SETTLE_MS, boxMatchesTail, commandBoxMatches, GENERIC_PROBE, uploadAlone, wholePaste, LOCK_BOUND_MS, locateText, neverHeldEntry, probeLanding, RowRing, runsInTurnEntry, SendProtocol, SessionLocks, STALE_SCREEN, steadyRow, type SendDeps, type SendLedger, type SendRequest } from "./protocol.ts";
 import { HEAD_CASES, NOT_HEAD_CASES } from "../agent-view/testdata/head-cases.ts";
 import { AgentViewService } from "../agent-view/service.ts";
 import { AgentViewStore } from "../agent-view/store.ts";
@@ -937,6 +938,11 @@ describe("a command whose own screen draws late (the browser leg, omp /model, 20
 /** A plain shell pane as the dev lane read it on v1.22.4 (Herdr agent `shell`): the Bluefin motd, then a starship prompt. */
 const SHELL_SCREEN = "shell--starship-bluefin-motd--w117.txt";
 
+/** A plain shell's screen (starship at its prompt): what the blind road types into. */
+function shellText(): string {
+  return readFileSync(join(import.meta.dir, `../../web/src/fixtures/panes/${SHELL_SCREEN}`), "utf8");
+}
+
 describe("a shell pane (no agent named, no profile) is typed and Entered blind (a bare shell, 2026-10-17 field case)", () => {
   // On v1.22.4 both a send and a command on a plain shell were refused `unconfirmed` with `no-match`:
   // a pane with no profile took the two-tap manual Send. It takes the send the way 1.21.3 did.
@@ -967,8 +973,9 @@ describe("a shell pane (no agent named, no profile) is typed and Entered blind (
   test("a send on a pane with no profile is never held, even with a hold queue and a screen that will not hold still", async () => {
     const holds = new HoldStore(join(dir, "held"));
     const r = rig({ harness: "", holds });
+    r.pane.fixed = shellText();
     r.pane.beforeRead = (p) => {
-      p.transcript.push("a row that came in");
+      p.fixed = `${p.fixed ?? ""}\r\na row that came in`;
     };
     const answer = await r.send("hello");
     expect(answer.receipt).toMatchObject({ outcome: "sent", keys: ["Enter"] });
@@ -988,14 +995,14 @@ describe("a shell pane (no agent named, no profile) is typed and Entered blind (
 
   test("a shell at a sudo password prompt refuses the send before any key, offers the key pad, and is never held", async () => {
     const holds = new HoldStore(join(dir, "held"));
-    const pane = shellScreen("[sudo] password for altan: ");
+    const pane = shellScreen("[sudo] password for dev: ");
     const { send } = rig({ pane, harness: "", holds });
     const answer = await send("claude-danger");
     expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "not_free", profileId: null, keys: [] });
     expect(answer.offers).toEqual(["keys"]);
     expect(answer.detail).toBe("A password prompt is waiting on the last row. Collie does not type into it from the text box. Use Type to answer it.");
     // The receipt never keeps the prompt's row: it names a user.
-    expect(JSON.stringify(answer.receipt)).not.toContain("altan");
+    expect(JSON.stringify(answer.receipt)).not.toContain("dev");
     expect(pane.calls).toEqual([]);
     expect(pane.keysSeen).toEqual([]);
     expect(holds.list()).toEqual([]);
@@ -1011,6 +1018,7 @@ describe("a shell pane (no agent named, no profile) is typed and Entered blind (
 
   test("an Enter the multiplexer refuses leaves the text typed, and offers only the key pad: there is no rows hash to bind a Submit to", async () => {
     const r = rig({ mode: "generic", harness: "" });
+    r.pane.fixed = shellText();
     r.pane.writeKeys = () => Promise.resolve(muxRefused("no such pane"));
     const answer = await r.send("make test");
     expect(answer.receipt).toMatchObject({ outcome: "typed_not_submitted", reason: "submit_failed", keys: [] });
@@ -3147,7 +3155,7 @@ describe("the probe", () => {
     expect(probeReads).toBeLessThanOrEqual(BOUNDS.probe.reads + LATE_PROBE.reads);
   });
 
-  // A herdr-core crew member on minibuch (2026-10-30): keys ["probe", "Backspace"], `probe_failed`,
+  // A herdr-core crew member on workshop (2026-10-30): keys ["probe", "Backspace"], `probe_failed`,
   // "Collie could not confirm the box was clean". One write there opens a socket, attaches and paints
   // the screen, so the two writes ate the probe's read bound and the Backspace half never read.
   describe("on a multiplexer whose writes are slow (herdr-core, 2026-10-30)", () => {
@@ -3188,7 +3196,7 @@ describe("the probe", () => {
 
     test("a Backspace held three seconds behind the raw probe write (herdr-core 0.1.14, measured 2026-10-30) still reads", async () => {
       // On a private hc session `terminal.keys` answered about 3030 ms after a `typeRaw`, whatever the gap
-      // between them; a raw write took 1 ms. Before the fix this was the minibuch receipt word for word.
+      // between them; a raw write took 1 ms. Before the fix this was the workshop receipt word for word.
       const r = rig({ version: "2.1.999" });
       r.pane.beforeWrite = (_p, what) => {
         if (what.startsWith("keys:")) r.clock.now += 3000;
@@ -4627,6 +4635,10 @@ describe("real screens from the fixture corpus", () => {
     panel.pane.over = [LIVE_ROW];
     panel.pane.status = ["  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents", "", "  ● main", "  ◯ first agent   working   3s · ↓ 1k tokens", "  ◯ second agent   working   9s · ↓ 2k tokens"];
     expect((await panel.send("carry on")).receipt).toMatchObject({ outcome: "sent" });
+    const macPanel = rig({ version: "2.1.322" });
+    macPanel.pane.over = [LIVE_ROW];
+    macPanel.pane.status = ["  ↑/↓ to select                                             ◐ medium · /effort", "", "❯ ⏺ main", "  ◯ first agent   working   3s · ↓ 1k tokens", "  ◯ second agent   working   9s · ↓ 2k tokens"];
+    expect((await macPanel.send("carry on")).receipt).toMatchObject({ outcome: "sent" });
   });
 
   for (const name of ["claude--menu-model-picker.txt", "claude--menu-resume-picker--w120-search.txt"]) {
@@ -4686,7 +4698,8 @@ describe("counters, the cap and the examples", () => {
 
   test("a blind send on a shell pane counts sent, never manual and never probed, and the cap never asks", async () => {
     const ledger = ledgerFor({ cap: 0 });
-    const { send } = rig({ mode: "generic", ledger, harness: "" });
+    const { pane, send } = rig({ mode: "generic", ledger, harness: "" });
+    pane.fixed = shellText();
     expect((await send("ls -la")).receipt).toMatchObject({ outcome: "sent", keys: ["Enter"] });
     expect(rowOf(ledger, "-")).toMatchObject({ manual: 0, sent: 1, probed: 0, status: "-", profileId: "-" });
   });
@@ -4938,6 +4951,86 @@ describe("a prompt edge closes a receipt as effective", () => {
     const answer = await send("hello there");
     expect(answer.receipt?.outcome).toBe("refused");
     expect(protocol.promptEdge("%1", hashOf(deps, "hello there"), clock.now)).toBeNull();
+  });
+});
+
+// ── the agent's own word settles an unknown (M102 spec 13) ──
+
+describe("a prompt event settles an unknown send inside its window (M102 spec 13)", () => {
+  const TEXT = "please fix the parser test";
+  /** A pane that keeps the text in its box after Enter: S2 finds no evidence, the send ends unknown. */
+  const stuck = (options: Parameters<typeof rig>[0] = {}) => {
+    const r = rig(options);
+    r.pane.afterInput = (p, what) => {
+      if (what.endsWith("Enter")) p.box = TEXT;
+    };
+    return r;
+  };
+  /** The Claude profile with its prompt event taken out of the edge map. */
+  const noPromptEvent = (profile: Profile): Profile => {
+    const events = Object.fromEntries(Object.entries(profile.edges?.events ?? {}).filter(([, kind]) => kind !== "prompt"));
+    return { ...profile, edges: { rereadMs: profile.edges?.rereadMs ?? 700, settleMs: profile.edges?.settleMs ?? 1500, events } };
+  };
+
+  test("unknown on a harness whose profile names a prompt event: the receipt waits 30 s for it, and the event settles it effective", async () => {
+    const { send, protocol, deps, clock } = stuck();
+    const answer = await send(TEXT);
+    const id = answer.receipt!.requestId;
+    expect(answer.receipt).toMatchObject({ outcome: "unknown", reason: "no_evidence" });
+    const until = answer.receipt!.awaitingEventUntil!;
+    expect(until).toBeGreaterThan(clock.now);
+    expect(until - clock.now).toBeLessThanOrEqual(30_000);
+    expect(protocol.recent("%1").find((row) => row.requestId === id)?.awaitingEventUntil).toBe(until);
+    expect(protocol.promptEdge("%1", deps.store.hashText(TEXT), clock.now + 1_000)).toBe(id);
+    const settled = deps.store.get(id)?.receipt;
+    expect(settled?.outcome).toBe("effective");
+    expect(settled?.reason).toBeUndefined();
+    expect(settled?.awaitingEventUntil).toBeUndefined();
+    // A retry under the same id answers the settled receipt; nothing is typed again.
+    const replay = await send(TEXT, { id });
+    expect(replay.replayed).toBe(true);
+    expect(replay.receipt?.outcome).toBe("effective");
+  });
+
+  test("an event past the window settles nothing: the receipt stays unknown, it only cost the wait", async () => {
+    const { send, protocol, deps } = stuck();
+    const answer = await send(TEXT);
+    const until = answer.receipt!.awaitingEventUntil!;
+    expect(protocol.promptEdge("%1", deps.store.hashText(TEXT), until + 1)).toBeNull();
+    expect(deps.store.get(answer.receipt!.requestId)?.receipt?.outcome).toBe("unknown");
+  });
+
+  test("an event whose text the agent changed (trimmed inside, a fold, a rewritten command) settles nothing", async () => {
+    const { send, protocol, deps, clock } = stuck();
+    const answer = await send(TEXT);
+    for (const changed of ["please fix the  parser test", "[Pasted text #1 +2 lines]", "/please fix the parser test", `${TEXT}\nand one more queued line`]) {
+      expect(protocol.promptEdge("%1", deps.store.hashText(changed), clock.now + 1_000)).toBeNull();
+    }
+    expect(deps.store.get(answer.receipt!.requestId)?.receipt?.outcome).toBe("unknown");
+  });
+
+  test("outer white space and CR line ends are the same text on both sides", async () => {
+    const { send, protocol, deps, clock } = stuck();
+    const answer = await send(TEXT);
+    expect(protocol.promptEdge("%1", deps.store.hashText(normalizePrompt(`  ${TEXT}\r\n`)), clock.now + 1_000)).toBe(answer.receipt!.requestId);
+  });
+
+  test("a harness whose profile names no prompt event: the unknown carries no window", async () => {
+    const { send } = stuck({ edit: noPromptEvent });
+    const answer = await send(TEXT);
+    expect(answer.receipt?.outcome).toBe("unknown");
+    expect(answer.receipt?.awaitingEventUntil).toBeUndefined();
+  });
+
+  test("a sent receipt carries no window, and a refused one opens none", async () => {
+    const { pane, send } = rig();
+    const sent = await send("a text that goes through");
+    expect(sent.receipt?.outcome).toBe("sent");
+    expect(sent.receipt?.awaitingEventUntil).toBeUndefined();
+    pane.box = "a draft the person typed";
+    const refused = await send("hello there");
+    expect(refused.receipt?.outcome).toBe("refused");
+    expect(refused.receipt?.awaitingEventUntil).toBeUndefined();
   });
 });
 
@@ -5496,6 +5589,88 @@ describe("the held send (M56 spec 15)", () => {
       ["held-000092", "ended", "refused"],
       ["held-000093", "ended", "expired"],
     ]);
+  });
+
+  test("a crash between a cancel's two writes never leaves a request held with no row", async () => {
+    const r = untrusted();
+    await r.send("then give it a title", { id: "held-000095" });
+    // The process dies when the request is about to settle: whatever the cancel wrote first is all there is.
+    r.deps.store.settle = () => {
+      throw new Error("crash");
+    };
+    expect(() => r.protocol.cancelHeld("main", "%1", "held-000095")).toThrow("crash");
+    const store = new RequestStore(join(dir, "sends"), () => 2_000_000);
+    store.recover(SendProtocol.crashReceipt);
+    const holds = new HoldStore(join(dir, "held"), () => 2_000_000);
+    SendProtocol.reconcileHolds(holds, store);
+    const stranded = store.get("held-000095")?.phase === "held" && holds.get("held-000095") === null;
+    expect(stranded).toBe(false);
+  });
+
+  test("a crash between an expiry's two writes never leaves a request held with no row", async () => {
+    const clock = { now: 1_000_000 };
+    const r = untrusted({ clock });
+    await r.send("then give it a title", { id: "held-000096" });
+    clock.now += 31 * 60 * 1000;
+    r.deps.store.settle = () => {
+      throw new Error("crash");
+    };
+    await tick(r).catch(() => undefined);
+    const store = new RequestStore(join(dir, "sends"), () => clock.now);
+    store.recover(SendProtocol.crashReceipt);
+    const holds = new HoldStore(join(dir, "held"), () => clock.now);
+    SendProtocol.reconcileHolds(holds, store);
+    const stranded = store.get("held-000096")?.phase === "held" && holds.get("held-000096")?.state !== "held";
+    expect(stranded).toBe(false);
+  });
+
+  test("a settle that throws for one held request does not stop the poll for the others, and the next poll ends it", async () => {
+    const clock = { now: 1_000_000 };
+    const r = untrusted({ clock });
+    await r.send("then give it a title", { id: "held-000091" });
+    await r.send("and a second one", { id: "held-000092" });
+    await r.send("and a third one", { id: "held-000093" });
+    clock.now += 31 * 60 * 1000;
+    const settle = r.deps.store.settle.bind(r.deps.store);
+    let full = true;
+    r.deps.store.settle = (id, receipt) => {
+      if (full && id === "held-000091") throw new Error("ENOSPC: no space left on device");
+      return settle(id, receipt);
+    };
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (line: string) => void warnings.push(line);
+    try {
+      await tick(r);
+      // The two others ended, the failing one is still held, and one warning said so.
+      expect(r.deps.holds!.get("held-000092")).toMatchObject({ state: "ended", outcome: "expired" });
+      expect(r.deps.holds!.get("held-000093")).toMatchObject({ state: "ended", outcome: "expired" });
+      expect(r.deps.holds!.get("held-000091")).toMatchObject({ state: "held" });
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("ENOSPC");
+      // The disk has room again: the next poll ends it.
+      full = false;
+      await tick(r);
+      expect(r.deps.holds!.get("held-000091")).toMatchObject({ state: "ended", outcome: "expired" });
+    } finally {
+      console.warn = warn;
+    }
+  });
+
+  test("a request settled before its row was removed finishes the row on start: a cancel drops it, an expiry ends it with no crash reason", async () => {
+    const r = untrusted();
+    await r.send("then give it a title", { id: "held-000097" });
+    await r.send("and a second one", { id: "held-000098" });
+    const held = (id: string) => r.deps.store.get(id)!.receipt!;
+    r.deps.store.settle("held-000097", { ...held("held-000097"), outcome: "cancelled" });
+    r.deps.store.settle("held-000098", { ...held("held-000098"), outcome: "expired" });
+    const store = new RequestStore(join(dir, "sends"), () => 2_000_000);
+    store.recover(SendProtocol.crashReceipt);
+    const holds = new HoldStore(join(dir, "held"), () => 2_000_000);
+    expect(SendProtocol.reconcileHolds(holds, store)).toBe(2);
+    expect(holds.get("held-000097")).toBeNull();
+    expect(holds.get("held-000098")).toMatchObject({ state: "ended", outcome: "expired" });
+    expect(holds.get("held-000098")?.reason).toBeUndefined();
   });
 
   test("a release the bridge died in ends unknown(crash) on boot, its text kept, and is never sent again", async () => {
@@ -6940,8 +7115,8 @@ describe("a profile whose probe is provisional never skips the probe (M56 spec 1
 });
 
 describe("a frameless manual send in a turn is refused where Enter is not known to queue (M56 spec 14 review)", () => {
+  // Grok left this list on 2026-11-16: the harness lab on 1.0.77 measured that its Enter queues in a turn.
   const cases = [
-    { harness: "grok", version: "1.0.46", rows: ["  Ctrl+e:expand thinking  │  Space:prompt  │  Esc:cancel  │  Ctrl+b:send to bg  │  Ctrl+.:shortcuts"] },
     { harness: "agy", version: "1.1.17", rows: ["⣟  Generating...", "└ Tip: Use /btw to ask a question without breaking context.", "esc to cancel     accept-edits · Gemini 3.7 Flash · low"] },
   ];
   for (const c of cases) {
@@ -7290,7 +7465,7 @@ describe("a send at a box that is not free is held, not refused (2026-10-17 fiel
     expect((await r.send("/compact", { id: "probe-00004", mode: "command" })).receipt).toMatchObject({ outcome: "refused", reason: "probe_failed" });
   });
 
-  test("a manual send (Type here) whose probe fails clean stays refused, nothing held (review, 2026-10-17)", async () => {
+  test("a manual send (Send anyway) whose probe fails clean stays refused, nothing held (review, 2026-10-17)", async () => {
     const holds = new HoldStore(join(dir, "held"));
     const framed = rig({ holds });
     framed.pane.transcript = Array.from({ length: 12 }, (_, i) => `transcript row ${String(i)}`);
@@ -7309,9 +7484,10 @@ describe("a send at a box that is not free is held, not refused (2026-10-17 fiel
   test("a pane with no profile never holds: a shell's send goes in blind, with no read for a hold to wait on", async () => {
     const holds = new HoldStore(join(dir, "held"));
     const r = rig({ harness: "", holds });
+    r.pane.fixed = shellText();
     // The screen would move between the two S0 reads (not_free, the reason a profiled pane holds); no read is taken.
     r.pane.beforeRead = (p, n) => {
-      if (n === 2) p.transcript.push("a row that came in");
+      if (n === 2) p.fixed = `${p.fixed ?? ""}\r\na row that came in`;
     };
     const answer = await r.send("hello");
     expect(answer.receipt).toMatchObject({ outcome: "sent", keys: ["Enter"] });
@@ -7395,6 +7571,19 @@ describe("a draft holds a marked send, and only a marked one (M62 spec 02)", () 
     expect(r.pane.box).toBe("half a thought");
   });
 
+  test("the hold row of a marked send names its WalkyTalky message (a person's own held row, pinned whole above, names none)", async () => {
+    const r = queued();
+    r.pane.box = "half a thought";
+    const until = r.clock.now + HOUR;
+    await r.send("[walky-talky wt_aaaaaaaaaaa1] from agent x", { id: "draft-000001", ...marked(until), walky: "wt_aaaaaaaaaaa1" });
+    // The same ids come back from the file, then the row the snapshot serves.
+    expect(r.holds.get("draft-000001")).toMatchObject({ draftHolds: true, walky: "wt_aaaaaaaaaaa1" });
+    expect(r.protocol.heldOf("main", "%1")).toMatchObject([{ requestId: "draft-000001", state: "held", cause: "draft_present", walky: "wt_aaaaaaaaaaa1" }]);
+    // A marked send with no message id (a caller that is not walky) carries none.
+    await r.send("another", { id: "draft-000002", ...marked(until) });
+    expect(r.protocol.heldOf("main", "%1")[1]).not.toHaveProperty("walky");
+  });
+
   test("a phone send while a marked send waits over the draft does not join its queue: it is refused with its offers", async () => {
     const r = queued();
     r.pane.box = "half a thought";
@@ -7433,6 +7622,48 @@ describe("a draft holds a marked send, and only a marked one (M62 spec 02)", () 
     const [released] = await tick(r);
     expect(released?.receipt).toMatchObject({ requestId: "draft-000007", outcome: "sent" });
     expect(r.pane.transcript.slice(-2)).toEqual(["> fix the parser", "> from walky"]);
+  });
+
+  // A cancel (the sender's, a Drop) and an expiry end a held message only while it waits. Once its release
+  // starts, `release` marks the row `running` in the same synchronous step (protocol.ts `release`), and both
+  // `cancelHeld` and the poll's expiry skip a running row. So a mail row never ends `cancelled` or `expired`
+  // with its text in the box: it ends by the receipt of the write.
+  test("a cancel or an expiry that arrives before or while the message is typed ends nothing: refused busy, and the send ends by its receipt (never cancelled)", async () => {
+    const r = queued();
+    r.pane.box = "fix the parser";
+    const until = r.clock.now + HOUR;
+    await r.send("from walky", { id: "draft-000071", ...marked(until), walky: "wt_aaaaaaaaaaa1" });
+    r.pane.transcript.push("> fix the parser");
+    r.pane.box = "";
+    expect(await tick(r, RUNNING)).toEqual([]);
+    expect(await tick(r, RUNNING)).toEqual([]);
+    expect(await tick(r)).toEqual([]);
+    const cancels: (HeldCancelAnswer | null)[] = [];
+    const polls: Promise<SendAnswer | null>[] = [];
+    // Once as the release reads the box (before the write), once as its text goes in (during the write).
+    const strike = () => {
+      cancels.push(r.protocol.cancelHeld("main", "%1", "draft-000071"));
+      expect(r.holds.get("draft-000071")?.state).toBe("running");
+      const was = r.clock.now;
+      r.clock.now = until + 1;
+      polls.push(...r.protocol.tickHolds("main", () => FREE));
+      r.clock.now = was;
+    };
+    r.pane.beforeRead = () => {
+      if (cancels.length === 0) strike();
+    };
+    r.pane.afterInput = (_p, what) => {
+      if (cancels.length === 1 && what.includes("from walky")) strike();
+    };
+    const [released] = await tick(r);
+    await Promise.all(polls);
+    expect(cancels).toEqual([{ result: "refused", reason: "busy" }, { result: "refused", reason: "busy" }]);
+    expect(released?.receipt).toMatchObject({ requestId: "draft-000071", outcome: "sent" });
+    expect(r.deps.store.get("draft-000071")?.receipt?.outcome).toBe("sent");
+    expect(r.holds.list()).toEqual([]);
+    expect(r.pane.transcript.slice(-2)).toEqual(["> fix the parser", "> from walky"]);
+    // After the end the cancel is still refused, with the stored receipt, never `cancelled`.
+    expect(r.protocol.cancelHeld("main", "%1", "draft-000071")).toMatchObject({ result: "refused", reason: "busy", receipt: { outcome: "sent" } });
   });
 
   test("a submitted draft whose turn has not drawn yet: two quick free reads type nothing, the turn read makes it a turn hold (2026-10-21 rig case 9)", async () => {
@@ -10693,6 +10924,31 @@ describe("omp's typeahead popups under the box (1.24.1)", () => {
     expect(pane.box).toBe("@/tmp/x.png");
   });
 
+  test("Send anyway onto the text an earlier send left under the popup: nothing typed a second time, textAlreadyTyped (M102 spec 12)", async () => {
+    const { send, pane, protocol } = ompPane("omp--v18-6-1-at-popup-path--w120.txt");
+    const first = await send("@/tmp/x.png", { id: "own-left-first-01", mode: "command" });
+    expect(first.receipt).toMatchObject({ outcome: "typed_not_submitted" });
+    expect(pane.box).toBe("@/tmp/x.png");
+    const prep = await protocol.handle({ id: "own-left-prepare1", text: "", mode: "prepare", fromPhone: true }, { session: "main", paneId: "%1", harness: "omp" });
+    const calls = pane.calls.length;
+    // The phone's commit after the refusal: a new id, the override and the rows hash.
+    const over = await send("@/tmp/x.png", { id: "own-left-override", mode: "command", fromPhone: true, override: true, rowsHash: prep.rowsHash });
+    expect(over.receipt).toMatchObject({ outcome: "typed_not_submitted", reason: "override", word: "override", keys: [], textAlreadyTyped: true });
+    expect(pane.calls.slice(calls)).toEqual([]);
+    expect(pane.box).toBe("@/tmp/x.png");
+    expect(protocol.recent("%1", 1)[0]?.textAlreadyTyped).toBe(true);
+  });
+
+  test("Send anyway onto a draft that is not the text: typed after it, no textAlreadyTyped", async () => {
+    const { send, pane, protocol } = ompPane("omp--v18-6-1-at-popup-path--w120.txt");
+    await send("@/tmp/x.png", { id: "own-other-first-1", mode: "command" });
+    const prep = await protocol.handle({ id: "own-other-prepare", text: "", mode: "prepare", fromPhone: true }, { session: "main", paneId: "%1", harness: "omp" });
+    const over = await send("@/tmp/y.png", { id: "own-other-overrid", mode: "command", fromPhone: true, override: true, rowsHash: prep.rowsHash });
+    expect(over.receipt).toMatchObject({ outcome: "typed_not_submitted", reason: "override" });
+    expect(over.receipt?.textAlreadyTyped).toBeUndefined();
+    expect(pane.box).toBe("@/tmp/x.png@/tmp/y.png");
+  });
+
   test("the typed @ path goes out when the person taps Submit: the submit key ignores the popup", async () => {
     const { send, pane } = ompPane("omp--v18-6-1-at-popup-path--w120.txt");
     pane.box = "@/tmp/x.png";
@@ -11705,5 +11961,699 @@ describe("review 9 rule 5: a view send never answers and never joins a draft", (
     expect(answer.detail).toBe(VIEW_AT_DRAFT);
     expect(pane.box).toBe("my half-written note");
     expect(pane.keysSeen).toEqual([]);
+  });
+});
+
+// ── the agents panel under the box redraws while Collie types (2026-11-13, field: lane 8788) ──
+
+describe("the agents panel under the box is chrome: its rows come and go on their own (2026-11-13)", () => {
+  /** The field screen's rows under the box (Claude Code 2.1.323, field case): two statusline rows, the mode row, a blank row, the agents panel. */
+  const STATUS = ["  CTX:19% CACHE:100% LIMITS 7d:0%/4d:07h", "  [Fable·xhigh] ~/projects/sample on main*", "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 11 agents"];
+  const MAIN = "  ● main";
+  const agent = (task: string): string => `  ◯ general-purpose  ${task}                    1m 3s · ↓ 88.8k tokens`;
+  const panel = (...tasks: string[]): string[] => [...STATUS, "", MAIN, ...tasks.map(agent)];
+  const TEXT_IN = "decision 1 is good";
+
+  test("field repro: a background agent resumes as the text goes in, in a running turn: sent (was typed_not_submitted, changed)", async () => {
+    const { pane, send } = rig({ version: "2.1.302" });
+    pane.over = [LIVE_ROW];
+    pane.status = panel("Waiting on the gate result");
+    pane.afterInput = (p, what) => {
+      if (what.includes(TEXT_IN)) p.status = panel("Waiting on the gate result", "Resumed: card sentence");
+    };
+    const answer = await send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "sent", keys: ["probe", "Backspace", "Enter"] });
+    expect(pane.box).toBe("");
+  });
+
+  test("an agent ends, the panel goes, or the panel first appears while the text goes in, idle or running: sent", async () => {
+    const cases: [string[], string[]][] = [
+      [panel("one", "two"), panel("one")],
+      [panel("one"), STATUS],
+      [STATUS, panel("one")],
+    ];
+    for (const [before, after] of cases) {
+      for (const over of [[], [LIVE_ROW]]) {
+        const { pane, send } = rig({ version: "2.1.302" });
+        pane.over = over;
+        pane.status = before;
+        pane.afterInput = (p, what) => {
+          if (what.includes(TEXT_IN)) p.status = after;
+        };
+        const answer = await send(TEXT_IN);
+        expect(answer.receipt, `${String(before.length)}→${String(after.length)} ${String(over.length)}`).toMatchObject({ outcome: "sent" });
+      }
+    }
+  });
+
+  test("without the profile's chrome mark the same redraw stops as before: the mark is the only excuse", async () => {
+    const unmarked = (profile: Profile): Profile => ({
+      ...profile,
+      idle: {
+        ...profile.idle,
+        volatile: {
+          ...profile.idle.volatile,
+          below: { ...profile.idle.volatile.below, footerRows: (profile.idle.volatile.below.footerRows ?? []).map(({ name, pattern }) => ({ name, pattern })) },
+        },
+      },
+    });
+    const { pane, send } = rig({ version: "2.1.302", edit: unmarked });
+    pane.over = [LIVE_ROW];
+    pane.status = panel("one");
+    pane.afterInput = (p, what) => {
+      if (what.includes(TEXT_IN)) p.status = panel("one", "two");
+    };
+    const answer = await send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "typed_not_submitted", reason: "changed" });
+    expect(pane.keysSeen).not.toContain("Enter");
+  });
+
+  test("a dialog drawn under the box in the panel's place as the text goes in: no Enter", async () => {
+    for (const over of [[], [LIVE_ROW]]) {
+      const { pane, send } = rig({ version: "2.1.302" });
+      pane.over = over;
+      pane.status = panel("one");
+      pane.afterInput = (p, what) => {
+        if (what.includes(TEXT_IN)) p.status = [...STATUS, "", ...DIALOG];
+      };
+      const answer = await send(TEXT_IN);
+      expect(answer.receipt?.outcome, String(over.length)).toBe("typed_not_submitted");
+      expect(pane.keysSeen, String(over.length)).not.toContain("Enter");
+      expect(pane.box).toBe(TEXT_IN);
+    }
+  });
+
+  test("an agent row that only looks like one, outside an accepted panel (no blank row, no main row): it still counts, no Enter", async () => {
+    const { pane, send } = rig({ version: "2.1.302" });
+    pane.over = [LIVE_ROW];
+    pane.status = panel("one");
+    pane.afterInput = (p, what) => {
+      // Straight under the statusline, with no blank row and no main row over it: no named run.
+      if (what.includes(TEXT_IN)) p.status = [...STATUS, agent("two"), "", MAIN, agent("one")];
+    };
+    const answer = await send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "typed_not_submitted", reason: "changed" });
+    expect(pane.keysSeen).not.toContain("Enter");
+  });
+
+  test("the panel moves and the box holds one character less than was typed: no Enter (mismatch)", async () => {
+    const { pane, send } = rig({ version: "2.1.302" });
+    pane.over = [LIVE_ROW];
+    pane.status = panel("one");
+    pane.dropLastChar = true;
+    pane.afterInput = (p, what) => {
+      if (what.includes(TEXT_IN.slice(0, -1))) p.status = panel("one", "two");
+    };
+    const answer = await send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "typed_not_submitted", reason: "mismatch" });
+    expect(pane.keysSeen).not.toContain("Enter");
+  });
+
+  test("the panel moves and the frame with the text goes: no Enter (changed)", async () => {
+    const { pane, send } = rig({ version: "2.1.302" });
+    pane.over = [LIVE_ROW];
+    pane.status = panel("one");
+    pane.afterInput = (p, what) => {
+      if (what.includes(TEXT_IN)) p.fixed = ["", "  Your conversation moved to the background.", "", "  Nothing is selected."].join("\n");
+    };
+    const answer = await send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "typed_not_submitted", reason: "changed" });
+    expect(pane.keysSeen).not.toContain("Enter");
+  });
+});
+
+// ── a send of the same text finishes what an earlier send left typed (2026-11-13) ──
+
+describe("the same text again onto the box an earlier send left it in: Enter only, nothing typed (2026-11-13)", () => {
+  const TEXT_IN = "decision 1 is good";
+  const SCREEN_GONE = ["", "  Your conversation moved to the background.", "", "  Nothing is selected."].join("\n");
+
+  /** A rig whose first send ends typed_not_submitted with the text in the box: the screen goes for every S1 read, then comes back. */
+  async function leftTyped(options: Parameters<typeof rig>[0] = {}): Promise<Rig> {
+    const r = rig({ version: "2.1.302", ...options });
+    let gone = false;
+    r.pane.afterInput = (_pane, what) => {
+      if (what.includes(TEXT_IN)) gone = true;
+    };
+    r.pane.beforeRead = (p) => {
+      p.fixed = gone ? SCREEN_GONE : null;
+    };
+    const first = await r.send(TEXT_IN);
+    expect(first.receipt).toMatchObject({ outcome: "typed_not_submitted", reason: "changed" });
+    expect(r.pane.box).toBe(TEXT_IN);
+    gone = false;
+    r.pane.afterInput = null;
+    r.pane.beforeRead = null;
+    r.pane.fixed = null;
+    r.pane.calls = [];
+    r.pane.keysSeen = [];
+    return r;
+  }
+
+  test("the retry submits it: sent, only Enter pressed, nothing typed, and the receipt says why", async () => {
+    const { pane, send } = await leftTyped();
+    const answer = await send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "sent", keys: ["Enter"] });
+    expect(answer.receipt?.detail).toBe("The box already held this text, typed by an earlier send, so only the submit key was pressed.");
+    expect(pane.calls).toEqual([]);
+    expect(pane.keysSeen).toEqual(["Enter"]);
+    expect(pane.box).toBe("");
+  });
+
+  // M100 spec 03: a text write the multiplexer did not confirm and that did not show in its wait ends
+  // `unknown`. If it lands later and the person confirms "Send it again?", the box holds exactly this
+  // text: the resend takes this same path (Enter only), and the text is never in the box twice.
+  test("a write that was not confirmed, did not show, and landed later: the resend presses only Enter", async () => {
+    const r = rig({ version: "2.1.302" });
+    const writes = r.deps.mux;
+    const land = writes.pasteText ?? writes.typeText;
+    let lose = true;
+    const losing = (paneId: string, text: string): Promise<MuxAck> => {
+      if (lose && text.includes(TEXT_IN)) {
+        lose = false;
+        return Promise.resolve(muxUnconfirmed("Herdr did not confirm the text written to %1 in time (herdr pane.send_text: timed out after 5000ms). It may still arrive, so it was not written again."));
+      }
+      return land(paneId, text);
+    };
+    writes.typeText = losing;
+    if (writes.pasteText !== undefined) writes.pasteText = losing;
+    const first = await r.send(TEXT_IN);
+    expect(first.receipt).toMatchObject({ outcome: "unknown", reason: "no_evidence" });
+    expect(r.pane.box).toBe("");
+    // The text lands after Collie stopped looking.
+    await land("%1", TEXT_IN);
+    expect(r.pane.box).toBe(TEXT_IN);
+    r.pane.calls = [];
+    r.pane.keysSeen = [];
+    const again = await r.send(TEXT_IN);
+    expect(again.receipt).toMatchObject({ outcome: "sent", keys: ["Enter"] });
+    expect(r.pane.calls).toEqual([]);
+    expect(r.pane.keysSeen).toEqual(["Enter"]);
+    expect(r.pane.box).toBe("");
+  });
+
+  test("the retry in a running turn queues it the same way: sent and queued, only Enter", async () => {
+    const { pane, send } = await leftTyped();
+    pane.over = [LIVE_ROW];
+    const answer = await send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "sent", keys: ["Enter"] });
+    expect(pane.calls).toEqual([]);
+  });
+
+  test("a person's own draft of the same words, never typed by a send: refused draft_present, no Enter", async () => {
+    const { pane, send } = rig({ version: "2.1.302" });
+    pane.box = TEXT_IN;
+    const answer = await send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "draft_present" });
+    expect(pane.keysSeen).not.toContain("Enter");
+    expect(pane.box).toBe(TEXT_IN);
+  });
+
+  test("the left text edited in the terminal by one character: refused draft_present, no Enter", async () => {
+    const { pane, send } = await leftTyped();
+    pane.box = `${TEXT_IN}!`;
+    const answer = await send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "draft_present" });
+    expect(pane.keysSeen).not.toContain("Enter");
+    expect(pane.box).toBe(`${TEXT_IN}!`);
+  });
+
+  test("another text onto the left text: refused draft_present, as before", async () => {
+    const { pane, send } = await leftTyped();
+    const answer = await send("something else");
+    expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "draft_present" });
+    expect(pane.keysSeen).not.toContain("Enter");
+    expect(pane.box).toBe(TEXT_IN);
+  });
+
+  test("a dialog over the left text: no Enter", async () => {
+    const { pane, send } = await leftTyped();
+    pane.dialog = DIALOG;
+    const answer = await send(TEXT_IN);
+    expect(answer.receipt?.outcome).toBe("refused");
+    expect(pane.keysSeen).not.toContain("Enter");
+  });
+
+  test("a new pane generation (another program in the pane): the left text is no longer the send's, refused draft_present", async () => {
+    let generation = "gen-1";
+    const { pane, send } = await leftTyped({ generation: () => generation });
+    generation = "gen-2";
+    const answer = await send(TEXT_IN);
+    expect(answer.receipt?.outcome).toBe("refused");
+    expect(pane.keysSeen).not.toContain("Enter");
+  });
+
+  test("after the time limit: refused draft_present, as before", async () => {
+    const { pane, send, clock } = await leftTyped();
+    clock.now += LEFT_TYPED_MS + 1;
+    const answer = await send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "draft_present" });
+    expect(pane.keysSeen).not.toContain("Enter");
+  });
+
+  test("a WalkyTalky message (draftHolds) of the same text is not finished: it is never typed onto the box", async () => {
+    const { pane, send } = await leftTyped();
+    const answer = await send(TEXT_IN, { draftHolds: true });
+    expect(answer.receipt?.outcome).not.toBe("sent");
+    expect(pane.keysSeen).not.toContain("Enter");
+    expect(pane.box).toBe(TEXT_IN);
+  });
+
+  test("after a bridge restart the request files say the text was the send's: the retry submits it, nothing typed", async () => {
+    const storeDir = join(dir, "kept-sends");
+    const clock = { now: 1_000_000 };
+    const before = await leftTyped({ storeDir, clock });
+    // A new protocol over the same files: nothing in memory, the same pane, box and generation.
+    const after = rig({ version: "2.1.302", storeDir, clock, pane: before.pane });
+    const answer = await after.send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "sent", keys: ["Enter"] });
+    expect(before.pane.calls).toEqual([]);
+  });
+
+  test("after a crash mid-send (unknown, crash, no submit key yet) the request files still prove it: the retry submits it", async () => {
+    const storeDir = join(dir, "crashed-sends");
+    const clock = { now: 1_000_000 };
+    const first = rig({ version: "2.1.302", storeDir, clock });
+    // The bridge died after the text went in: the record is accepted and never settled.
+    first.deps.store.accept({ id: "crash-000001", session: "main", paneId: "%1", paneGeneration: "gen-1", surfaceRevision: 0, mode: "send", text: TEXT_IN });
+    first.deps.store.recover(SendProtocol.crashReceipt);
+    first.pane.box = TEXT_IN;
+    const answer = await first.send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "sent", keys: ["Enter"] });
+    expect(first.pane.calls).toEqual([]);
+  });
+
+  test("after a crash once the submit key had gone out, the request files prove nothing: refused draft_present", async () => {
+    const storeDir = join(dir, "crashed-late");
+    const first = rig({ version: "2.1.302", storeDir });
+    first.deps.store.accept({ id: "crash-000002", session: "main", paneId: "%1", paneGeneration: "gen-1", surfaceRevision: 0, mode: "send", text: TEXT_IN });
+    first.deps.store.markSubmitSent("crash-000002");
+    first.deps.store.recover(SendProtocol.crashReceipt);
+    first.pane.box = TEXT_IN;
+    const answer = await first.send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "draft_present" });
+    expect(first.pane.keysSeen).not.toContain("Enter");
+  });
+
+  test("once the left text was sent by Submit, the same words typed again by a person are a draft again", async () => {
+    const { pane, send } = await leftTyped();
+    const submitted = await send(TEXT_IN, { mode: "submit" });
+    expect(submitted.receipt?.outcome).toBe("sent");
+    pane.box = TEXT_IN;
+    pane.keysSeen = [];
+    const answer = await send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "draft_present" });
+    expect(pane.keysSeen).not.toContain("Enter");
+  });
+});
+
+// ── a WalkyTalky message that stops before Enter takes its own text out of the box (2026-11-13) ──
+
+describe("a WalkyTalky message left typed takes its own text back out of the person's box (2026-11-13)", () => {
+  const MAIL = "[walky-talky wt_0001] from sample: please rebase";
+  const GONE = ["", "  Your conversation moved to the background.", "", "  Nothing is selected."].join("\n");
+
+  /** A send whose S1 never passes (the screen goes for S1's reads), then the box comes back holding the text. */
+  function stopsAtS1(pane: FakePane, back: (p: FakePane) => void): void {
+    let typed = false;
+    let s1Reads = 0;
+    pane.afterInput = (_pane, what) => {
+      if (what.includes(MAIL)) typed = true;
+    };
+    pane.beforeRead = (p) => {
+      if (!typed) return;
+      s1Reads++;
+      p.fixed = s1Reads <= BOUNDS.s1.reads ? GONE : null;
+      if (s1Reads === BOUNDS.s1.reads + 1) back(p);
+    };
+  }
+
+  test("the box holds exactly the message: it is taken out, nothing pressed but Backspace, and the send ends refused", async () => {
+    const { pane, send } = rig({ version: "2.1.302" });
+    stopsAtS1(pane, () => undefined);
+    const answer = await send(MAIL, { draftHolds: true });
+    expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "changed" });
+    expect(answer.receipt?.detail).toBe("Enter was not pressed, so the typed message was taken out of the box again. It waits in the inbox.");
+    expect(pane.box).toBe("");
+    expect(pane.keysSeen).not.toContain("Enter");
+  });
+
+  test("a person typed after it: nothing is taken out, the send ends typed_not_submitted as before", async () => {
+    const { pane, send } = rig({ version: "2.1.302" });
+    stopsAtS1(pane, (p) => {
+      p.box = `${MAIL} and mine`;
+    });
+    const answer = await send(MAIL, { draftHolds: true });
+    expect(answer.receipt?.outcome).toBe("typed_not_submitted");
+    expect(pane.box).toBe(`${MAIL} and mine`);
+    expect(pane.keysSeen.filter((key) => key === "Backspace").length).toBe(1);
+  });
+
+  test("a dialog stopped it (modal_cue): no key at all, the text stays", async () => {
+    const { pane, send } = rig({ version: "2.1.302" });
+    pane.afterInput = (p, what) => {
+      if (what.includes(MAIL)) p.dialog = DIALOG;
+    };
+    const answer = await send(MAIL, { draftHolds: true });
+    expect(answer.receipt).toMatchObject({ outcome: "typed_not_submitted", reason: "modal_cue" });
+    expect(pane.keysSeen.filter((key) => key === "Backspace").length).toBe(1);
+  });
+
+  test("a person's own send that stops is left typed, as before: only WalkyTalky mail is taken back", async () => {
+    const { pane, send } = rig({ version: "2.1.302" });
+    stopsAtS1(pane, () => undefined);
+    const answer = await send(MAIL);
+    expect(answer.receipt?.outcome).toBe("typed_not_submitted");
+    expect(pane.box).toBe(MAIL);
+  });
+});
+
+// ── the audit's siblings: the command settle key and the rows hash leave chrome rows out (2026-11-13) ──
+
+describe("chrome rows under the box tick on their own: the command settle key and the rows hash leave them out (2026-11-13)", () => {
+  const STATUS = ["  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents"];
+  const panelAt = (n: number): string[] => ["", "  ● main", `  ◯ general-purpose  Reading the profile                    ${String(n)}s · ↓ 88.8k tokens`];
+  const LIST = ["  ❯ /model   Set the AI model", "    /mcp     Manage MCP servers"];
+
+  test("a command with its own list open and an agent timer ticking under it on every read: sent, not 'list moving'", async () => {
+    const { pane, send } = rig({ version: "2.1.302" });
+    let ticks = 0;
+    let typed = false;
+    pane.status = [...STATUS, ...panelAt(0)];
+    pane.afterInput = (_pane, what) => {
+      if (what.includes("/model")) typed = true;
+    };
+    pane.beforeRead = (p) => {
+      ticks++;
+      p.popup = typed ? [...LIST, ...STATUS, ...panelAt(ticks)] : null;
+      p.status = [...STATUS, ...panelAt(ticks)];
+    };
+    const answer = await send("/model", { mode: "command" });
+    expect(answer.receipt).toMatchObject({ outcome: "sent" });
+    expect(pane.keysSeen.at(-1)).toBe("Enter");
+  });
+
+  test("the list itself changes on every read while the timer ticks: still no Enter", async () => {
+    const { pane, send } = rig({ version: "2.1.302" });
+    let ticks = 0;
+    let typed = false;
+    pane.status = [...STATUS, ...panelAt(0)];
+    pane.afterInput = (_pane, what) => {
+      if (what.includes("/model")) typed = true;
+    };
+    pane.beforeRead = (p) => {
+      ticks++;
+      const list = ["  ❯ /model   Set the AI model", `    /mcp     Manage MCP servers ${ticks % 2 === 0 ? "(on)" : "(off)"}`];
+      p.popup = typed ? [...list, ...STATUS, ...panelAt(ticks)] : null;
+    };
+    const answer = await send("/model", { mode: "command" });
+    expect(answer.receipt?.outcome).toBe("typed_not_submitted");
+    expect(pane.keysSeen).not.toContain("Enter");
+  });
+
+  test("the rows hash a person confirmed holds while an agent timer ticks under the box: Submit of an edited box is not stale", async () => {
+    const { pane, protocol, send } = rig({ version: "2.1.302" });
+    let ticks = 0;
+    pane.box = "decision 1 is goo";
+    pane.beforeRead = (p) => {
+      ticks++;
+      p.status = [...STATUS, ...panelAt(ticks)];
+    };
+    const prepared = await protocol.handle({ id: "chrome-prep-01", text: "", mode: "prepare" }, { session: "main", paneId: "%1", harness: "claude" });
+    expect(prepared.rowsHash).toBeDefined();
+    const answer = await send("decision 1 is good", { mode: "submit", rowsHash: prepared.rowsHash! });
+    expect(answer.receipt?.reason).not.toBe("stale_surface");
+    expect(answer.receipt).toMatchObject({ outcome: "sent", keys: ["Enter"] });
+  });
+
+  test("the rows hash still moves when a row that is no chrome changes under the box: stale_surface", async () => {
+    const { pane, protocol, send } = rig({ version: "2.1.302" });
+    let ticks = 0;
+    pane.box = "decision 1 is goo";
+    pane.beforeRead = (p) => {
+      ticks++;
+      p.status = [`  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← ${String(ticks)} agents`, ...panelAt(0)];
+    };
+    const prepared = await protocol.handle({ id: "chrome-prep-02", text: "", mode: "prepare" }, { session: "main", paneId: "%1", harness: "claude" });
+    const answer = await send("decision 1 is good", { mode: "submit", rowsHash: prepared.rowsHash! });
+    expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "stale_surface" });
+    expect(pane.keysSeen).not.toContain("Enter");
+  });
+});
+
+// Field case 2026-11-13 (request e86fd78e), as frame fixtures: Claude Code 2.1.323 in a running turn, the agents
+// panel under the box. The session resumed a background agent inside S1's window, and the panel gained a row
+// between the probe's read and S1's reads. Hand-built from the field screen's layout (its rows under the box
+// read from the pane the same evening; the transcript, model and path replaced), plain text.
+describe("Claude Code 2.1.323, the agents panel gains a row while the text goes in (field case 2026-11-13, frame fixtures)", () => {
+  const FIXTURES = join(import.meta.dir, "fixtures");
+  const capture = (name: string): string => readFileSync(join(FIXTURES, `claude--v2323-agents-panel-${name}--w120.txt`), "utf8");
+  const TEXT_IN = "decision 1 is good";
+  const replay = (typed: string): FakePane => {
+    const pane = new FakePane("claude");
+    let entered = false;
+    pane.afterInput = (_p, what) => {
+      if (what === "keys:Enter") entered = true;
+    };
+    pane.beforeRead = (p) => {
+      if (entered) p.fixed = capture("running");
+      else if (p.box === "") p.fixed = capture("running");
+      else if (p.box === PROBE) p.fixed = capture("probe");
+      else if (p.box === TEXT_IN) p.fixed = typed;
+      else throw new Error(`the field never showed the box holding ${JSON.stringify(p.box)}`);
+    };
+    return pane;
+  };
+  /** The Claude profile as shipped before the fix: the agents panel's rows carry no chrome mark. */
+  const unmarked = (profile: Profile): Profile => ({
+    ...profile,
+    idle: { ...profile.idle, volatile: { ...profile.idle.volatile, below: { ...profile.idle.volatile.below, footerRows: (profile.idle.volatile.below.footerRows ?? []).map(({ name, pattern }) => ({ name, pattern })) } } },
+  });
+
+  test("the cause: without the chrome mark the grown panel ends the send exactly as the field receipt did", async () => {
+    const pane = replay(capture("grown"));
+    const answer = await rig({ pane, version: "2.1.302", edit: unmarked }).send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "typed_not_submitted", reason: "changed", keys: ["probe", "Backspace"], s2: null, saw: { turn: "running", modal: "none", composer: "draft" } });
+    expect(answer.receipt?.detail).toBe("The frame with the typed text was gone, or the rows under the box changed, so Enter was not pressed.");
+    // The same send with the panel unchanged went out before the fix too: the panel's one new row is the whole cause.
+    const unchanged = replay(capture("typed"));
+    expect((await rig({ pane: unchanged, version: "2.1.302", edit: unmarked }).send(TEXT_IN)).receipt?.outcome).toBe("sent");
+  });
+
+  test("the fix: the grown panel is chrome, the box holds the text, one Enter", async () => {
+    const pane = replay(capture("grown"));
+    const answer = await rig({ pane, version: "2.1.302" }).send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "sent", keys: ["probe", "Backspace", "Enter"] });
+  });
+
+  test("the grown panel with one character off in the box: no Enter", async () => {
+    const pane = replay(capture("grown").replace("❯ decision 1 is good", "❯ decision 1 is goo"));
+    const answer = await rig({ pane, version: "2.1.302" }).send(TEXT_IN);
+    expect(answer.receipt).toMatchObject({ outcome: "typed_not_submitted", reason: "mismatch" });
+    expect(pane.keysSeen).not.toContain("Enter");
+  });
+});
+
+// ── the person's word on a receipt (M102 spec 01) ──
+
+describe("the person's word on a receipt (M102 spec 01)", () => {
+  /** A commit the person tapped on a screen Collie could not read, on the frameless profile's two-tap Send. */
+  const commit = async (r: Rig, over: Partial<SendRequest> = {}): Promise<{ first: SendAnswer; answer: SendAnswer }> => {
+    const first = await r.send("hello from the phone");
+    const answer = await r.send("hello from the phone", { rowsHash: first.rowsHash!, ...over });
+    return { first, answer };
+  };
+
+  test("the commit of a manual Send from the phone with override records word override beside the outcome, stored and listed", async () => {
+    const r = rig({ mode: "generic" });
+    const { first, answer } = await commit(r, { override: true, fromPhone: true });
+    expect(answer.receipt).toMatchObject({ outcome: "sent", word: "override" });
+    expect(first.receipt?.word).toBeUndefined();
+    expect(r.deps.store.get(answer.receipt!.requestId)?.receipt?.word).toBe("override");
+    expect(r.protocol.recent("%1").find((row) => row.requestId === answer.receipt!.requestId)?.word).toBe("override");
+  });
+
+  test("the word stays on an end that is not sent: a probe the screen failed still says the person overrode", async () => {
+    const bare = new CodexPane();
+    const r = rig({ pane: bare, harness: FRAMELESS });
+    const first = await r.send("hello");
+    bare.afterInput = (p, what) => {
+      if (what === `type:${GENERIC_PROBE}`) p.transcript[5] = "• ready, and more text";
+    };
+    const answer = await r.send("hello", { rowsHash: first.rowsHash!, override: true, fromPhone: true });
+    expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "probe_failed", word: "override" });
+  });
+
+  test("a commit without override carries no word", async () => {
+    const { answer } = await commit(rig({ mode: "generic" }), { fromPhone: true });
+    expect(answer.receipt).toMatchObject({ outcome: "sent" });
+    expect(answer.receipt?.word).toBeUndefined();
+  });
+
+  test("a request that is not the phone's own never carries a word, whatever it says", async () => {
+    const { answer } = await commit(rig({ mode: "generic" }), { override: true });
+    expect(answer.receipt).toMatchObject({ outcome: "sent" });
+    expect(answer.receipt?.word).toBeUndefined();
+  });
+
+  test("override on the first tap, with no rows hash, is the same refusal as before and carries no word", async () => {
+    const r = rig({ mode: "generic" });
+    const answer = await r.send("hello from the phone", { override: true, fromPhone: true });
+    expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "unconfirmed" });
+    expect(answer.receipt?.word).toBeUndefined();
+  });
+
+  test("a commit whose rows moved is refused stale_surface and carries no word: the person typed past nothing", async () => {
+    const r = rig({ mode: "generic" });
+    const first = await r.send("hello");
+    r.pane.transcript.push("a new line arrived");
+    const answer = await r.send("hello", { rowsHash: first.rowsHash!, override: true, fromPhone: true });
+    expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "stale_surface" });
+    expect(answer.receipt?.word).toBeUndefined();
+  });
+
+  test("a plain send on a free screen carries no word even when the request says override: nothing was typed past", async () => {
+    const r = rig();
+    const answer = await r.send("please fix the failing test", { override: true, fromPhone: true });
+    expect(answer.receipt).toMatchObject({ outcome: "sent" });
+    expect(answer.receipt?.word).toBeUndefined();
+  });
+
+  test("the word is replayed with the receipt for the same request id", async () => {
+    const r = rig({ mode: "generic" });
+    const first = await r.send("hello from the phone");
+    const request = { id: "person-word-replay-1", rowsHash: first.rowsHash!, override: true, fromPhone: true } as const;
+    const once = await r.send("hello from the phone", request);
+    const twice = await r.send("hello from the phone", request);
+    expect(once.receipt?.word).toBe("override");
+    expect(twice.receipt?.word).toBe("override");
+  });
+
+  test("markArrived marks an unknown receipt on its pane once, and the list and the counters carry the word", async () => {
+    const dayDir = join(dir, "counters");
+    const ledger = new SurfaceLedger(dayDir);
+    const r = rig({ mode: "generic", ledger });
+    const unknown = await settledUnknown(r, "person-word-unknown-1");
+    expect(r.protocol.markArrived("main", "%1", unknown)).toBe("marked");
+    expect(r.deps.store.get(unknown)?.receipt).toMatchObject({ outcome: "unknown", word: "arrived" });
+    expect(r.protocol.recent("%1").find((row) => row.requestId === unknown)).toMatchObject({ outcome: "unknown", word: "arrived" });
+    const arrived = (): number => ledger.rows().reduce((sum, row) => sum + row.arrived, 0);
+    expect(arrived()).toBe(1);
+    expect(r.protocol.markArrived("main", "%1", unknown)).toBe("already");
+    expect(arrived()).toBe(1);
+  });
+
+  test("markArrived refuses another pane's id, an id nobody sent and a receipt that did not end unknown", async () => {
+    const r = rig({ mode: "generic" });
+    const unknown = await settledUnknown(r, "person-word-unknown-2");
+    expect(r.protocol.markArrived("main", "%2", unknown)).toBe("not_found");
+    expect(r.protocol.markArrived("main", "%1", "person-word-nobody-1")).toBe("not_found");
+    const sent = await r.send("a send that goes through");
+    expect(r.protocol.markArrived("main", "%1", sent.receipt!.requestId)).toBe("not_unknown");
+    expect(r.deps.store.get(unknown)?.receipt?.word).toBeUndefined();
+    expect(r.deps.store.get(sent.receipt!.requestId)?.receipt?.word).toBeUndefined();
+  });
+
+  test("a counters ledger that throws never blocks the mark", async () => {
+    const ledger: SendLedger = {
+      send: () => undefined,
+      noteManual: () => undefined,
+      capState: () => ({ count: 0, limit: 5, reached: false }),
+      inbox: () => undefined,
+      example: () => undefined,
+      arrived: () => {
+        throw new Error("disk full");
+      },
+    };
+    const r = rig({ mode: "generic" });
+    const unknown = await settledUnknown(r, "person-word-unknown-3");
+    const guarded = new SendProtocol({ ...r.deps, ledger });
+    expect(guarded.markArrived("main", "%1", unknown)).toBe("marked");
+    expect(r.deps.store.get(unknown)?.receipt?.word).toBe("arrived");
+  });
+
+  /** A send whose submit key went out and whose receipt the screen could not prove: `unknown`, settled on disk. */
+  async function settledUnknown(r: Rig, id: string): Promise<string> {
+    const accepted = r.deps.store.accept({ id, session: "main", paneId: "%1", paneGeneration: "gen-1", surfaceRevision: 0, mode: "send", text: "was it typed" });
+    r.deps.store.settle(id, { ...SendProtocol.crashReceipt(accepted.record), reason: "no_evidence", harness: "claude", version: "2.1.200", profileId: "claude", profileStatus: "verified" });
+    expect(r.deps.store.get(id)?.receipt?.outcome).toBe("unknown");
+    return id;
+  }
+});
+
+describe("an override is never held, and goes into a turn as the manual commit does (M102 spec 01)", () => {
+  // The orchestrator, 2026-11-16: an override is never HELD by Collie, but where the harness itself
+  // queues a message in a running turn it goes in exactly as today's manual commit does, plus the word.
+
+  test("override: Claude at a running turn on a free box queues the send exactly as a plain send does, with no word (no stop was passed)", async () => {
+    const holds = new HoldStore(join(dir, "held"));
+    const plain = rig({ holds });
+    plain.pane.over = [LIVE_ROW];
+    const control = await plain.send("then give it a title");
+    expect(control.receipt).toMatchObject({ outcome: "sent", queued: true });
+    const r = rig({ holds });
+    r.pane.over = [LIVE_ROW];
+    const answer = await r.send("then give it a title", { override: true, fromPhone: true });
+    expect(answer.receipt).toMatchObject({ outcome: "sent", queued: true, keys: control.receipt!.keys });
+    expect(answer.receipt?.word).toBeUndefined();
+    expect(r.pane.keysSeen).toEqual(plain.pane.keysSeen);
+    expect(holds.list()).toEqual([]);
+  });
+
+  test("override: a refusal the hold queue would take (a running turn on an unread version) is not held", async () => {
+    const holds = new HoldStore(join(dir, "held"));
+    const control = rig({ version: "no version here", holds });
+    control.pane.over = [LIVE_ROW];
+    expect((await control.send("then give it a title")).receipt).toMatchObject({ outcome: "held" });
+    const { pane, send } = rig({ version: "no version here", holds: new HoldStore(join(dir, "held-two")) });
+    pane.over = [LIVE_ROW];
+    const answer = await send("then give it a title", { override: true, fromPhone: true });
+    expect(answer.receipt).toMatchObject({ outcome: "refused", reason: "turn_running" });
+    expect(pane.calls).toEqual([]);
+  });
+
+  test("override: Codex on a screen with no box and a running row takes the Tab queue byte for byte like today's manual commit, plus the word", async () => {
+    const holds = new HoldStore(join(dir, "held"));
+    const codexNoBox = (): ReturnType<typeof rig> => {
+      const r = rig({ pane: new FakePane("codex"), harness: "codex", version: "0.159.2", holds });
+      r.pane.over = ["• Working (4s • esc to interrupt)"];
+      r.pane.codexStatus = "  something the profile does not know";
+      r.pane.codexHint = "  ? for shortcuts";
+      return r;
+    };
+    const plain = codexNoBox();
+    const firstPlain = await plain.send("then add a short summary");
+    const control = await plain.send("then add a short summary", { rowsHash: firstPlain.rowsHash! });
+    expect(control.receipt).toMatchObject({ outcome: "sent" });
+    expect(control.receipt?.word).toBeUndefined();
+    expect(plain.pane.queued).toEqual(["then add a short summary"]);
+
+    const r = codexNoBox();
+    const first = await r.send("then add a short summary");
+    const answer = await r.send("then add a short summary", { rowsHash: first.rowsHash!, override: true, fromPhone: true });
+    expect(answer.receipt).toMatchObject({ outcome: control.receipt!.outcome, keys: control.receipt!.keys, word: "override" });
+    expect(answer.receipt?.queued).toBe(control.receipt?.queued);
+    expect(r.pane.keysSeen).toEqual(plain.pane.keysSeen);
+    expect(r.pane.queued).toEqual(plain.pane.queued);
+    expect(holds.list()).toEqual([]);
+  });
+
+  test("override: a turn that starts while the text is typed ends as a plain send does", async () => {
+    const arm = (pane: FakePane): void => {
+      pane.afterInput = (p, what) => {
+        if (what.endsWith("then give it a title")) p.over = [LIVE_ROW];
+      };
+    };
+    const plain = rig();
+    arm(plain.pane);
+    const control = await plain.send("then give it a title");
+    expect(control.receipt).toMatchObject({ outcome: "sent" });
+
+    const { pane, send } = rig();
+    arm(pane);
+    const answer = await send("then give it a title", { override: true, fromPhone: true });
+    expect(answer.receipt).toMatchObject({ outcome: control.receipt!.outcome, keys: control.receipt!.keys });
+    expect(answer.receipt?.queued).toBe(control.receipt?.queued);
+    expect(pane.keysSeen).toEqual(plain.pane.keysSeen);
   });
 });

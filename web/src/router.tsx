@@ -29,13 +29,17 @@ import {
   SettingsVoiceHostRoute,
   SettingsVoiceModelRoute,
   SettingsSystemRoute,
+  SettingsCharacterRoute,
   SettingsInstallCountRoute,
 } from "@/routes/settings-sections";
+import { SettingsAccountAddRoute, SettingsAccountRoute, SettingsAccountsRoute } from "@/routes/settings-accounts";
+import { SettingsChangeLoginRoute } from "@/routes/settings-change-login";
 import { CrewRoute } from "@/routes/crew";
 import { MachineRoute } from "@/routes/machine";
 import { MachinesRoute } from "@/routes/machines";
 import { UpdatesRoute } from "@/routes/updates";
 import { HillRoute } from "@/routes/hill";
+import { TrickCardRoute } from "@/routes/trick-card";
 import { PairApproveRoute } from "@/routes/pair-approve";
 import {
   devicesLoader,
@@ -106,6 +110,9 @@ export const router = createBrowserRouter([
       // The hill (M96): the Decisions agents posted, one level below the Dashboard. No loader: its
       // lists live in lib/hill/store.ts, kept current by the root loader.
       { path: "hill", element: <HillRoute /> },
+      // One card of Collie's own about a trick (M96 spec 14), with the Hill on or off. No loader: the card
+      // lives in lib/hill/store.ts, kept current by the root loader.
+      { path: "trick-card/:decisionId", element: <TrickCardRoute /> },
       // A paired browser answers another device's pairing request here (ADR 0139). Reached only from the
       // QR the new device shows (`?r=<public id>`); nothing in the app links to it. No loader: the page
       // reads the request itself, and a browser that is not paired is told so without a read.
@@ -126,7 +133,16 @@ export const router = createBrowserRouter([
         element: <SettingsRoute />,
       },
       { path: "settings/appearance", element: <SettingsAppearanceRoute /> },
+      // One level below Appearance, like Voice's two pages: which character the header draws.
+      { path: "settings/appearance/character", element: <SettingsCharacterRoute /> },
       { path: "settings/harnesses", element: <SettingsHarnessesRoute /> },
+      // Accounts (M101): a second login for an agent. The list, the Add form and one account's page. The row in
+      // the index is offered only while GET /api/accounts answers 200; the pages are routable always and
+      // say so when the machine offers none.
+      { path: "settings/accounts", element: <SettingsAccountsRoute /> },
+      { path: "settings/accounts/add", element: <SettingsAccountAddRoute /> },
+      { path: "settings/accounts/:id", element: <SettingsAccountRoute /> },
+      { path: "settings/accounts/:id/login", element: <SettingsChangeLoginRoute /> },
       { path: "settings/device", element: <SettingsDeviceRoute /> },
       { path: "settings/voice", element: <SettingsVoiceRoute /> },
       // Two pages below Voice: the host's option for every device, and the Whistle model's copies.

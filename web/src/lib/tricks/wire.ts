@@ -13,21 +13,45 @@
 import { asJsonBoolean, asJsonNumber, asJsonObject, asJsonString, type JsonObject, type JsonValue } from "../json";
 import {
   ABOUT_MAX,
+  ACCESS_LEVELS,
+  ACCESS_UNKNOWN,
   DESCRIPTION_MAX,
+  EVERY_MAX_MS,
+  EVERY_MIN_MS,
   INPUTS_MAX,
   INPUT_GLOB_MAX,
+  BOUND_SESSIONS_MAX,
   isHostName,
+  isScopeKey,
+  menuLabelProblem,
+  MENU_ROW_KINDS,
+  TRICK_ICONS,
   isTrickId,
+  isSourceUrl,
   isTrickText,
   NAME_MAX,
   OFFICIAL_STATES,
+  PLACE_KINDS,
+  RUN_MAX,
   rulesNameProblem,
   rulesTextProblems,
   TAP_CODES,
   TAP_REFUSALS,
+  TRICK_EVENTS,
   TRICK_WARNINGS_MAX,
+  VERSION_RE,
+  readWireFields,
+  WATCH_MAX,
+  WATCH_PATH_MAX,
   type OfficialState,
+  type PlaceKind,
+  type TrickEvent,
+  type TrickProvenance,
+  type WireRepoFacts,
   type OfficialTricksReply,
+  type MenuPart,
+  type MenuRow,
+  type WireBound,
   type TrickPart,
   type TrickTapReply,
   type TricksReply,
@@ -67,7 +91,7 @@ function readPart(raw: JsonValue | undefined): WireTrickPart | undefined {
   const value = asJsonObject(part.value);
   if (host === undefined || trick === undefined || id === undefined || rev === undefined || value === undefined) return undefined;
   if (!isPartValue(value)) return undefined;
-  const out: WireTrickPart = { host, trick, part: id, rev, value };
+  const out: WireTrickPart = { host, trick, part: id, rev, value: value.at === "menu" ? readMenuPart(value) : value };
   const asOf = asJsonString(part.asOf);
   if (asOf !== undefined) out.asOf = asOf;
   const fresh = asJsonString(part.fresh);
@@ -75,6 +99,65 @@ function readPart(raw: JsonValue | undefined): WireTrickPart | undefined {
   if (part.stale === true) out.stale = true;
   const problem = asJsonString(part.problem);
   if (problem !== undefined) out.problem = problem;
+  // Contract 2: a bound part's sessions and instances. One that does not read is no part at all: drawn
+  // without its binding it would show in every session.
+  if (part.bound !== undefined) {
+    const bound = readBound(part.bound);
+    if (bound === undefined) return undefined;
+    out.bound = bound;
+  }
+  return out;
+}
+
+/**
+ * A menu part's rows as this phone draws them (contract 2): each read again (a kind, an id, an intent, a
+ * label the label rule takes, an icon of the set, a switch's state). The bridge refused the rest
+ * already; a row that does not read here (an older or a newer bridge) is left out, never drawn half.
+ */
+function readMenuPart(value: JsonObject): MenuPart {
+  const rows: MenuRow[] = [];
+  for (const raw of Array.isArray(value.rows) ? value.rows : []) {
+    const row = readMenuRow(asJsonObject(raw));
+    if (row !== undefined) rows.push(row);
+  }
+  return { at: "menu", id: asJsonString(value.id) ?? "", rows };
+}
+
+function readMenuRow(obj: JsonObject | undefined): MenuRow | undefined {
+  if (obj === undefined) return undefined;
+  const id = asJsonString(obj.id);
+  const kindWord = asJsonString(obj.kind);
+  const label = asJsonString(obj.label);
+  const intent = asJsonString(obj.intent);
+  const iconWord = asJsonString(obj.icon);
+  const on = asJsonBoolean(obj.on);
+  const kind = MENU_ROW_KINDS.find((word) => word === kindWord);
+  const icon = TRICK_ICONS.find((word) => word === iconWord);
+  if (id === undefined || kind === undefined || label === undefined || intent === undefined) return undefined;
+  if (menuLabelProblem(label) !== undefined || (iconWord !== undefined && icon === undefined)) return undefined;
+  if (kind === "switch" && on === undefined) return undefined;
+  const row: MenuRow = { id, kind, label, intent };
+  if (icon !== undefined) row.icon = icon;
+  if (kind === "switch" && on !== undefined) row.on = on;
+  if (obj.disabled === true) row.disabled = true;
+  if (kind === "button" && obj.confirm === true) row.confirm = true;
+  return row;
+}
+
+/** A walky instance token: four characters of [a-z0-9] (bridge/walky/address.ts `INSTANCE_TOKEN`). */
+const INSTANCE_TOKEN = /^[a-z0-9]{4}$/u;
+
+/** A bound part's `bound`: 1 to {@link BOUND_SESSIONS_MAX} of a scope key and an instance token, or undefined. */
+function readBound(raw: JsonValue): WireBound[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > BOUND_SESSIONS_MAX) return undefined;
+  const out: WireBound[] = [];
+  for (const entry of raw) {
+    const obj = asJsonObject(entry);
+    const session = asJsonString(obj?.session);
+    const instance = asJsonString(obj?.instance);
+    if (session === undefined || !isScopeKey(session) || instance === undefined || !INSTANCE_TOKEN.test(instance)) return undefined;
+    out.push({ session, instance });
+  }
   return out;
 }
 
@@ -158,6 +241,33 @@ export function readInputs(raw: JsonValue | undefined): WireTrickInfo["inputs"] 
   return { globs, crew };
 }
 
+/** A trick's `on` events, read tolerantly: 1 to every event word once, each a word this phone knows. Anything else is left out. */
+export function readEvents(raw: JsonValue | undefined): TrickEvent[] | undefined {
+  const list = asJsonArray(raw);
+  if (list === undefined || list.length === 0 || list.length > TRICK_EVENTS.length) return undefined;
+  const events: TrickEvent[] = [];
+  for (const entry of list) {
+    const word = asJsonString(entry);
+    const known = TRICK_EVENTS.find((event) => event === word);
+    if (known === undefined) return undefined;
+    events.push(known);
+  }
+  return events;
+}
+
+/** A trick's `watch` paths, read tolerantly: 1 to `WATCH_MAX` strings of at most `WATCH_PATH_MAX` characters. Anything else is left out. */
+export function readWatch(raw: JsonValue | undefined): string[] | undefined {
+  const list = asJsonArray(raw);
+  if (list === undefined || list.length === 0 || list.length > WATCH_MAX) return undefined;
+  const paths: string[] = [];
+  for (const entry of list) {
+    const path = asJsonString(entry);
+    if (path === undefined || path === "" || [...path].length > WATCH_PATH_MAX) return undefined;
+    paths.push(path);
+  }
+  return paths;
+}
+
 /**
  * A trick's `description` or `about`, read tolerantly: kept only as a string within its cap with no control
  * or invisible character. Anything else is left out, as from an older bridge. `about` may hold line breaks.
@@ -182,6 +292,41 @@ export function readTrickRules(raw: JsonValue | undefined): WireTrickRules | und
   return rulesTextProblems(new TextEncoder().encode(text)).length === 0 ? { file, text } : undefined;
 }
 
+const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u;
+
+/**
+ * A repository's facts (bridge/tricks/repo-facts.ts), read as the bridge checked them: a whole number of stars,
+ * 0 or more, and an ISO instant in UTC. Only those two fields are kept; anything else leaves the facts out.
+ */
+export function readRepoFacts(raw: JsonValue | undefined): WireRepoFacts | undefined {
+  const body = asJsonObject(raw);
+  const stars = asJsonNumber(body?.stars);
+  const pushedAt = asJsonString(body?.pushedAt);
+  if (stars === undefined || !Number.isSafeInteger(stars) || stars < 0) return undefined;
+  if (pushedAt === undefined || !ISO_UTC.test(pushedAt) || !Number.isFinite(Date.parse(pushedAt))) return undefined;
+  return { stars, pushedAt };
+}
+
+/** A provenance with its `url` kept only when it is a link the sheet may draw. */
+function readProvenance(raw: TrickProvenance): TrickProvenance {
+  if (raw.url === undefined) return raw;
+  const url = asJsonString(raw.url);
+  if (url !== undefined && isSourceUrl(url)) return raw;
+  const { url: _dropped, ...rest } = raw;
+  return rest;
+}
+
+/** A row's settings (contract 3): the fields and values held to their rules, and the two flags as true or absent. */
+function readTrickFields(asked: JsonValue | undefined, kept: JsonValue | undefined, setup: true | undefined, unread: true | undefined): Pick<WireTrickInfo, "fields" | "values" | "needsSetup" | "valuesUnread"> {
+  const read = readWireFields(asked, kept);
+  if (read === undefined) return {};
+  const out: Pick<WireTrickInfo, "fields" | "values" | "needsSetup" | "valuesUnread"> = { fields: read.fields };
+  if (Object.keys(read.values).length > 0) out.values = read.values;
+  if (setup !== undefined) out.needsSetup = true;
+  if (unread !== undefined) out.valuesUnread = true;
+  return out;
+}
+
 /** One trick entry as the list and the switch route give it, or `undefined` for a body of another shape. */
 export function readTrick(raw: JsonValue | undefined): WireTrickInfo | undefined {
   // The closed words (`icon`, `state`, `places`) were written by the bridge from the schema's lists; the
@@ -199,8 +344,22 @@ export function readTrick(raw: JsonValue | undefined): WireTrickInfo | undefined
   const viewed = body.agentView;
   const approving = body.approves;
   const ruled = body.rules;
+  const versioned = body.version;
+  const known = body.repoFacts;
+  const replying = body.decidesReply;
+  const running = body.run;
+  const ticking = body.everyMs;
+  const asked = body.fields;
+  const kept = body.values;
+  const setup = asJsonBoolean(body.needsSetup) === true ? true : undefined;
+  const unread = asJsonBoolean(body.valuesUnread) === true ? true : undefined;
+  const reacting = body.events;
+  const watching = body.watch;
+  const leveled = body.access;
+  const accessOff = body.accessOff;
   if (!isTrickValue(body)) return undefined;
-  if (sent === undefined && waiting === undefined && reads === undefined && body.auto === undefined && body.autoAt === undefined && described === undefined && told === undefined && viewed === undefined && ruled === undefined && body.rulesUnshown === undefined && approving === undefined) return body;
+  if (body.provenance !== undefined) body.provenance = readProvenance(body.provenance);
+  if (sent === undefined && waiting === undefined && reads === undefined && body.auto === undefined && body.autoAt === undefined && described === undefined && told === undefined && viewed === undefined && ruled === undefined && body.rulesUnshown === undefined && approving === undefined && versioned === undefined && known === undefined && replying === undefined && running === undefined && ticking === undefined && reacting === undefined && watching === undefined && leveled === undefined && accessOff === undefined && asked === undefined && kept === undefined && setup === undefined && unread === undefined) return body;
   // The fields read past the frame: the Tricks card lists them, so their shapes are held here. One of
   // another shape is left out, as from an older bridge.
   const warnings = readWarnings(sent);
@@ -209,18 +368,40 @@ export function readTrick(raw: JsonValue | undefined): WireTrickInfo | undefined
   const description = readTrickText(described, "description");
   const about = readTrickText(told, "about");
   const rules = readTrickRules(ruled);
-  const { warnings: _sent, pending: _waiting, auto: _auto, autoAt: _autoAt, inputs: _reads, description: _described, about: _told, agentView: _viewed, rules: _ruled, rulesUnshown: _unshown, approves: _approves, ...rest } = body;
+  const { warnings: _sent, pending: _waiting, auto: _auto, autoAt: _autoAt, inputs: _reads, description: _described, about: _told, agentView: _viewed, rules: _ruled, rulesUnshown: _unshown, approves: _approves, version: _versioned, repoFacts: _known, decidesReply: _replying, run: _running, everyMs: _ticking, events: _reacting, watch: _watching, access: _leveled, accessOff: _accessOff, fields: _asked, values: _kept, needsSetup: _setup, valuesUnread: _unread, ...rest } = body;
   const out: WireTrickInfo = warnings.length === 0 ? rest : { ...rest, warnings };
   if (pending !== undefined) out.pending = pending;
   if (inputs !== undefined) out.inputs = inputs;
+  const events = readEvents(reacting);
+  if (events !== undefined) out.events = events;
+  const watch = readWatch(watching);
+  if (watch !== undefined) out.watch = watch;
+  // The declared level of the local API (M105 spec 04): one of two words this phone knows. Any other text is a
+  // level of a newer bridge: kept as `unknown`, so the row says it and offers no switch on (review 3, item 4).
+  const level = ACCESS_LEVELS.find((word) => word === leveled) ?? ((asJsonString(leveled) ?? "") === "" ? undefined : ACCESS_UNKNOWN);
+  if (level !== undefined) out.access = level;
+  if (accessOff === true && level !== undefined) out.accessOff = true;
   if (description !== undefined) out.description = description;
   if (about !== undefined) out.about = about;
   if (auto !== undefined) out.auto = auto;
   if (autoAt !== undefined && Number.isFinite(Date.parse(autoAt))) out.autoAt = autoAt;
   if (viewed === true) out.agentView = true;
+  // Declared in the manifest of what runs: its Decisions may answer into a session (the token label reads it).
+  if (replying === true) out.decidesReply = true;
   const approves = asJsonString(approving);
   if (approves !== undefined && /^[0-9a-f]{64}$/u.test(approves)) out.approves = approves;
   if (rules !== undefined) out.rules = rules;
+  const version = asJsonString(versioned);
+  if (version !== undefined && VERSION_RE.test(version)) out.version = version;
+  const facts = readRepoFacts(known);
+  if (facts !== undefined) out.repoFacts = facts;
+  // The run line and the timer, read as the manifest holds them: one line of printable text within RUN_MAX,
+  // and a whole number of milliseconds within the timer's bounds. Anything else is left out, as from an older bridge.
+  const run = asJsonString(running);
+  if (run !== undefined && isTrickText(run, { max: RUN_MAX })) out.run = run;
+  const every = asJsonNumber(ticking);
+  if (every !== undefined && Number.isSafeInteger(every) && every >= EVERY_MIN_MS && every <= EVERY_MAX_MS) out.everyMs = every;
+  Object.assign(out, readTrickFields(asked, kept, setup, unread));
   // Review 8 V-N5: rules that were sent but do not read, or an agent view that came without them, are kept
   // as a state of their own, never dropped: the trick cannot be switched on from this phone.
   if (rules === undefined && (ruled !== undefined || viewed === true)) out.rulesUnshown = true;
@@ -249,6 +430,8 @@ export function readTricksReply(raw: JsonValue | undefined): TricksReply | undef
   if (runsOn !== undefined) reply.runsOn = runsOn;
   // The Windows gate: a word of another shape is left out, so an older or newer bridge reads as ungated.
   if (body.gate === "windows") reply.gate = "windows";
+  // Tricks switched off as a whole: only the word `true` counts, so a value of another shape reads as on.
+  if (body.off === true) reply.off = true;
   return reply;
 }
 
@@ -265,6 +448,18 @@ function readRunsOn(raw: JsonValue | undefined): TricksRunsOn | undefined {
 
 function isOfficialState(text: string | undefined): text is OfficialState {
   return OFFICIAL_STATES.some((state) => state === text);
+}
+
+/** The places of an official entry this phone draws, each once, in the list's order; any other word is left out. */
+function readOfficialPlaces(raw: JsonValue | undefined): PlaceKind[] {
+  const list = asJsonArray(raw) ?? [];
+  const out: PlaceKind[] = [];
+  for (const value of list.slice(0, PLACE_KINDS.length)) {
+    const word = asJsonString(value);
+    const kind = PLACE_KINDS.find((place) => place === word);
+    if (kind !== undefined && !out.includes(kind)) out.push(kind);
+  }
+  return out;
 }
 
 /** One entry of the official list, or `undefined` when a field is of another shape. */
@@ -285,6 +480,13 @@ function readOfficialTrick(raw: JsonValue | undefined): WireOfficialTrick | unde
   if (body.unlisted === true && state === "taken") out.unlisted = true;
   if (body.changed === true && state === "taken") out.changed = true;
   if (body.givesRules === true) out.givesRules = true;
+  if (body.addsMenu === true) out.addsMenu = true;
+  const facts = readRepoFacts(body.repoFacts);
+  if (facts !== undefined) out.repoFacts = facts;
+  const places = readOfficialPlaces(body.places);
+  if (places.length > 0) out.places = places;
+  if (body.agentView === true) out.agentView = true;
+  if (body.decidesReply === true) out.decidesReply = true;
   return out;
 }
 

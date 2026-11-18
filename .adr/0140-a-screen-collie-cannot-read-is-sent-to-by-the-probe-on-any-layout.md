@@ -4,7 +4,6 @@
   turn down
 - **Date:** 2026-11-04, amended 2026-11-10 with a throwaway PoC of both panes' versions (pi 1.4.0 +
   `pi-sidebar-tui` 1.7.8, Hermes v0.23.0 Ink, Herdr 0.9.5, tmux 3.8) against a logging fake model
-- **Shipped in:** pending
 - **Trail:** the blind road, taken by three Herdr phone relays that send without finding a box:
   [0cv/herdr-mobile-relay](https://github.com/0cv/herdr-mobile-relay) (`internal/herdr/client.go`
   `Prompt`, which runs `herdr agent prompt`), [dcolinmorgan/herdr-remote](https://github.com/dcolinmorgan/herdr-remote)
@@ -96,14 +95,12 @@ the bridge's reads were never cut.
    `shadow.ts`, `clear.ts`, `ask.ts`, `stop.ts`, `trace.ts`) and by the phone's readers. A read cut
    this way binds by `expected_columns` (`column-range.ts`). OmO's panel draws no separator, so its
    signs stay in `pi/panel.ts`.
-2. **Ticking is observed, never listed.** S0 already reads twice. A row that differs between the two
-   reads only in its digits is a ticking row: the stability check and the rows hash read its digits
-   as a fixed mark. The two taps of a manual Send are two reads too: the rows hash is a raw hash and a
-   hash with the digits of every row but the box's own read as a fixed mark, and the confirm passes if
-   either agrees. A row that changed in anything but digits still moves the screen, and so does a
-   digit in the box. With no frame there is no box to spare, so a Submit or Discard of text left in
-   the pane confirms on the raw hash alone; a send that is probed and read back keeps either. No
-   profile names a clock.
+2. **Observed ticking can settle S0, but cannot authorize a key.** S0 reads twice and can tolerate
+   digit-only changes outside the box for its stability check. Confirmation hashes preserve those
+   digits: a second Send tap, Submit, or Discard requires the same checked rows. A changed number
+   may change a price, count, or dialog choice, not merely advance a clock. Only the explicit
+   upstream override may use its loose comparison, and that path types without pressing a key.
+   This replaces broad digit tolerance between taps, approved by the operator during upstream sync.
 3. **The launch window also ends on the multiplexer's word.** It ends when the multiplexer reports
    the starting harness `idle` or `working`. pi reports that from Herdr's own pi extension
    (`herdr-agent-state.ts`), not from the screen. Without such a report it ends as it does today.
@@ -125,13 +122,12 @@ picker.
 
 ## Consequences
 
-- **Both panes send after one confirm tap**, probed, with the text read back before Enter.
+- **A confirm can send only while the checked rows still match**, probed, with the text read back
+  before Enter. An unread screen with a clock may require another attempt or a terminal send.
 - **The confirm tap stays on every screen Collie cannot read.** That is the price of not trusting a
   state Collie cannot see. A Hermes Ink profile removes it for Hermes alone.
-- **A changed number reads as the same screen** when nothing else on its row changed: between S0's
-  two reads, and between the two taps of a confirm on any row outside the box. That is the price: a
-  countdown in a dialog option, a cost or a token count that moved after the person looked no longer
-  stales the confirm. A word that changed still does.
+- **A changed number invalidates a confirmation.** S0 stability does not grant permission to
+  ignore a later change. Native inbox delivery does not depend on these screen hashes.
 - **The cut can claim a real two-column program** whose divider spans every row. Its right column is
   dropped. If the input box sits in that column, the pane reads unknown, as it does today.
 - **An agent the multiplexer has not named yet costs a tap.** A send in the first seconds of a
